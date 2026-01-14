@@ -8,8 +8,8 @@ import glob
 import os
 from typing import Optional, List, Tuple
 
-st.set_page_config(layout="wide", page_title="Comparison View")
-st.title("Comparison Dashboard")
+st.set_page_config(layout="wide", page_title="Object Detection")
+st.title("Object Detection Evaluation Dashboard")
 
 # =============================
 # DuckDB Connection
@@ -385,7 +385,7 @@ try:
     """
     df_summary = con.execute(query_base).df()
 
-    # New: count for each status, grouped by label (for both files)
+    # Get status counts grouped by dataset, label, status
     query_status = f"""
     SELECT 
         'Target' AS dataset,
@@ -406,7 +406,6 @@ try:
     """
     df_status = con.execute(query_status).df()
 
-    # Show the main summary as before
     st.write("**t4dataset Count Summary**")
     if not df_summary.empty:
         fig = px.bar(
@@ -420,15 +419,23 @@ try:
     else:
         st.info("No data available")
 
-    # Show the status summary by label and by status
-    st.write("**Status Count by Label and Status**")
+    # ---- Enhanced Table View: Status × label, wide format for better visibility ----
+    st.write("**Status Count Table (rows=label, cols=Target/Compared × Status)**")
     st.markdown("""
-    Shows the number of samples in each label × status combination, for both datasets/files.
+    Status count for both datasets. Columns are in the form "Target TP", "Target FP", etc., to allow easy comparison.
     """)
-    st.dataframe(df_status)
 
-    # Also: stacked bar plot for label × status for each dataset
     if not df_status.empty:
+        # Pivot table for wide display: index=label, columns=[dataset, status], values=num
+        df_status_wide = df_status.pivot_table(index='label', columns=['dataset', 'status'], values='num', fill_value=0)
+
+        # Flatten columns to e.g. "Target TP"
+        df_status_wide.columns = [f"{col[0]} {col[1]}" for col in df_status_wide.columns]
+        df_status_wide = df_status_wide.reset_index()
+
+        st.dataframe(df_status_wide)
+
+        # Also: stacked bar plot for label × status for each dataset
         fig2 = px.bar(
             df_status,
             x="label",
@@ -441,6 +448,10 @@ try:
             labels={"num": "Count", "label": "Label", "status": "Status"}
         )
         st.plotly_chart(fig2, use_container_width=True)
+
+    else:
+        st.info("No status count data available")
+
 except Exception as e:
     st.error(f"Error in summary: {e}")
 
@@ -456,10 +467,6 @@ with col1:
     try:
         filter_clause = build_filter_clause(filters_base)
 
-        # Display the filtered result data for inspection
-        debug_query = f"SELECT * FROM view_eval_flat WHERE {filter_clause} LIMIT 20"
-        df_debug = con.execute(debug_query).df()
-        st.expander("Show filtered result data (first 20 rows)").dataframe(df_debug)
         query = f"""
         SELECT
             label,
@@ -475,7 +482,6 @@ with col1:
         ORDER BY label
         """
         df_tpr_base = con.execute(query).df()
-        st.dataframe(df_tpr_base)
         if not df_tpr_base.empty:
             fig = px.bar(
                 df_tpr_base,

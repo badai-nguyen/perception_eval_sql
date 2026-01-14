@@ -4,6 +4,26 @@ import plotly.express as px
 
 st.set_page_config(layout="wide")
 st.title("Criteria-based Evaluation Viewer")
+
+# =========================
+# Safety check
+# =========================
+if "runA" not in st.session_state:
+    st.warning("Please load data from the Overview page first.")
+    st.stop()
+
+mode = st.session_state.get("mode", "Single Run")
+
+runA = st.session_state["runA"]
+df_raw_A = runA["score"]
+
+runB = st.session_state.get("runB")
+df_raw_B = runB["score"] if runB else None
+
+# =========================
+# Constants
+# =========================
+
 BASE_COLS = ["Scenario", "Option", "GT_OBJ"]
 
 CRITERIA_COLS = [
@@ -37,18 +57,26 @@ BLOCK_COLS = [
 ]
 
 BLOCK_SIZE = len(CRITERIA_COLS)
-st.subheader("Raw Data Check")
-df_raw = pd.read_csv(
-    "data/Score.csv",
-    header=None,
-    engine="python",
-    names=["Scenario", "Option", "GT_OBJ", "Distance0", "NM0", "TP/TN0", "ADD0", "AIL0", "UIL0", "PFN/PFP0", "UUID Num0", "Practical Pass Rate0", "MAX_DIST_THRESH0", "OBJ_CNTS0",
-    "Distance1", "NM1", "TP/TN1", "ADD1", "AIL1", "UIL1", "PFN/PFP1", "UUID Num1", "Practical Pass Rate1", "MAX_DIST_THRESH1", "OBJ_CNTS1",
-    "Distance2", "NM2", "TP/TN2", "ADD2", "AIL2", "UIL2", "PFN/PFP2", "UUID Num2", "Practical Pass Rate2", "MAX_DIST_THRESH2", "OBJ_CNTS2",
-    "Distance3", "NM3", "TP/TN3", "ADD3", "AIL3", "UIL3", "PFN/PFP3", "UUID Num3", "Practical Pass Rate3", "MAX_DIST_THRESH3", "OBJ_CNTS3",
-    ],
-)
-st.dataframe(df_raw.head(10), use_container_width=True)
+
+
+# =========================
+# View selector (compare)
+# =========================
+if mode == "Compare Mode":
+    view = st.sidebar.selectbox(
+        "View",
+        ["Baseline (A)", "Candidate (B)"],
+    )
+    df_raw = df_raw_A if view == "Baseline (A)" else df_raw_B
+else:
+    df_raw = df_raw_A
+    view = "Single Mode"
+
+# =========================
+# Raw data check
+# =========================
+st.subheader(f"Raw Data Check — {view}")
+st.dataframe(df_raw.head(10), width="stretch")
 
 criteria_idx = st.sidebar.selectbox(
     "Select Criteria",
@@ -83,7 +111,7 @@ for c in NUM_COLS:
     df_view[c] = pd.to_numeric(df_view[c], errors="coerce")
 
 st.subheader(f"Criteria {criteria_idx} Data")
-st.dataframe(df_view, use_container_width=True)
+st.dataframe(df_view, width="stretch")
 
 
 st.sidebar.subheader("Visualization Controls")
@@ -109,7 +137,7 @@ fig = px.histogram(
     marginal="box",
 )
 
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
 
 st.subheader(f"Average {metric} by {group_by}")
 
@@ -127,7 +155,7 @@ fig = px.bar(
     text_auto=".2f",
 )
 
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
 
 
 st.subheader("Pass Rate Overview")
@@ -139,5 +167,5 @@ fig = px.box(
     points="all",
 )
 
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
 

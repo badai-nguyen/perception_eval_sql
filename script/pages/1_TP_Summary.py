@@ -3,8 +3,6 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 
-DEFAULT_A = "data/Summary.csv"
-DEFAULT_B = "data/Summary_compare.csv"  # optional
 DTYPES = {
     "id": "string",
     "TP": "float64",
@@ -30,54 +28,77 @@ def load_summary(file_or_path):
 st.set_page_config(layout="wide")
 st.title("TP / Position / Velocity Statistics Viewer")
 
-# GLOBAL PAGE MODE
-st.sidebar.header("Run Selection")
+# =========================
+# Safety check
+# =========================
+if "runA" not in st.session_state:
+    st.warning("Please load data from the Overview page first.")
+    st.stop()
 
-st.sidebar.caption("Default data path:")
-st.sidebar.code(DEFAULT_A)
-file_a_upload = st.sidebar.file_uploader(
-    "Override Run A (optional)",
-    type=["csv"],
-    key="upload_a",
-)
+mode = st.session_state.get("mode", "Single Run")
 
-file_a = file_a_upload if file_a_upload else DEFAULT_A
-
-
-mode = st.sidebar.radio(
-    "Mode",
-    ["Single Run", "Compare Runs"],
-)
-
-if mode == "Single Run":
-    st.subheader("Single Run")
-elif mode == "Compare Runs":
-    st.subheader("Compare Runs")
-
-# Load data
-
-df_a = load_summary(file_a)
-
-if mode == "Compare Runs":
-    df_b = load_summary(DEFAULT_B)
-
-st.subheader("Raw Data Check")
-st.dataframe(df_a.head(10), width="stretch")
+runA = st.session_state["runA"]
+df_a = runA["summary"]
+if mode == "Compare Mode":
+    runB = st.session_state.get("runB")
+    df_b = runB["summary"]
+    df_cmp = st.session_state.get("df_cmp")
 
 
-# Sidebar controls
+# =========================
+# View selector (compare only)
+# =========================
+if mode == "Compare Mode":
+    view = st.sidebar.selectbox(
+        "View",
+        ["Baseline (A)", "Candidate (B)", "Delta (B - A)"],
+    )
+
+    if view == "Baseline (A)":
+        df_active = df_a.copy()
+    elif view == "Candidate (B)":
+        df_active = df_b.copy()
+    else:
+        df_active = df_cmp.copy()
+else:
+    df_active = df_a.copy()
+    view = "Single Run"
+
+# =========================
+# Debug controls
+# =========================
+show_debug = st.sidebar.checkbox("Show debug info", value=False)
+
+# =========================
+# Header
+# =========================
+st.subheader(f"{view} View")
+
+# =========================
+# Raw data (if debug)
+# =========================
+if show_debug:
+    st.subheader("Raw Data Check")
+    st.dataframe(df_active.head(10), width="stretch")
+
+
+# =========================
+# Sidebar filters
+# =========================
 st.sidebar.header("Filters")
 tp_min, tp_max = st.sidebar.slider(
     "TP range (%)",
-    float(df_a.TP.min()),
-    float(df_a.TP.max()),
+    float(df_active.TP.min()),
+    float(df_active.TP.max()),
     (40.0, 80.0),
 )
 
 clip_vel = st.sidebar.checkbox("Clip velocity outliers", value=True)
 
-# Filter
-df_f = df_a[(df_a.TP >= tp_min) & (df_a.TP <= tp_max)]
+# =========================
+# Filtering
+# =========================
+df_f = df_active[(df_active.TP >= tp_min) & (df_active.TP <= tp_max)].copy()
 
 # Optional velocity clipping (for insane outlier)
 if clip_vel:
@@ -85,11 +106,15 @@ if clip_vel:
         q1, q99 = df_f[c].quantile([0.01, 0.99])
         df_f[c] = df_f[c].clip(q1, q99)
 
-# Show table
+# =========================
+# Filtered table
+# =========================
 st.subheader("Filtered Data")
 st.dataframe(df_f, width="stretch")
 
-# --- Scatter plots ---
+# =========================
+# Scatter plots
+# =========================
 c1, c2 = st.columns(2)
 
 with c1:
@@ -118,7 +143,9 @@ with c2:
     )
     st.plotly_chart(fig, width="stretch")
 
-# --- Distribution ---
+# =========================
+# Distribution
+# =========================
 st.subheader("Metric Distribution")
 metric = st.selectbox(
     "Select metric",

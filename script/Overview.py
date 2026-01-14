@@ -50,7 +50,7 @@ def build_summary_delta(df_a, df_b):
 def create_filter_widgets(all_runs_data):
     """Create common filter widgets for all runs, called only once"""
     
-    # 收集所有运行中的唯一标签
+    # Collect all unique labels from all runs
     all_perception_labels = set()
     all_product_labels = set()
     
@@ -59,11 +59,11 @@ def create_filter_widgets(all_runs_data):
         all_perception_labels.update(summary["perception_label"].dropna().unique())
         all_product_labels.update(summary["product_label"].dropna().unique())
     
-    # 排序标签
+    # Sort labels
     perception_labels = sorted(all_perception_labels)
     product_labels = sorted(all_product_labels)
     
-    # 产品标签映射（保持不变）
+    # Product label mapping (keep as is)
     PRODUCT_LABEL_JA = {
         "Occlusion-Case": "遮蔽ケース",
         "False-Positive-Grass": "草誤検知（草停止）",
@@ -89,20 +89,20 @@ def create_filter_widgets(all_runs_data):
         "Missed-Detection-Other": "その他ロスト",
     }
     
-    # 创建产品标签映射
+    # Create product label mapping
     ja_label_lookup = {k: v for k, v in PRODUCT_LABEL_JA.items()}
     label2ja = {label: ja_label_lookup.get(label, label) for label in product_labels}
     ja2label = {v: k for k, v in label2ja.items()}
     ja_cand = [label2ja.get(label, label) for label in product_labels]
     
-    # 初始化会话状态
+    # Initialize session state
     if "selected_perception_labels" not in st.session_state:
         st.session_state["selected_perception_labels"] = perception_labels
     
     if "selected_product_ja_labels" not in st.session_state:
         st.session_state["selected_product_ja_labels"] = ja_cand
     
-    # 创建部件（只调用一次）
+    # Create widgets (called only once)
     selected_perception_labels = st.sidebar.multiselect(
         "Perception Label Filter",
         perception_labels,
@@ -117,11 +117,11 @@ def create_filter_widgets(all_runs_data):
         key="product_filter_widget"
     )
     
-    # 更新会话状态
+    # Update session state
     st.session_state["selected_perception_labels"] = selected_perception_labels
     st.session_state["selected_product_ja_labels"] = selected_ja_labels
     
-    # 将日语标签转换回原始标签
+    # Convert Japanese labels back to original labels
     selected_product_labels = [ja2label[ja] for ja in selected_ja_labels] if selected_ja_labels else []
     
     return {
@@ -137,11 +137,11 @@ def apply_filters(run_data, filters):
     """Apply filters to a single run's data."""
     summary = run_data["summary"].copy()
     
-    # 应用感知标签过滤
+    # Apply perception label filtering
     if filters["perception_labels"]:
         summary = summary[summary["perception_label"].isin(filters["perception_labels"])]
     
-    # 应用产品标签过滤
+    # Apply product label filtering
     if filters["product_labels"]:
         summary = summary[summary["product_label"].isin(filters["product_labels"])]
     
@@ -164,71 +164,6 @@ def load_run(run_dir: Path):
         names=SUMMARY_DTYPES.keys(),
         dtype=SUMMARY_DTYPES,
     )
-
-    # # Add filter for perception_label, default is all selected
-    # perception_labels = sorted(summary["perception_label"].dropna().unique())
-    # if len(perception_labels) == 0:
-    #     selected_labels = []
-    # else:
-    #     # To avoid adding the widget twice and causing Streamlit reruns, give a unique key, and
-    #     # cache the widget's value in session_state
-    #     if "selected_perception_labels" not in st.session_state:
-    #         st.session_state["selected_perception_labels"] = perception_labels
-    #         selected_labels = st.sidebar.multiselect(
-    #             "Perception Label Filter",
-    #             perception_labels,
-    #             default=st.session_state["selected_perception_labels"],
-    #             key="selected_perception_labels"
-    #         )
-    #     if selected_labels:
-    #         summary = summary[summary["perception_label"].isin(selected_labels)]
-
-
-    # # Product label mapping: English key to Japanese description
-    # PRODUCT_LABEL_JA = {
-    #     "Occlusion-Case": "遮蔽ケース",
-    #     "False-Positive-Grass": "草誤検知（草停止）",
-    #     "False-Positive-Ground": "地面誤検知",
-    #     "False-Positive-Splash": "水しぶき 誤検知",
-    #     "False-Positive-Exhaust-Fog": "排ガス・霧 誤検知",
-    #     "Missed-Detection-Animal": "動物ロスト（犬）",
-    #     "Missed-Detection-Falling-Object": "落下物未検知",
-    #     "Missed-Detection-Pedestrian-Child": "歩行者未検知：子供",
-    #     "Missed-Detection-Pedestrian-Umbrella": "歩行者未検知：傘",
-    #     "Missed-Detection-Pedestrian-Crouching": "歩行者未検知：しゃがむ",
-    #     "Missed-Detection-Pedestrian-Near-Structure": "歩行者未検知：構造物に近い",
-    #     "False-Positive-Truck": "トラック誤検知",
-    #     "Pose-Estimation-Yaw-Error": "Yawおかしい",
-    #     "Long-Range-Detection-Failure": "遠方見えない",
-    #     "Ghost-Object": "ミサイル",
-    #     "Sudden-Fast-Vehicle-Ghost": "高速車両の突然出現・急ブレーキ誘発",
-    #     "Misclassification-Structure-Grass-as-Pedestrian": "構造物・草を人に誤検知",
-    #     "Misclassification-Structure-Grass-as-Vehicle": "構造物・草を車両に誤検知",
-    #     "Misclassification-Bike-Motorcycle": "自転車・バイクのミスラベル",
-    #     "Missed-Detection-Unridden-Bike": "人の乗ってないバイク自転車ロスト",
-    #     "Missed-Detection-Traffic-Cone": "カラーコーンが認識できない",
-    #     "Missed-Detection-Other": "その他ロスト",
-    # }
-
-    # product_labels = sorted(summary["product_label"].dropna().unique())
-    # # Map product label codes (possibly unseen) to Japanese, fall back to original label if unknown
-    # ja_label_lookup = {k: v for k, v in PRODUCT_LABEL_JA.items()}
-    # ja_cand = [ja_label_lookup.get(label, label) for label in product_labels]
-    # label2ja = {label: ja_label_lookup.get(label, label) for label in product_labels}
-    # ja2label = {v: k for k, v in label2ja.items()}
-
-    # if len(product_labels) == 0:
-    #     selected_ja_labels = []
-    # else:
-    #     selected_ja_labels = st.sidebar.multiselect(
-    #         "Product Label Filter",
-    #         ja_cand,
-    #         default=ja_cand
-    #     )
-    #     if selected_ja_labels:
-    #         selected_labels = [ja2label[ja] for ja in selected_ja_labels]
-    #         summary = summary[summary["product_label"].isin(selected_labels)]
-
 
     score = pd.read_csv(score_path, header=None, engine="python", names=["Scenario", "Option", "GT_OBJ", "Distance0", "NM0", "TP/TN0", "ADD0", "AIL0", "UIL0", "PFN/PFP0", "UUID Num0", "Practical Pass Rate0", "MAX_DIST_THRESH0", "OBJ_CNTS0",
     "Distance1", "NM1", "TP/TN1", "ADD1", "AIL1", "UIL1", "PFN/PFP1", "UUID Num1", "Practical Pass Rate1", "MAX_DIST_THRESH1", "OBJ_CNTS1",
