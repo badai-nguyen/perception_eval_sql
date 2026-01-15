@@ -84,8 +84,6 @@ def create_filter_widgets(all_runs_data):
     perception_labels = sorted(all_perception_labels)
     product_labels = sorted(all_product_labels)
     
-
-    
     # Create product label mapping
     ja_label_lookup = {k: v for k, v in PRODUCT_LABEL_JA.items()}
     label2ja = {label: ja_label_lookup.get(label, label) for label in product_labels}
@@ -175,6 +173,45 @@ def display_metric_with_stats_single(metric_name, series):
         f"min {series.min():.4f} · max {series.max():.4f}"
     )
 
+def show_grouped_metrics(df, group_col, label_map=None, mode="single", df_b=None):
+    """
+    Display group-wise metrics for a label column.
+    - df: summary DataFrame for run A (or filtered for single mode)
+    - group_col: column to group by (e.g., 'perception_label', 'product_label')
+    - label_map: optional mapping to display Japanese label names
+    - mode: 'single' or 'compare'
+    - df_b: summary DataFrame for run B (also filtered), required in compare mode
+    """
+    st.markdown(f"#### Metrics by {group_col.replace('_', ' ').title()}")
+    metrics = ["TP", "xstd", "ystd", "xrms", "yrms"]
+    if group_col not in df.columns or df.empty or (mode == "compare" and df_b is not None and df_b.empty):
+        st.info("No data for group breakdown.")
+        return
+
+    group_vals = sorted(df[group_col].dropna().unique())
+    if not group_vals:
+        st.info("No group values found.")
+        return
+
+    for val in group_vals:
+        ja_label = label_map[val] if label_map and val in label_map else val
+        with st.expander(f"{ja_label}", expanded=False):
+            col1, col2, col3, col4, col5 = st.columns(5)
+            if mode == "single":
+                for idx, (metric, col) in enumerate(zip(metrics, [col1, col2, col3, col4, col5])):
+                    series = df[df[group_col]==val][metric]
+                    with col:
+                        display_metric_with_stats_single(metric, series)
+            elif mode == "compare" and df_b is not None:
+                df_a_grp = df[df[group_col]==val]
+                df_b_grp = df_b[df_b[group_col]==val]
+                if not df_a_grp.empty and not df_b_grp.empty:
+                    for idx, (metric, col) in enumerate(zip(metrics, [col1, col2, col3, col4, col5])):
+                        with col:
+                            display_metric_with_stats(metric, df_a_grp[metric], df_b_grp[metric])
+                else:
+                    st.warning(f"No matching data for group: {ja_label}")
+
 # =========================
 # Sidebar — Global State
 # =========================
@@ -186,8 +223,6 @@ mode = st.sidebar.radio(
     ["Single Mode", "Compare Mode"],
 )
 st.session_state["mode"] = mode
-
-
 
 # =========================
 # Config
@@ -215,9 +250,6 @@ if mode == "Compare Mode":
 # =========================
 # Load Data (ONCE)
 # =========================
-
-
-
 
 if mode == "Compare Mode":
     try:
@@ -287,11 +319,26 @@ if mode == "Compare Mode":
         display_metric_with_stats("XSTD", df_summary_a["xstd"], df_summary_b["xstd"])
     with col4:
         display_metric_with_stats("YSTD", df_summary_a["ystd"], df_summary_b["ystd"])
+    # Show group-by summaries for perception_label and product_label
+    show_grouped_metrics(
+        df_summary_a,
+        group_col="perception_label",
+        label_map=None,
+        mode="compare",
+        df_b=df_summary_b
+    )
+    show_grouped_metrics(
+        df_summary_a,
+        group_col="product_label",
+        label_map=st.session_state.get("runA", {}).get("summary", {}).get("product_label", pd.Series()).map(PRODUCT_LABEL_JA).to_dict() if not df_summary_a.empty else PRODUCT_LABEL_JA,  # fallback to PRODUCT_LABEL_JA
+        mode="compare",
+        df_b=df_summary_b
+    )
 else:
     df_summary = runA["summary"]
     tp_mean_a = df_summary["TP"].mean()
     st.metric("TP mean", f"{tp_mean_a:.2f}")
-    
+
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         display_metric_with_stats_single("XRMS", df_summary["xrms"])
@@ -301,6 +348,19 @@ else:
         display_metric_with_stats_single("XSTD", df_summary["xstd"])
     with col4:
         display_metric_with_stats_single("YSTD", df_summary["ystd"])
+    # Show group-by summaries for perception_label and product_label
+    show_grouped_metrics(
+        df_summary,
+        group_col="perception_label",
+        label_map=None,
+        mode="single"
+    )
+    show_grouped_metrics(
+        df_summary,
+        group_col="product_label",
+        label_map=df_summary.get("product_label", pd.Series()).map(PRODUCT_LABEL_JA).to_dict() if not df_summary.empty else PRODUCT_LABEL_JA,
+        mode="single"
+    )
 
 
 # Gen2_Perception_DevOps_On_Vehicle_Shiojiri
