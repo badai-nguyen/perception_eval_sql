@@ -372,6 +372,11 @@ uuid_perf = (
       .reset_index()
 )
 
+# Make sure 'TP' and 'FN' columns are present, else fill with 0
+for col in ['TP', 'FN']:
+    if col not in uuid_perf.columns:
+        uuid_perf[col] = 0
+
 uuid_perf["total"] = uuid_perf["TP"] + uuid_perf["FN"]
 uuid_perf["FN_rate"] = uuid_perf["FN"] / uuid_perf["total"].replace(0, np.nan)
 
@@ -382,20 +387,29 @@ uuid_perf = uuid_perf[uuid_perf["total"] > 0]
 uuid_perf_sorted = uuid_perf.sort_values("FN_rate", ascending=False)
 
 # 表示
-st.dataframe(
-    uuid_perf_sorted[["uuid", "label", "TP", "FN", "total", "FN_rate"]]
-        .head(30)
-        .style.format({"FN_rate": "{:.2%}"})
-)
+if not uuid_perf_sorted.empty:
+    st.dataframe(
+        uuid_perf_sorted[["uuid", "label", "TP", "FN", "total", "FN_rate"]]
+            .head(30)
+            .style.format({"FN_rate": "{:.2%}"})
+    )
+else:
+    st.info("No GT objects with TP or FN were found.")
 
 st.markdown("### 🔍 Inspect a Specific GT Object")
 
-bad_uuid = st.selectbox("Select UUID to visualize", uuid_perf_sorted["uuid"].head(50))
+if not uuid_perf_sorted.empty:
+    bad_uuid = st.selectbox("Select UUID to visualize", uuid_perf_sorted["uuid"].head(50))
+else:
+    bad_uuid = None
 
-uuid_traj = (
-    df[(df["uuid"] == bad_uuid) & (df["source"] == "GT")]
-    .sort_values("frame_index")
-)
+if bad_uuid is not None:
+    uuid_traj = (
+        df[(df["uuid"] == bad_uuid) & (df["source"] == "GT")]
+        .sort_values("frame_index")
+    )
+else:
+    uuid_traj = pd.DataFrame()
 
 if not uuid_traj.empty:
     # --- marker symbol by status ---

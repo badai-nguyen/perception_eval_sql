@@ -149,19 +149,31 @@ def apply_filters(run_data, filters):
 
 
 
-def display_metric_with_stats(metric_name, delta_series):
-    """Display metric with comprehensive statistics."""
+def display_metric_with_stats(metric_name, series_a, series_b):
+    """Display metric with comprehensive statistics for delta (A - B)."""
     st.metric(
-        f"{metric_name} mean Δ",
-        f"{delta_series.mean():+.4f}",
+        f"{metric_name} mean",
+        f"{series_b.mean():.4f}",
+        delta=f"{series_b.mean() - series_a.mean():.4f}",
     )
     
     st.caption(
-        f"median {delta_series.median():+.4f} · "
-        f"P95 {delta_series.quantile(0.95):+.4f} · "
-        f"worse {(delta_series > 0).mean() * 100:.1f}%"
+        f"median {series_b.median():.4f} · "
+        f"P95 {series_b.quantile(0.95):.4f} · "
+        f"min {series_b.min():.4f} · max {series_b.max():.4f}"
     )
 
+def display_metric_with_stats_single(metric_name, series):
+    """Display metric with comprehensive statistics (non-delta)."""
+    st.metric(
+        f"{metric_name} mean",
+        f"{series.mean():.4f}",
+    )
+    st.caption(
+        f"median {series.median():.4f} · "
+        f"P95 {series.quantile(0.95):.4f} · "
+        f"min {series.min():.4f} · max {series.max():.4f}"
+    )
 
 # =========================
 # Sidebar — Global State
@@ -256,61 +268,39 @@ Use the sidebar to switch pages:
 # -------------------------
 st.subheader("Summary")
 
-tp_mean_a = runA["summary"]["TP"].mean()
-
 if mode == "Compare Mode":
+    tp_mean_a = runA["summary"]["TP"].mean()
     tp_mean_b = runB["summary"]["TP"].mean()
+    df_summary_a = runA["summary"]
+    df_summary_b = runB["summary"]
     st.metric(
         "TP mean",
         f"{tp_mean_b:.2f}",
         delta=f"{tp_mean_b - tp_mean_a:+.2f}",
     )
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        display_metric_with_stats("XRMS", df_summary_a["xrms"], df_summary_b["xrms"])
+    with col2:
+        display_metric_with_stats("YRMS", df_summary_a["yrms"], df_summary_b["yrms"])
+    with col3:
+        display_metric_with_stats("XSTD", df_summary_a["xstd"], df_summary_b["xstd"])
+    with col4:
+        display_metric_with_stats("YSTD", df_summary_a["ystd"], df_summary_b["ystd"])
 else:
+    df_summary = runA["summary"]
+    tp_mean_a = df_summary["TP"].mean()
     st.metric("TP mean", f"{tp_mean_a:.2f}")
-
-# -------------------------
-# Score table (if exists)
-# -------------------------
-if runA["score"] is not None:
-    st.subheader("Score")
-    st.dataframe(runA["score"], width="stretch")
-
-# -------------------------
-# Comparison quick look
-# -------------------------
-if mode == "Compare Mode":
-    st.subheader("Quick Comparison")
-
-    df_cmp = st.session_state["df_cmp"]
-
-    c1, c2 = st.columns(2)
-    def reg_ratio(s):
-        return (s > 0).mean() * 100.0
-
-
-    with c1:
-        st.metric(
-            "XRMS mean Δ",
-            f"{df_cmp['xrms_delta'].mean():+.4f}",
-        )
-        st.caption(
-            f"median {df_cmp['xrms_delta'].median():+.4f} · "
-            f"P95 {df_cmp['xrms_delta'].quantile(0.95):+.4f} · "
-            f"worse {reg_ratio(df_cmp['xrms_delta']):.1f}%"
-        )
-
-    with c2:
-        st.metric(
-            "YRMS mean Δ",
-            f"{df_cmp['yrms_delta'].mean():+.4f}",
-        )
-        st.caption(
-            f"median {df_cmp['yrms_delta'].median():+.4f} · "
-            f"P95 {df_cmp['yrms_delta'].quantile(0.95):+.4f} · "
-            f"worse {reg_ratio(df_cmp['yrms_delta']):.1f}%"
-        )
-
-
+    
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        display_metric_with_stats_single("XRMS", df_summary["xrms"])
+    with col2:
+        display_metric_with_stats_single("YRMS", df_summary["yrms"])
+    with col3:
+        display_metric_with_stats_single("XSTD", df_summary["xstd"])
+    with col4:
+        display_metric_with_stats_single("YSTD", df_summary["ystd"])
 
 
 # Gen2_Perception_DevOps_On_Vehicle_Shiojiri

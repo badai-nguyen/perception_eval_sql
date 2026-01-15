@@ -69,10 +69,6 @@ else:
 # =========================
 show_debug = st.sidebar.checkbox("Show debug info", value=False)
 
-# =========================
-# Header
-# =========================
-st.subheader(f"{view} View")
 
 # =========================
 # Raw data (if debug)
@@ -109,8 +105,9 @@ if clip_vel:
 # =========================
 # Filtered table
 # =========================
-st.subheader("Filtered Data")
-st.dataframe(df_f, width="stretch")
+if show_debug:
+    st.subheader("Filtered Data")
+    st.dataframe(df_f, width="stretch")
 
 # =========================
 # Scatter plots

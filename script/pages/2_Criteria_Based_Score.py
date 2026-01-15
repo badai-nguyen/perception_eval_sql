@@ -75,8 +75,11 @@ else:
 # =========================
 # Raw data check
 # =========================
-st.subheader(f"Raw Data Check — {view}")
-st.dataframe(df_raw.head(10), width="stretch")
+
+show_debug = st.sidebar.checkbox("Show debug info", value=False)
+if show_debug:
+    st.subheader(f"Raw Data Check — {view}")
+    st.dataframe(df_raw.head(10), width="stretch")
 
 criteria_idx = st.sidebar.selectbox(
     "Select Criteria",
@@ -109,9 +112,9 @@ NUM_COLS = [
 
 for c in NUM_COLS:
     df_view[c] = pd.to_numeric(df_view[c], errors="coerce")
-
-st.subheader(f"Criteria {criteria_idx} Data")
-st.dataframe(df_view, width="stretch")
+if show_debug:
+    st.subheader(f"Criteria {criteria_idx} Data")
+    st.dataframe(df_view, width="stretch")
 
 
 st.sidebar.subheader("Visualization Controls")
