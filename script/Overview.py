@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from pathlib import Path
-
+from lib.run_loader import load_run
 
 # =========================
 # Config
@@ -9,44 +9,65 @@ from pathlib import Path
 st.set_page_config(
     page_title="Evaluation Dashboard",
     layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-SUMMARY_DTYPES = {
-    "id": "string",
-    "TP": "float64",
-    "xave": "float64",
-    "xstd": "float64",
-    "xrms": "float64",
-    "yave": "float64",
-    "ystd": "float64",
-    "yrms": "float64",
-    "vx": "float64",
-    "vy": "float64",
-    "perception_label": "string",
-    "product_label": "string"
+# =========================
+# Constants
+# =========================
+PRODUCT_LABEL_JA = {
+    "Occlusion-Case": "遮蔽ケース",
+    "False-Positive-Grass": "草誤検知（草停止）",
+    "False-Positive-Ground": "地面誤検知",
+    "False-Positive-Splash": "水しぶき 誤検知",
+    "False-Positive-Exhaust-Fog": "排ガス・霧 誤検知",
+    "Missed-Detection-Animal": "動物ロスト（犬）",
+    "Missed-Detection-Falling-Object": "落下物未検知",
+    "Missed-Detection-Pedestrian-Child": "歩行者未検知：子供",
+    "Missed-Detection-Pedestrian-Umbrella": "歩行者未検知：傘",
+    "Missed-Detection-Pedestrian-Crouching": "歩行者未検知：しゃがむ",
+    "Missed-Detection-Pedestrian-Near-Structure": "歩行者未検知：構造物に近い",
+    "False-Positive-Truck": "トラック誤検知",
+    "Pose-Estimation-Yaw-Error": "Yawおかしい",
+    "Long-Range-Detection-Failure": "遠方見えない",
+    "Ghost-Object": "ミサイル",
+    "Sudden-Fast-Vehicle-Ghost": "高速車両の突然出現・急ブレーキ誘発",
+    "Misclassification-Structure-Grass-as-Pedestrian": "構造物・草を人に誤検知",
+    "Misclassification-Structure-Grass-as-Vehicle": "構造物・草を車両に誤検知",
+    "Misclassification-Bike-Motorcycle": "自転車・バイクのミスラベル",
+    "Missed-Detection-Unridden-Bike": "人の乗ってないバイク自転車ロスト",
+    "Missed-Detection-Traffic-Cone": "カラーコーンが認識できない",
+    "Missed-Detection-Other": "その他ロスト",
 }
+
+
+# =========================
+# Helper Functions
+# =========================
+
 
 def build_summary_delta(df_a, df_b):
     df_a = df_a.set_index("id")
     df_b = df_b.set_index("id")
 
-    common = df_a.index.intersection(df_b.index)
-    df_a = df_a.loc[common]
-    df_b = df_b.loc[common]
+    # Get common indices
+    common_idx = df_a.index.intersection(df_b.index)
+    df_a = df_a.loc[common_idx]
+    df_b = df_b.loc[common_idx]
 
+    # Metrics to compare
     metrics = ["TP", "xstd", "ystd", "xrms", "yrms", "vx", "vy"]
 
-    out = pd.DataFrame(index=common)
-    for m in metrics:
-        out[m] = df_a[m]
-        out[f"{m}_B"] = df_b[m]
-        out[f"{m}_delta"] = df_b[m] - df_a[m]
+    # Build result using concat for better performance
+    result = pd.DataFrame(index=common_idx)
+    
+    for metric in metrics:
+        result[metric] = df_a[metric]
+        result[f"{metric}_B"] = df_b[metric]
+        result[f"{metric}_delta"] = df_b[metric] - df_a[metric]
+    
+    return result.reset_index()
 
-    return out.reset_index()
-
-# =========================
-# Helpers
-# =========================
 def create_filter_widgets(all_runs_data):
     """Create common filter widgets for all runs, called only once"""
     
@@ -63,31 +84,7 @@ def create_filter_widgets(all_runs_data):
     perception_labels = sorted(all_perception_labels)
     product_labels = sorted(all_product_labels)
     
-    # Product label mapping (keep as is)
-    PRODUCT_LABEL_JA = {
-        "Occlusion-Case": "遮蔽ケース",
-        "False-Positive-Grass": "草誤検知（草停止）",
-        "False-Positive-Ground": "地面誤検知",
-        "False-Positive-Splash": "水しぶき 誤検知",
-        "False-Positive-Exhaust-Fog": "排ガス・霧 誤検知",
-        "Missed-Detection-Animal": "動物ロスト（犬）",
-        "Missed-Detection-Falling-Object": "落下物未検知",
-        "Missed-Detection-Pedestrian-Child": "歩行者未検知：子供",
-        "Missed-Detection-Pedestrian-Umbrella": "歩行者未検知：傘",
-        "Missed-Detection-Pedestrian-Crouching": "歩行者未検知：しゃがむ",
-        "Missed-Detection-Pedestrian-Near-Structure": "歩行者未検知：構造物に近い",
-        "False-Positive-Truck": "トラック誤検知",
-        "Pose-Estimation-Yaw-Error": "Yawおかしい",
-        "Long-Range-Detection-Failure": "遠方見えない",
-        "Ghost-Object": "ミサイル",
-        "Sudden-Fast-Vehicle-Ghost": "高速車両の突然出現・急ブレーキ誘発",
-        "Misclassification-Structure-Grass-as-Pedestrian": "構造物・草を人に誤検知",
-        "Misclassification-Structure-Grass-as-Vehicle": "構造物・草を車両に誤検知",
-        "Misclassification-Bike-Motorcycle": "自転車・バイクのミスラベル",
-        "Missed-Detection-Unridden-Bike": "人の乗ってないバイク自転車ロスト",
-        "Missed-Detection-Traffic-Cone": "カラーコーンが認識できない",
-        "Missed-Detection-Other": "その他ロスト",
-    }
+
     
     # Create product label mapping
     ja_label_lookup = {k: v for k, v in PRODUCT_LABEL_JA.items()}
@@ -151,30 +148,20 @@ def apply_filters(run_data, filters):
     }
 
 
-def load_run(run_dir: Path):
-    summary_path = run_dir / "Summary.csv"
-    score_path = run_dir / "Score.csv"
 
-    if not summary_path.exists():
-        raise FileNotFoundError(f"{summary_path} not found")
-
-    summary = pd.read_csv(
-        summary_path,
-        header=None,
-        names=SUMMARY_DTYPES.keys(),
-        dtype=SUMMARY_DTYPES,
+def display_metric_with_stats(metric_name, delta_series):
+    """Display metric with comprehensive statistics."""
+    st.metric(
+        f"{metric_name} mean Δ",
+        f"{delta_series.mean():+.4f}",
+    )
+    
+    st.caption(
+        f"median {delta_series.median():+.4f} · "
+        f"P95 {delta_series.quantile(0.95):+.4f} · "
+        f"worse {(delta_series > 0).mean() * 100:.1f}%"
     )
 
-    score = pd.read_csv(score_path, header=None, engine="python", names=["Scenario", "Option", "GT_OBJ", "Distance0", "NM0", "TP/TN0", "ADD0", "AIL0", "UIL0", "PFN/PFP0", "UUID Num0", "Practical Pass Rate0", "MAX_DIST_THRESH0", "OBJ_CNTS0",
-    "Distance1", "NM1", "TP/TN1", "ADD1", "AIL1", "UIL1", "PFN/PFP1", "UUID Num1", "Practical Pass Rate1", "MAX_DIST_THRESH1", "OBJ_CNTS1",
-    "Distance2", "NM2", "TP/TN2", "ADD2", "AIL2", "UIL2", "PFN/PFP2", "UUID Num2", "Practical Pass Rate2", "MAX_DIST_THRESH2", "OBJ_CNTS2",
-    "Distance3", "NM3", "TP/TN3", "ADD3", "AIL3", "UIL3", "PFN/PFP3", "UUID Num3", "Practical Pass Rate3", "MAX_DIST_THRESH3", "OBJ_CNTS3",
-    ]) if score_path.exists() else None
-    return {
-        "path": run_dir,
-        "summary": summary,
-        "score": score,
-    }
 
 # =========================
 # Sidebar — Global State

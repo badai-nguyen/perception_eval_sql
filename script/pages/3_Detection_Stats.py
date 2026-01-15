@@ -447,7 +447,7 @@ try:
             category_orders={"dataset": ["Target", "Compared"]},
             labels={"num": "Count", "label": "Label", "status": "Status"}
         )
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width="stretch")
 
     else:
         st.info("No status count data available")

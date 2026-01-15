@@ -7,7 +7,7 @@ import os
 from typing import Tuple
 
 st.set_page_config(layout="wide")
-st.title("BEV Bounding Box Viewer")
+st.title("Bounding Box Viewer")
 
 # ----------------------------
 # Sidebar (Filters)
@@ -291,7 +291,7 @@ fig.update_layout(
     legend=dict(groupclick="togglegroup", title="Source / Status"),
     height=900
 )
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
 
 # === Frame別 TP/FN カウントと比率 ===
 st.markdown("## 📈 Detection Stability over Frames")
@@ -304,9 +304,22 @@ frame_stats = (
       .unstack(fill_value=0)
       .reset_index()
 )
+# --- DEBUG: Show intermediate frame_stats table ---
+# Check intermediate table for missing columns or frame gaps
+st.write("### [Debug] frame_stats table")
+st.dataframe(frame_stats)
+
 
 # 比率 (TP率 = TP / (TP+FN))
-frame_stats["TPR"] = frame_stats["TP"] / (frame_stats["TP"] + frame_stats["FN"]).replace(0, np.nan)
+# Ensure TP or FN column exists, else fill with 0
+for col in ["TP", "FN"]:
+    if col not in frame_stats.columns:
+        frame_stats[col] = 0
+frame_stats["TPR"] = np.where(
+    (frame_stats["TP"] + frame_stats["FN"]) > 0,
+    frame_stats["TP"] / (frame_stats["TP"] + frame_stats["FN"]),
+    np.nan
+)
 
 # Plotlyで折れ線プロット
 import plotly.express as px
@@ -328,7 +341,7 @@ fig_tpr.add_vline(
     annotation_position="top left"
 )
 
-st.plotly_chart(fig_tpr, use_container_width=True)
+st.plotly_chart(fig_tpr, width="stretch")
 
 # TPR比率の推移を別グラフで
 fig_ratio = px.line(
@@ -345,7 +358,7 @@ fig_ratio.add_vline(
     annotation_text=f"Frame {frame}",
     annotation_position="top left"
 )
-st.plotly_chart(fig_ratio, use_container_width=True)
+st.plotly_chart(fig_ratio, width="stretch")
 
 # === Worst-performing objects by FN rate ===
 st.markdown("## 🚨 Objects with High FN Rate (GT-based)")
@@ -420,6 +433,6 @@ if not uuid_traj.empty:
         height=600,
         legend=dict(title="Status")
     )
-    st.plotly_chart(fig_traj, use_container_width=True)
+    st.plotly_chart(fig_traj, width="stretch")
 else:
     st.info("No GT trajectory data for the selected UUID.")
