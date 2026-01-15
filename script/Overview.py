@@ -10,7 +10,7 @@ import plotly.express as px
 # Config
 # =========================
 st.set_page_config(
-    page_title="Evaluation Dashboard",
+    page_title="Overview",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -280,7 +280,7 @@ st.session_state["mode"] = mode
 # =========================
 RUN_ROOT = Path("data")
 
-st.title("Evaluation Dashboard")
+st.title("Overview")
 
 run_dirs = sorted([p for p in RUN_ROOT.iterdir() if p.is_dir()])
 run_a_dir = st.sidebar.selectbox(
@@ -334,16 +334,10 @@ else:
 # Main Page — Overview
 # =========================
 st.subheader("Loaded Runs")
-st.markdown(f"**Run A:** `{runA['path']}`")
+st.markdown(f"**Baseline (A):** `{runA['path']}`")
 
 if mode == "Compare Mode":
-    st.markdown(f"**Run B:** `{runB['path']}`")
-st.markdown("""
-Use the sidebar to switch pages:
-
-- **Tracking Stats**: position / velocity metrics  
-- **Criteria Evaluation**: criteria-based performance metrics
-""")
+    st.markdown(f"**Candidate (B):** `{runB['path']}`")
 
 
 # -------------------------
@@ -351,43 +345,91 @@ Use the sidebar to switch pages:
 # -------------------------
 st.subheader("Summary")
 
+import plotly.graph_objects as go
+
 def show_tp_mean_by_label(df, label_col, label_jp_map=None, run_name=None):
-    """Show TP mean by the given label as a dataframe in Streamlit, optionally with Japanese labels."""
+    """Show TP mean by the given label as a bar chart in Streamlit, optionally with Japanese labels."""
     if label_col not in df.columns or df.empty:
         return
-    group_tp = df.groupby(label_col)["TP"].mean().reset_index()
+    group_tp = df.groupby(label_col)["TP"].mean()
+    labels = group_tp.index.tolist()
+    tps = group_tp.values.tolist()
     if label_jp_map:
-        group_tp[label_col] = group_tp[label_col].map(label_jp_map).fillna(group_tp[label_col])
-    group_tp = group_tp.rename(columns={label_col: label_col.replace('_', ' ').title(), "TP": "TP mean"})
-    if run_name is not None:
-        st.markdown(f"**TP mean by {label_col.replace('_', ' ').title()} — {run_name}**")
+        labels_disp = [label_jp_map.get(label, label) for label in labels]
     else:
-        st.markdown(f"**TP mean by {label_col.replace('_', ' ').title()}**")
-    st.dataframe(group_tp, use_container_width=True)
+        labels_disp = labels
+    chart_title = f"TP mean by {label_col.replace('_', ' ').title()}"
+    if run_name:
+        chart_title += f" — {run_name}"
+    st.markdown(f"**{chart_title}**")
+    fig = go.Figure(go.Bar(
+        x=labels_disp,
+        y=tps,
+        text=[f"{x:.2f}" for x in tps],
+        textposition="auto",
+        marker=dict(color="#31356E"),
+    ))
+    fig.update_layout(
+        xaxis_title=label_col.replace('_', ' ').title(),
+        yaxis_title="TP mean",
+        height=400,
+        margin=dict(t=40, b=0),
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
 def show_tp_mean_by_label_compare(df_a, df_b, label_col, label_jp_map=None):
-    """Show TP mean by label, side by side for A and B, and their delta."""
+    """Show TP mean by label, side by side for A and B, and their delta as a grouped bar chart."""
     if label_col not in df_a.columns or label_col not in df_b.columns:
         return
-    # Prepare
     group_a = df_a.groupby(label_col)["TP"].mean()
     group_b = df_b.groupby(label_col)["TP"].mean()
     all_labels = sorted(set(group_a.index).union(group_b.index))
-    data = []
-    for label in all_labels:
-        tp_a = group_a.get(label, float('nan'))
-        tp_b = group_b.get(label, float('nan'))
-        delta = tp_b - tp_a if pd.notna(tp_a) and pd.notna(tp_b) else float('nan')
-        label_disp = label_jp_map[label] if label_jp_map and label in label_jp_map else label
-        data.append({
-            label_col.replace('_', ' ').title(): label_disp,
-            "TP mean (A)": tp_a,
-            "TP mean (B)": tp_b,
-            "Δ(B-A)": delta,
-        })
-    df_disp = pd.DataFrame(data)
+    tp_a_vals = [group_a.get(label, float('nan')) for label in all_labels]
+    tp_b_vals = [group_b.get(label, float('nan')) for label in all_labels]
+    deltas = [b - a if pd.notna(a) and pd.notna(b) else float('nan') for a, b in zip(tp_a_vals, tp_b_vals)]
+    if label_jp_map:
+        labels_disp = [label_jp_map.get(label, label) for label in all_labels]
+    else:
+        labels_disp = all_labels
+
     st.markdown(f"**TP mean by {label_col.replace('_', ' ').title()} (A vs B)**")
-    st.dataframe(df_disp, use_container_width=True)
+
+    # Grouped bar for A, B, and Delta
+    fig = go.Figure([
+        go.Bar(
+            name="A",
+            x=labels_disp,
+            y=tp_a_vals,
+            marker=dict(color="#31356E"),
+            text=[f"{x:.2f}" if pd.notna(x) else "N/A" for x in tp_a_vals],
+            textposition="auto",
+        ),
+        go.Bar(
+            name="B",
+            x=labels_disp,
+            y=tp_b_vals,
+            marker=dict(color="#008E9B"),
+            text=[f"{x:.2f}" if pd.notna(x) else "N/A" for x in tp_b_vals],
+            textposition="auto",
+        ),
+        go.Bar(
+            name="Δ(B-A)",
+            x=labels_disp,
+            y=deltas,
+            marker=dict(color="#E86A33"),
+            text=[f"{x:+.2f}" if pd.notna(x) else "N/A" for x in deltas],
+            textposition="auto",
+        ),
+    ])
+    fig.update_layout(
+        barmode="group",
+        xaxis_title=label_col.replace('_', ' ').title(),
+        yaxis_title="TP mean",
+        height=400,
+        margin=dict(t=40, b=0),
+        legend_title="Run",
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
 if mode == "Compare Mode":
     tp_mean_a = runA["summary"]["TP"].mean()
@@ -399,12 +441,6 @@ if mode == "Compare Mode":
         f"{tp_mean_b:.2f}",
         delta=f"{tp_mean_b - tp_mean_a:+.2f}",
     )
-    # Show TP mean by perception_label and product_label for both runs and compare
-    with st.expander("Show TP mean by label (table format)", expanded=False):
-
-        show_tp_mean_by_label_compare(df_summary_a, df_summary_b, "perception_label")
-        show_tp_mean_by_label_compare(df_summary_a, df_summary_b, "product_label", PRODUCT_LABEL_JA)
-
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         display_metric_with_stats("XRMS", df_summary_a["xrms"], df_summary_b["xrms"])
@@ -415,34 +451,32 @@ if mode == "Compare Mode":
     with col4:
         display_metric_with_stats("YSTD", df_summary_a["ystd"], df_summary_b["ystd"])
 
+    show_tp_mean_by_label_compare(df_summary_a, df_summary_b, "perception_label")
+    show_tp_mean_by_label_compare(df_summary_a, df_summary_b, "product_label", PRODUCT_LABEL_JA)
+
     # Show group-by summaries for perception_label and product_label visually
     # Japanese mapping for product labels if available
     prod_label_map = PRODUCT_LABEL_JA
 
-    show_grouped_metrics_plot(
-        df_summary_a,
-        group_col="perception_label",
-        label_map=None,
-        mode="compare",
-        df_b=df_summary_b
-    )
-    show_grouped_metrics_plot(
-        df_summary_a,
-        group_col="product_label",
-        label_map=prod_label_map,
-        mode="compare",
-        df_b=df_summary_b
-    )
+    with st.expander("Show metric breakdowns by label (grouped bar charts)", expanded=False):
+        show_grouped_metrics_plot(
+            df_summary_a,
+            group_col="perception_label",
+            label_map=None,
+            mode="compare",
+            df_b=df_summary_b
+        )
+        show_grouped_metrics_plot(
+            df_summary_a,
+            group_col="product_label",
+            label_map=prod_label_map,
+            mode="compare",
+            df_b=df_summary_b
+        )
 else:
     df_summary = runA["summary"]
     tp_mean_a = df_summary["TP"].mean()
     st.metric("TP mean", f"{tp_mean_a:.2f}")
-
-    # Show TP mean by perception_label and product_label for this run
-    with st.expander("Show TP mean by label (table format)", expanded=False):
-        show_tp_mean_by_label(df_summary, "perception_label")
-        show_tp_mean_by_label(df_summary, "product_label", PRODUCT_LABEL_JA)
-
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         display_metric_with_stats_single("XRMS", df_summary["xrms"])
@@ -453,20 +487,24 @@ else:
     with col4:
         display_metric_with_stats_single("YSTD", df_summary["ystd"])
 
-    prod_label_map = PRODUCT_LABEL_JA
-    # Show group-by summaries for perception_label and product_label visually
-    show_grouped_metrics_plot(
-        df_summary,
-        group_col="perception_label",
-        label_map=None,
-        mode="single"
-    )
-    show_grouped_metrics_plot(
-        df_summary,
-        group_col="product_label",
-        label_map=prod_label_map,
-        mode="single"
-    )
+    show_tp_mean_by_label(df_summary, "perception_label")
+    show_tp_mean_by_label(df_summary, "product_label", PRODUCT_LABEL_JA)
+    
+    # Show TP mean by perception_label and product_label for this run
+    with st.expander("Show TP mean by label (table format)", expanded=False):
+        # Show group-by summaries for perception_label and product_label visually
+        show_grouped_metrics_plot(
+            df_summary,
+            group_col="perception_label",
+            label_map=None,
+            mode="single"
+        )
+        show_grouped_metrics_plot(
+            df_summary,
+            group_col="product_label",
+            label_map=PRODUCT_LABEL_JA,
+            mode="single"
+        )
 
 # Gen2_Perception_DevOps_On_Vehicle_Shiojiri
 # https://evaluation.tier4.jp/evaluation/suites/84c2a34e-387d-4218-927a-e06308e6fccc?project_id=x2_dev&tab=catalogs
