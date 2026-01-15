@@ -375,7 +375,7 @@ def show_tp_mean_by_label(df, label_col, label_jp_map=None, run_name=None):
         height=400,
         margin=dict(t=40, b=0),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 def show_tp_mean_by_label_compare(df_a, df_b, label_col, label_jp_map=None):
     """Show TP mean by label, side by side for A and B, and their delta as a grouped bar chart."""
@@ -429,7 +429,7 @@ def show_tp_mean_by_label_compare(df_a, df_b, label_col, label_jp_map=None):
         margin=dict(t=40, b=0),
         legend_title="Run",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 if mode == "Compare Mode":
     tp_mean_a = runA["summary"]["TP"].mean()
