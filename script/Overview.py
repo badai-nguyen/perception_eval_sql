@@ -3,6 +3,9 @@ import pandas as pd
 from pathlib import Path
 from lib.run_loader import load_run
 
+# You may need this import for nicer chart appearance
+import plotly.express as px
+
 # =========================
 # Config
 # =========================
@@ -44,7 +47,6 @@ PRODUCT_LABEL_JA = {
 # =========================
 # Helper Functions
 # =========================
-
 
 def build_summary_delta(df_a, df_b):
     df_a = df_a.set_index("id")
@@ -146,7 +148,6 @@ def apply_filters(run_data, filters):
     }
 
 
-
 def display_metric_with_stats(metric_name, series_a, series_b):
     """Display metric with comprehensive statistics for delta (A - B)."""
     st.metric(
@@ -173,44 +174,99 @@ def display_metric_with_stats_single(metric_name, series):
         f"min {series.min():.4f} · max {series.max():.4f}"
     )
 
-def show_grouped_metrics(df, group_col, label_map=None, mode="single", df_b=None):
+def show_grouped_metrics_plot(df, group_col, label_map=None, mode="single", df_b=None):
     """
-    Display group-wise metrics for a label column.
-    - df: summary DataFrame for run A (or filtered for single mode)
-    - group_col: column to group by (e.g., 'perception_label', 'product_label')
-    - label_map: optional mapping to display Japanese label names
-    - mode: 'single' or 'compare'
-    - df_b: summary DataFrame for run B (also filtered), required in compare mode
+    Show grouped metrics as side-by-side bar plots for easy comprehension.
+    Not hidden in expanders. Handles compare and single mode.
     """
     st.markdown(f"#### Metrics by {group_col.replace('_', ' ').title()}")
     metrics = ["TP", "xstd", "ystd", "xrms", "yrms"]
+
     if group_col not in df.columns or df.empty or (mode == "compare" and df_b is not None and df_b.empty):
         st.info("No data for group breakdown.")
         return
 
+    df = df.copy()
     group_vals = sorted(df[group_col].dropna().unique())
-    if not group_vals:
-        st.info("No group values found.")
-        return
 
-    for val in group_vals:
-        ja_label = label_map[val] if label_map and val in label_map else val
-        with st.expander(f"{ja_label}", expanded=False):
-            col1, col2, col3, col4, col5 = st.columns(5)
-            if mode == "single":
-                for idx, (metric, col) in enumerate(zip(metrics, [col1, col2, col3, col4, col5])):
-                    series = df[df[group_col]==val][metric]
-                    with col:
-                        display_metric_with_stats_single(metric, series)
-            elif mode == "compare" and df_b is not None:
-                df_a_grp = df[df[group_col]==val]
-                df_b_grp = df_b[df_b[group_col]==val]
-                if not df_a_grp.empty and not df_b_grp.empty:
-                    for idx, (metric, col) in enumerate(zip(metrics, [col1, col2, col3, col4, col5])):
-                        with col:
-                            display_metric_with_stats(metric, df_a_grp[metric], df_b_grp[metric])
-                else:
-                    st.warning(f"No matching data for group: {ja_label}")
+    if label_map:
+        df["__label_jp"] = df[group_col].map(label_map)
+    else:
+        df["__label_jp"] = df[group_col]
+    print("group_vals", group_vals)
+    print("df.head()", df.head())
+    print("df[group_col].head()", df[group_col].head())
+    print("df['__label_jp'].head()", df["__label_jp"].head())
+    
+    # Prepare coloring and legend order
+    show_mode = "compare" if (mode == "compare" and df_b is not None) else "single"
+    legend_title = "Run"
+    color_discrete_map = {"A": "#31356E", "B": "#008E9B", "Δ(B-A)": "#E86A33"}
+
+    for metric in metrics:
+        st.markdown(f"##### {metric.upper()} by {group_col.replace('_', ' ').title()}")
+        if show_mode == "single":
+            # Single run
+            plot_df = df.groupby("__label_jp")[metric].mean().reset_index()
+            plot_df = plot_df.rename(columns={metric: "Mean"})
+            fig = px.bar(
+                plot_df,
+                x="__label_jp",
+                y="Mean",
+                labels={"__label_jp": group_col, "Mean": f"{metric} mean"},
+                text_auto=".2f",
+                color_discrete_sequence=["#31356E"],  # dark blue
+            )
+            fig.update_layout(
+                xaxis_title=None,
+                yaxis_title=f"{metric} Mean",
+                showlegend=False,
+                height=400,
+                margin=dict(t=40, b=0),
+            )
+            st.plotly_chart(fig, width="stretch")
+        else:
+            # Compare mode (side-by-side grouped bars)
+            # Compute mean by label for both runs and (optional) delta
+            df_b = df_b.copy()
+            if label_map:
+                df_b["__label_jp"] = df_b[group_col].map(label_map)
+            else:
+                df_b["__label_jp"] = df_b[group_col]
+            mean_a = df.groupby("__label_jp")[metric].mean()
+            mean_b = df_b.groupby("__label_jp")[metric].mean()
+            plot_labels = sorted(set(mean_a.index).union(mean_b.index))
+            plot_df = pd.DataFrame({"__label_jp": plot_labels})
+            plot_df["A"] = plot_df["__label_jp"].map(mean_a).fillna(0)
+            plot_df["B"] = plot_df["__label_jp"].map(mean_b).fillna(0)
+            plot_df["Δ(B-A)"] = plot_df["B"] - plot_df["A"]
+
+            # Melt for grouped bars
+            melted = plot_df.melt(id_vars="__label_jp", value_vars=["A", "B", "Δ(B-A)"], var_name=legend_title, value_name="Mean")
+
+
+            bar_order = ["A", "B", "Δ(B-A)"]
+
+            fig = px.bar(
+                melted,
+                x="__label_jp",
+                y="Mean",
+                color=legend_title,
+                text_auto=".2f",
+                category_orders={legend_title: bar_order, "__label_jp": plot_labels},
+                barmode="group",
+                color_discrete_map=color_discrete_map,
+                labels={"__label_jp": group_col, "Mean": f"{metric} mean"}
+            )
+            fig.update_layout(
+                xaxis_title=None,
+                yaxis_title=f"{metric} Mean",
+                legend_title=legend_title,
+                height=400,
+                margin=dict(t=40, b=0)
+            )
+            st.plotly_chart(fig, width="stretch")
+
 
 # =========================
 # Sidebar — Global State
@@ -319,18 +375,24 @@ if mode == "Compare Mode":
         display_metric_with_stats("XSTD", df_summary_a["xstd"], df_summary_b["xstd"])
     with col4:
         display_metric_with_stats("YSTD", df_summary_a["ystd"], df_summary_b["ystd"])
-    # Show group-by summaries for perception_label and product_label
-    show_grouped_metrics(
+
+    # Show group-by summaries for perception_label and product_label visually
+    # Japanese mapping for product labels if available
+    prod_label_map = PRODUCT_LABEL_JA
+
+    print("prod_label_map", prod_label_map)
+    st.dataframe(df_summary_a)
+    show_grouped_metrics_plot(
         df_summary_a,
         group_col="perception_label",
         label_map=None,
         mode="compare",
         df_b=df_summary_b
     )
-    show_grouped_metrics(
+    show_grouped_metrics_plot(
         df_summary_a,
         group_col="product_label",
-        label_map=st.session_state.get("runA", {}).get("summary", {}).get("product_label", pd.Series()).map(PRODUCT_LABEL_JA).to_dict() if not df_summary_a.empty else PRODUCT_LABEL_JA,  # fallback to PRODUCT_LABEL_JA
+        label_map=prod_label_map,
         mode="compare",
         df_b=df_summary_b
     )
@@ -348,20 +410,21 @@ else:
         display_metric_with_stats_single("XSTD", df_summary["xstd"])
     with col4:
         display_metric_with_stats_single("YSTD", df_summary["ystd"])
-    # Show group-by summaries for perception_label and product_label
-    show_grouped_metrics(
+
+    prod_label_map = PRODUCT_LABEL_JA
+    # Show group-by summaries for perception_label and product_label visually
+    show_grouped_metrics_plot(
         df_summary,
         group_col="perception_label",
         label_map=None,
         mode="single"
     )
-    show_grouped_metrics(
+    show_grouped_metrics_plot(
         df_summary,
         group_col="product_label",
-        label_map=df_summary.get("product_label", pd.Series()).map(PRODUCT_LABEL_JA).to_dict() if not df_summary.empty else PRODUCT_LABEL_JA,
+        label_map=prod_label_map,
         mode="single"
     )
-
 
 # Gen2_Perception_DevOps_On_Vehicle_Shiojiri
 # https://evaluation.tier4.jp/evaluation/suites/84c2a34e-387d-4218-927a-e06308e6fccc?project_id=x2_dev&tab=catalogs
