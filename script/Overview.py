@@ -193,10 +193,6 @@ def show_grouped_metrics_plot(df, group_col, label_map=None, mode="single", df_b
         df["__label_jp"] = df[group_col].map(label_map)
     else:
         df["__label_jp"] = df[group_col]
-    print("group_vals", group_vals)
-    print("df.head()", df.head())
-    print("df[group_col].head()", df[group_col].head())
-    print("df['__label_jp'].head()", df["__label_jp"].head())
     
     # Prepare coloring and legend order
     show_mode = "compare" if (mode == "compare" and df_b is not None) else "single"
@@ -273,7 +269,6 @@ def show_grouped_metrics_plot(df, group_col, label_map=None, mode="single", df_b
 # =========================
 
 st.sidebar.header("Mode")
-
 mode = st.sidebar.radio(
     "Mode",
     ["Single Mode", "Compare Mode"],
@@ -380,8 +375,6 @@ if mode == "Compare Mode":
     # Japanese mapping for product labels if available
     prod_label_map = PRODUCT_LABEL_JA
 
-    print("prod_label_map", prod_label_map)
-    st.dataframe(df_summary_a)
     show_grouped_metrics_plot(
         df_summary_a,
         group_col="perception_label",
