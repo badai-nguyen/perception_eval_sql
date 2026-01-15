@@ -351,6 +351,44 @@ Use the sidebar to switch pages:
 # -------------------------
 st.subheader("Summary")
 
+def show_tp_mean_by_label(df, label_col, label_jp_map=None, run_name=None):
+    """Show TP mean by the given label as a dataframe in Streamlit, optionally with Japanese labels."""
+    if label_col not in df.columns or df.empty:
+        return
+    group_tp = df.groupby(label_col)["TP"].mean().reset_index()
+    if label_jp_map:
+        group_tp[label_col] = group_tp[label_col].map(label_jp_map).fillna(group_tp[label_col])
+    group_tp = group_tp.rename(columns={label_col: label_col.replace('_', ' ').title(), "TP": "TP mean"})
+    if run_name is not None:
+        st.markdown(f"**TP mean by {label_col.replace('_', ' ').title()} — {run_name}**")
+    else:
+        st.markdown(f"**TP mean by {label_col.replace('_', ' ').title()}**")
+    st.dataframe(group_tp, use_container_width=True)
+
+def show_tp_mean_by_label_compare(df_a, df_b, label_col, label_jp_map=None):
+    """Show TP mean by label, side by side for A and B, and their delta."""
+    if label_col not in df_a.columns or label_col not in df_b.columns:
+        return
+    # Prepare
+    group_a = df_a.groupby(label_col)["TP"].mean()
+    group_b = df_b.groupby(label_col)["TP"].mean()
+    all_labels = sorted(set(group_a.index).union(group_b.index))
+    data = []
+    for label in all_labels:
+        tp_a = group_a.get(label, float('nan'))
+        tp_b = group_b.get(label, float('nan'))
+        delta = tp_b - tp_a if pd.notna(tp_a) and pd.notna(tp_b) else float('nan')
+        label_disp = label_jp_map[label] if label_jp_map and label in label_jp_map else label
+        data.append({
+            label_col.replace('_', ' ').title(): label_disp,
+            "TP mean (A)": tp_a,
+            "TP mean (B)": tp_b,
+            "Δ(B-A)": delta,
+        })
+    df_disp = pd.DataFrame(data)
+    st.markdown(f"**TP mean by {label_col.replace('_', ' ').title()} (A vs B)**")
+    st.dataframe(df_disp, use_container_width=True)
+
 if mode == "Compare Mode":
     tp_mean_a = runA["summary"]["TP"].mean()
     tp_mean_b = runB["summary"]["TP"].mean()
@@ -361,6 +399,12 @@ if mode == "Compare Mode":
         f"{tp_mean_b:.2f}",
         delta=f"{tp_mean_b - tp_mean_a:+.2f}",
     )
+    # Show TP mean by perception_label and product_label for both runs and compare
+    with st.expander("Show TP mean by label (table format)", expanded=False):
+
+        show_tp_mean_by_label_compare(df_summary_a, df_summary_b, "perception_label")
+        show_tp_mean_by_label_compare(df_summary_a, df_summary_b, "product_label", PRODUCT_LABEL_JA)
+
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         display_metric_with_stats("XRMS", df_summary_a["xrms"], df_summary_b["xrms"])
@@ -393,6 +437,11 @@ else:
     df_summary = runA["summary"]
     tp_mean_a = df_summary["TP"].mean()
     st.metric("TP mean", f"{tp_mean_a:.2f}")
+
+    # Show TP mean by perception_label and product_label for this run
+    with st.expander("Show TP mean by label (table format)", expanded=False):
+        show_tp_mean_by_label(df_summary, "perception_label")
+        show_tp_mean_by_label(df_summary, "product_label", PRODUCT_LABEL_JA)
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
