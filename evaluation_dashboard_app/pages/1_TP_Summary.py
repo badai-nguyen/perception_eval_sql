@@ -1,36 +1,10 @@
 import streamlit as st
-import pandas as pd
-import numpy as np
 import plotly.express as px
-
-DTYPES = {
-    "id": "string",
-    "TP": "float64",
-    "xave": "float64",
-    "xstd": "float64",
-    "xrms": "float64",
-    "yave": "float64",
-    "ystd": "float64",
-    "yrms": "float64",
-    "vx": "float64",
-    "vy": "float64",
-}
-
-def load_summary(file_or_path):
-    return pd.read_csv(
-        file_or_path,
-        sep=",",
-        header=None,
-        names=DTYPES.keys(),
-        dtype=DTYPES,
-    )
 
 st.set_page_config(layout="wide")
 st.title("TP / Position / Velocity Statistics Viewer")
 
-# =========================
-# Safety check
-# =========================
+# ========== Safety Check ==========
 if "runA" not in st.session_state:
     st.warning("Please load data from the Overview page first.")
     st.stop()
@@ -39,84 +13,64 @@ mode = st.session_state.get("mode", "Single Run")
 
 runA = st.session_state["runA"]
 df_a = runA["summary"]
+df_b = df_cmp = None
 if mode == "Compare Mode":
     runB = st.session_state.get("runB")
-    df_b = runB["summary"]
+    df_b = runB["summary"] if runB else None
     df_cmp = st.session_state.get("df_cmp")
 
-
-# =========================
-# View selector (compare only)
-# =========================
+# ========== View Selector ==========
 if mode == "Compare Mode":
     view = st.sidebar.selectbox(
         "View",
         ["Baseline (A)", "Candidate (B)", "Delta (B - A)"],
     )
-
-    if view == "Baseline (A)":
-        df_active = df_a.copy()
-    elif view == "Candidate (B)":
-        df_active = df_b.copy()
-    else:
-        df_active = df_cmp.copy()
+    df_active = {
+        "Baseline (A)": df_a,
+        "Candidate (B)": df_b,
+        "Delta (B - A)": df_cmp
+    }.get(view, df_a)
 else:
-    df_active = df_a.copy()
+    df_active = df_a
     view = "Single Run"
 
-# =========================
-# Debug controls
-# =========================
+# ========== Debug Controls ==========
 show_debug = st.sidebar.checkbox("Show debug info", value=False)
 
-
-# =========================
-# Raw data (if debug)
-# =========================
 if show_debug:
     st.subheader("Raw Data Check")
     st.dataframe(df_active.head(10), width="stretch")
 
-
-# =========================
-# Sidebar filters
-# =========================
+# ========== Sidebar Filters ==========
 st.sidebar.header("Filters")
+tp_values = df_active["TP"]
 tp_min, tp_max = st.sidebar.slider(
     "TP range (%)",
-    float(df_active.TP.min()),
-    float(df_active.TP.max()),
+    float(tp_values.min()),
+    float(tp_values.max()),
     (40.0, 80.0),
 )
-
 clip_vel = st.sidebar.checkbox("Clip velocity outliers", value=True)
 
-# =========================
-# Filtering
-# =========================
-df_f = df_active[(df_active.TP >= tp_min) & (df_active.TP <= tp_max)].copy()
+# ========== Data Filtering ==========
+df_f = df_active[(df_active["TP"] >= tp_min) & (df_active["TP"] <= tp_max)].copy()
 
-# Optional velocity clipping (for insane outlier)
 if clip_vel:
-    for c in ["vx", "vy"]:
-        q1, q99 = df_f[c].quantile([0.01, 0.99])
+    for c in ("vx", "vy"):
+        # Avoid changing the original DataFrame dtype warning
+        q1, q99 = df_f[c].quantile([0.01, 0.99]).values
         df_f[c] = df_f[c].clip(q1, q99)
 
-# =========================
-# Filtered table
-# =========================
 if show_debug:
     st.subheader("Filtered Data")
     st.dataframe(df_f, width="stretch")
 
-# =========================
-# Scatter plots
-# =========================
-c1, c2 = st.columns(2)
+# ========== Plots ==========
+col1, col2 = st.columns(2)
 
-with c1:
+with col1:
     st.subheader("Position RMS (X vs Y)")
-    fig = px.scatter(
+    fig_rms = px.scatter(
         df_f,
         x="xrms",
         y="yrms",
@@ -125,11 +79,11 @@ with c1:
         labels={"xrms": "X RMS", "yrms": "Y RMS"},
         color_continuous_scale="Viridis",
     )
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig_rms, width="stretch")
 
-with c2:
+with col2:
     st.subheader("Velocity (vx vs vy)")
-    fig = px.scatter(
+    fig_vel = px.scatter(
         df_f,
         x="vx",
         y="vy",
@@ -138,22 +92,18 @@ with c2:
         labels={"vx": "Vx", "vy": "Vy"},
         color_continuous_scale="Plasma",
     )
-    st.plotly_chart(fig, width="stretch")
+    st.plotly_chart(fig_vel, width="stretch")
 
-# =========================
-# Distribution
-# =========================
+# ========== Metric Distribution ==========
 st.subheader("Metric Distribution")
-metric = st.selectbox(
-    "Select metric",
-    ["xstd", "ystd", "xrms", "yrms", "vx", "vy", "TP"],
-)
+metrics = ["xstd", "ystd", "xrms", "yrms", "vx", "vy", "TP"]
+metric = st.selectbox("Select metric", metrics)
 
-fig = px.histogram(
+fig_hist = px.histogram(
     df_f,
     x=metric,
     nbins=30,
     color="TP",
     marginal="box"
 )
-st.plotly_chart(fig, width="stretch")
+st.plotly_chart(fig_hist, width="stretch")

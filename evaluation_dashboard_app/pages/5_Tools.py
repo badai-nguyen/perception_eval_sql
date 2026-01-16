@@ -2,8 +2,8 @@ import streamlit as st
 import re
 import subprocess
 
-st.set_page_config(page_title="Perception Evaluation Runner", layout="centered")
-st.title("Perception Evaluation Runner")
+st.set_page_config(page_title="lsim_analysis_tool runner", layout="centered")
+st.title("lsim_analysis_tool runner")
 
 # Constants and regexes
 JOB_RE = re.compile(r"/reports/([0-9a-fA-F-]{36})")
@@ -100,14 +100,4 @@ st.markdown("""
 - Enter your parameters above.
 - Job ID / Suite ID are automatically parsed when you enter the Evaluation URLs.
 - Click **Run in Terminal** to show the command for copy-paste.
-- Optional: tick the checkbox if you want to run **locally** in your `gnome-terminal` (Linux).
-- This tool does not guarantee security—review the command before running!
 """)
-st.markdown("""
-<script>
-const ta = window.parent.document.querySelector('textarea[aria-label="setup.bash path"]');
-if (ta) {
-  ta.setAttribute('spellcheck', 'false');
-}
-</script>
-""", unsafe_allow_html=True)
