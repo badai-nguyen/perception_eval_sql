@@ -1,14 +1,51 @@
 import streamlit as st
 import json
 import os
+import time
 import urllib.parse
 import requests
 import shutil
 import glob
+import yaml
+import tempfile
 from pathlib import Path
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
-from typing import Text
+from typing import Text, Optional, List, Dict, Any
+from lib.WebAPI import scenarioAPI
+
+# --- Persistent user config helpers ---
+CONFIG_FILE = os.path.expanduser("./configs/autoware_evaluator_dl_config.json")
+# Constants
+SCENARIO_API_BASE = "https://scenario.ci.web.auto/v1"
+EVALUATION_API_BASE = "https://evaluation.ci.web.auto/v3"
+
+def load_user_config():
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_user_config(config):
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+    except Exception as e:
+        st.warning(f"Could not save config: {e}")
+
+# Initialize or load user config
+_user_config = load_user_config()
+
+def get_config_value(key, default=None):
+    return _user_config.get(key, default)
+
+def set_config_value(key, value):
+    if _user_config.get(key) != value:
+        _user_config[key] = value
+        save_user_config(_user_config)
 
 # Try to import the authentication module, with fallback handling
 # https://github.com/tier4/webauto-auth-py.git
@@ -304,6 +341,225 @@ class JobResult:
         progress_bar.progress(1.0)
         st.success("File organization complete!")
 
+    def _download_scenario_file(self, url: str, output_path: str) -> bool:
+        """Download a single scenario file"""
+        try:
+            # Handle both direct URLs and API endpoints
+            if url.startswith(("http://", "https://")):
+                if self.__auth_session._AuthcliHelper__is_internal_url(url):
+                    # This is an API endpoint that needs authentication
+                    try:
+                        content = self.__auth_session.post(url, data={"expiration_time": 600})
+                        if "url" in content:
+                            return download_file(content["url"], output_path)
+                        else:
+                            st.error(f"Unexpected response format for URL: {url}")
+                            return False
+                    except Exception as e:
+                        st.error(f"API error for {url}: {str(e)}")
+                        return False
+                else:
+                    # Direct URL
+                    return download_file(url, output_path)
+            else:
+                st.error(f"Invalid URL format: {url}")
+                return False
+        except Exception as e:
+            st.error(f"Download error for {url}: {str(e)}")
+            return False
+            
+    def _download_additional_resources(self, yaml_content: dict, scenario_dir: str):
+        """Download additional resources referenced in scenario YAML"""
+        try:
+            # Check for Ego vehicle
+            if "ego" in yaml_content and "vehicle" in yaml_content["ego"]:
+                vehicle_data = yaml_content["ego"]["vehicle"]
+                if "url" in vehicle_data:
+                    vehicle_url = vehicle_data["url"]
+                    vehicle_file_name = os.path.basename(vehicle_url)
+                    vehicle_path = os.path.join(scenario_dir, vehicle_file_name)
+                    
+                    if self._download_scenario_file(vehicle_url, vehicle_path):
+                        yaml_content["ego"]["vehicle"]["url"] = vehicle_file_name
+            
+            # Check for NPC vehicles
+            if "npcs" in yaml_content:
+                for i, npc in enumerate(yaml_content["npcs"]):
+                    if "vehicle" in npc and "url" in npc["vehicle"]:
+                        npc_url = npc["vehicle"]["url"]
+                        npc_file_name = os.path.basename(npc_url)
+                        npc_path = os.path.join(scenario_dir, npc_file_name)
+                        
+                        if self._download_scenario_file(npc_url, npc_path):
+                            yaml_content["npcs"][i]["vehicle"]["url"] = npc_file_name
+            
+            # Save updated YAML
+            yaml_file_path = os.path.join(scenario_dir, "scenario.yaml")
+            with open(yaml_file_path, 'w') as f:
+                yaml.dump(yaml_content, f, default_flow_style=False)
+                
+        except Exception as e:
+            st.warning(f"Could not download additional resources: {str(e)}")
+
+    def download_scenarios(
+        self,
+        output_dir: str,
+        scenario_name_filter: Optional[str] = None,
+        overwrite: bool = False,
+        selected_ids: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Download scenarios from the job results.
+        
+        Args:
+            output_dir: Directory to save downloaded scenarios
+            scenario_name_filter: Optional filter for scenario names (substring match)
+            overwrite: Whether to overwrite existing files
+            selected_ids: Optional list of specific scenario IDs to download
+            
+        Returns:
+            List of downloaded scenario information
+        """
+        log_dicts = self.get_case_simlation_log_info()
+        downloaded_scenarios = []
+        
+        # Create output directory
+        os.makedirs(output_dir, exist_ok=True)
+        
+        st.write(f"Found {len(log_dicts)} scenarios in job results")
+        
+        # Apply filters if specified
+        if scenario_name_filter or selected_ids:
+            filtered_logs = []
+            for log_info in log_dicts:
+                include = True
+                
+                if scenario_name_filter and scenario_name_filter.lower() not in log_info["scenario_name"].lower():
+                    include = False
+                
+                if selected_ids and log_info["scenario_id"] not in selected_ids:
+                    include = False
+                
+                if include:
+                    filtered_logs.append(log_info)
+            
+            log_dicts = filtered_logs
+            st.write(f"Filtered to {len(log_dicts)} scenarios")
+        
+        if not log_dicts:
+            st.warning("No scenarios match the filter criteria")
+            return []
+        
+        # Download each scenario
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        scenario_api = scenarioAPI(self.__project_id)
+        for i, log_info in enumerate(log_dicts):
+            progress = (i + 1) / len(log_dicts)
+            progress_bar.progress(progress)
+            
+            scenario_name = log_info["scenario_name"]
+            scenario_id = log_info["scenario_id"]
+            
+            status_text.text(f"Downloading scenario {i+1}/{len(log_dicts)}: {scenario_name}")
+            
+            scenario = scenario_api.get_latest_scenario(scenario_id) # sometimes by scenario_name
+            print("scenario", scenario)
+            try:
+                # First get scenario metadata
+                
+                
+                # Check if already exists
+                scenario_dir = os.path.join(output_dir, f"{scenario_name}_{scenario_id}")
+                yaml_file_path = os.path.join(scenario_dir, "scenario.yaml")
+                scenario_dir_exists = os.path.exists(scenario_dir)
+                yaml_exists = os.path.exists(yaml_file_path)
+
+                if scenario_dir_exists and yaml_exists and not overwrite:
+                    st.info(f"Skipping existing scenario: {scenario_name}")
+                    downloaded_scenarios.append({
+                        "name": scenario_name,
+                        "id": scenario_id,
+                        "path": scenario_dir,
+                        "status": "skipped"
+                    })
+                    continue
+                
+                # Create scenario directory
+                os.makedirs(scenario_dir, exist_ok=True)
+                
+                # 1. Download scenario YAML
+                yaml_file_path = os.path.join(scenario_dir, "scenario.yaml")
+                with open(
+                    file=yaml_file_path,
+                    mode="w",
+                    encoding="utf-8",
+                ) as f:
+                    yaml.dump(
+                        data=json.loads(scenario["scenario_format"]),
+                        stream=f,
+                        allow_unicode=True,
+                        sort_keys=False,
+                    )
+
+                
+                # # 2. Download map if referenced in YAML
+                # try:
+                #     with open(yaml_file_path, 'r') as f:
+                #         yaml_content = yaml.safe_load(f)
+                    
+                #     if "map" in yaml_content and "url" in yaml_content["map"]:
+                #         map_url = yaml_content["map"]["url"]
+                #         map_file_name = os.path.basename(map_url)
+                #         map_file_path = os.path.join(scenario_dir, map_file_name)
+                        
+                #         if not self._download_scenario_file(map_url, map_file_path):
+                #             st.warning(f"Failed to download map for {scenario_name}")
+                #         else:
+                #             # Update YAML with local map path
+                #             yaml_content["map"]["url"] = map_file_name
+                #             with open(yaml_file_path, 'w') as f:
+                #                 yaml.dump(yaml_content, f, default_flow_style=False)
+                
+                # except (yaml.YAMLError, KeyError) as e:
+                #     st.warning(f"Error processing YAML for {scenario_name}: {str(e)}")
+                
+                # # 3. Download additional resources if needed
+                # self._download_additional_resources(yaml_content, scenario_dir)
+                
+                downloaded_scenarios.append({
+                    "name": scenario_name,
+                    "id": scenario_id,
+                    "path": scenario_dir,
+                    "status": "success"
+                })
+                
+                st.success(f"✓ Downloaded scenario: {scenario_name}")
+                
+            except Exception as e:
+                st.error(f"✗ Failed to download scenario {scenario_name}: {str(e)}")
+                downloaded_scenarios.append({
+                    "name": scenario_name,
+                    "id": scenario_id,
+                    "path": "",
+                    "status": "failed",
+                    "error": str(e)
+                })
+        
+        progress_bar.progress(1.0)
+        status_text.empty()
+        
+        # Summary
+        st.subheader("📊 Download Summary")
+        success_count = sum(1 for s in downloaded_scenarios if s["status"] == "success")
+        skipped_count = sum(1 for s in downloaded_scenarios if s["status"] == "skipped")
+        failed_count = sum(1 for s in downloaded_scenarios if s["status"] == "failed")
+        
+        st.write(f"- ✅ Successfully downloaded: {success_count}")
+        st.write(f"- ⏭️ Skipped (already exists): {skipped_count}")
+        st.write(f"- ❌ Failed: {failed_count}")
+        
+        return downloaded_scenarios
 
 st.set_page_config(
     page_title="Autoware Evaluator Downloader",
@@ -314,6 +570,13 @@ st.set_page_config(
 st.title("🚗 Autoware Evaluator Results Downloader")
 st.markdown("---")
 
+# Initialize session state
+if 'downloaded_scenarios' not in st.session_state:
+    st.session_state.downloaded_scenarios = []
+if 'current_tab' not in st.session_state:
+    st.session_state.current_tab = "Download Results"
+
+
 # Sidebar for configuration
 with st.sidebar:
     st.header("Configuration")
@@ -321,107 +584,271 @@ with st.sidebar:
     environment = st.selectbox(
         "Environment",
         ["default", "dev", "stg"],
-        help="Select the environment"
+        help="Select the environment",
+        index=["default", "dev", "stg"].index(get_config_value("environment", "default"))
     )
+    set_config_value("environment", environment)
     
     project_id = st.text_input(
         "Project ID",
-        value="x2_dev",
+        value=get_config_value("project_id", "x2_dev"),
         help="Enter the project ID"
     )
+    set_config_value("project_id", project_id)
+
     job_id = st.text_input(
         "Job ID",
+        value=get_config_value("job_id", ""),
         help="Enter the job ID"
     )
+    set_config_value("job_id", job_id)
     
     suite_id = st.text_input(
         "Suite ID",
+        value=get_config_value("suite_id", ""),
         help="Enter the suite ID"
     )
+    set_config_value("suite_id", suite_id)
     
     output_path = st.text_input(
         "Output Path",
-        value="./downloads",
+        value=get_config_value("output_path", "./downloads"),
         help="Path where files will be saved"
     )
+    set_config_value("output_path", output_path)
     
     download_type = st.radio(
         "Download Type",
-        ["Archives (ZIP)", "Result JSON only"]
+        ["Archives (ZIP)", "Result JSON only"],
+        index=["Archives (ZIP)", "Result JSON only"].index(get_config_value("download_type", "Archives (ZIP)"))
     )
+    set_config_value("download_type", download_type)
     
     if download_type == "Archives (ZIP)":
         phase = st.text_input(
             "Phase to extract",
-            value="phase_name",
+            value=get_config_value("phase", "phase_name"),
             help="Enter the phase name to extract from archives"
         )
+        set_config_value("phase", phase)
 
-# Main content area
-if st.button("Download Results", type="primary"):
-    if not all([project_id, job_id, suite_id]):
-        st.error("Please fill in all required fields: Project ID, Job ID, and Suite ID")
-        st.stop()
+# Main tabs
+tab1, tab2, tab3 = st.tabs(["📥 Download Results", "🗺️ Download Scenarios", "📊 View Downloads"])
+
+
     
-    # Create output directory
-    os.makedirs(output_path, exist_ok=True)
+with tab1:
+    st.header("Download Job Results")
+        
+
+    # Main content area
+    if st.button("Download Results", type="primary"):
+        if not all([project_id, job_id, suite_id]):
+            st.error("Please fill in all required fields: Project ID, Job ID, and Suite ID")
+            st.stop()
+        
+        # Create output directory
+        os.makedirs(output_path, exist_ok=True)
+        
+        # Save all params to config so they're always updated with last inputs
+        set_config_value("environment", environment)
+        set_config_value("project_id", project_id)
+        set_config_value("job_id", job_id)
+        set_config_value("suite_id", suite_id)
+        set_config_value("output_path", output_path)
+        set_config_value("download_type", download_type)
+        if download_type == "Archives (ZIP)":
+            set_config_value("phase", phase)
+        
+        try:
+            # Initialize JobResult
+            job_result = JobResult(
+                environment=environment,
+                project_id=project_id,
+                job_id=job_id,
+                suite_id=suite_id,
+                output_path=output_path
+            )
+            
+            if download_type == "Archives (ZIP)":
+                with st.expander("Downloading Archives", expanded=True):
+                    remain_list = job_result.download_archive_and_unzip(phase)
+                    st.success(f"✅ Downloaded and extracted {len(remain_list)} archives")
+                    
+                    # Show summary
+                    st.subheader("📊 Summary")
+                    st.write(f"- Total scenarios processed: {len(remain_list)}")
+                    st.write(f"- Output directory: `{output_path}`")
+                    
+            else:  # Result JSON only
+                with st.expander("Downloading Result JSON", expanded=True):
+                    log_dicts = job_result.download_result_json()
+                    st.success(f"✅ Downloaded {len(log_dicts)} JSON files")
+                    
+                    # Show summary
+                    st.subheader("📊 Summary")
+                    st.write(f"- Total JSON files: {len(log_dicts)}")
+                    st.write(f"- Output directory: `{output_path}`")
+            
+            # Show file tree
+            with st.expander("📁 File Structure"):
+                for root, dirs, files in os.walk(output_path):
+                    level = root.replace(output_path, '').count(os.sep)
+                    indent = ' ' * 4 * level
+                    st.text(f"{indent}{os.path.basename(root)}/")
+                    subindent = ' ' * 4 * (level + 1)
+                    for file in files:
+                        st.text(f"{subindent}{file}")
+                        
+        except Exception as e:
+            st.error(f"❌ Error: {str(e)}")
+            st.exception(e)
+
+    # Information section
+    with st.expander("ℹ️ How to use"):
+        st.markdown("""
+        1. **Get your IDs:**
+            - Project ID, Job ID, and Suite ID can be found in the Autoware Evaluator URL
+            - Example URL: `https://evaluation.ci.web.auto/v3/projects/{project_id}/jobs/{job_id}`
+        
+        2. **Choose download type:**
+            - **Archives (ZIP):** Downloads zip files and extracts specific phase data
+            - **Result JSON only:** Downloads only the result JSON files
+        
+        3. **Output:**
+            - Files will be saved to the specified output directory
+            - Each scenario gets its own folder
+        """)
+
+
+with tab2:
+    st.header("Download Scenarios")
     
-    try:
-        # Initialize JobResult
-        job_result = JobResult(
-            environment=environment,
-            project_id=project_id,
-            job_id=job_id,
-            suite_id=suite_id,
-            output_path=output_path
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        scenario_filter = st.text_input(
+            "Filter by scenario name (optional)",
+            placeholder="e.g., intersection, highway",
+            help="Only download scenarios containing this text in their name"
+        )
+    
+    with col2:
+        overwrite = st.checkbox(
+            "Overwrite existing files",
+            value=False,
+            help="If checked, will redownload scenarios even if they already exist"
+        )
+    
+    # Advanced options
+    with st.expander("Advanced Options"):
+        st.write("Specify specific scenario IDs to download (one per line):")
+        scenario_ids_text = st.text_area(
+            "Scenario IDs",
+            placeholder="Enter one scenario ID per line",
+            height=100
+        )
+    
+    if st.button("Download Scenarios", type="primary", key="download_scenarios"):
+        if not all([project_id, job_id, suite_id]):
+            st.error("Please fill in all required fields: Project ID, Job ID, and Suite ID")
+            st.stop()
+        
+        # Parse scenario IDs
+        selected_ids = None
+        if scenario_ids_text:
+            selected_ids = [id.strip() for id in scenario_ids_text.split('\n') if id.strip()]
+            st.info(f"Will download {len(selected_ids)} specific scenarios")
+        
+        try:
+            # Initialize JobResult
+            job_result = JobResult(
+                environment=environment,
+                project_id=project_id,
+                job_id=job_id,
+                suite_id=suite_id,
+                output_path=output_path
+            )
+            
+            # Create scenarios subdirectory
+            scenarios_dir = os.path.join(output_path, "scenarios")
+            
+            with st.expander("Downloading Scenarios", expanded=True):
+                downloaded = job_result.download_scenarios(
+                    output_dir=scenarios_dir,
+                    scenario_name_filter=scenario_filter,
+                    overwrite=overwrite,
+                    selected_ids=selected_ids
+                )
+                
+                # Store in session state
+                st.session_state.downloaded_scenarios = downloaded
+                
+                # Show detailed results
+                st.subheader("📋 Detailed Results")
+                
+                success_scenarios = [s for s in downloaded if s["status"] == "success"]
+                if success_scenarios:
+                    st.write("Successfully downloaded scenarios:")
+                    for scenario in success_scenarios:
+                        st.write(f"• {scenario['name']} (ID: {scenario['id']})")
+                
+        except Exception as e:
+            st.error(f"❌ Error downloading scenarios: {str(e)}")
+            st.exception(e)
+
+with tab3:
+    st.header("View Downloaded Content")
+    
+    if not os.path.exists(output_path):
+        st.info("No downloads yet. Use the other tabs to download content first.")
+    else:
+        # Show directory structure
+        st.subheader("📁 Directory Structure")
+        
+        # Let user browse directories
+        selected_dir = st.selectbox(
+            "Browse directory",
+            [output_path] + [os.path.join(output_path, d) for d in os.listdir(output_path) 
+                            if os.path.isdir(os.path.join(output_path, d))]
         )
         
-        if download_type == "Archives (ZIP)":
-            with st.expander("Downloading Archives", expanded=True):
-                remain_list = job_result.download_archive_and_unzip(phase)
-                st.success(f"✅ Downloaded and extracted {len(remain_list)} archives")
-                
-                # Show summary
-                st.subheader("📊 Summary")
-                st.write(f"- Total scenarios processed: {len(remain_list)}")
-                st.write(f"- Output directory: `{output_path}`")
-                
-        else:  # Result JSON only
-            with st.expander("Downloading Result JSON", expanded=True):
-                log_dicts = job_result.download_result_json()
-                st.success(f"✅ Downloaded {len(log_dicts)} JSON files")
-                
-                # Show summary
-                st.subheader("📊 Summary")
-                st.write(f"- Total JSON files: {len(log_dicts)}")
-                st.write(f"- Output directory: `{output_path}`")
+        if os.path.exists(selected_dir):
+            # Show files in selected directory
+            st.write(f"**Files in `{selected_dir}`:**")
+            
+            files = os.listdir(selected_dir)
+            if files:
+                for file in sorted(files):
+                    file_path = os.path.join(selected_dir, file)
+                    if os.path.isdir(file_path):
+                        st.write(f"📁 **{file}/**")
+                        # Show files in subdirectory
+                        sub_files = os.listdir(file_path)
+                        for sub_file in sorted(sub_files)[:10]:  # Limit to 10 files
+                            st.write(f"    └─ {sub_file}")
+                        if len(sub_files) > 10:
+                            st.write(f"    └─ ... and {len(sub_files) - 10} more files")
+                    else:
+                        file_size = os.path.getsize(file_path)
+                        size_str = f"{file_size / 1024:.1f} KB" if file_size < 1024*1024 else f"{file_size / (1024*1024):.1f} MB"
+                        st.write(f"📄 {file} ({size_str})")
+            else:
+                st.write("No files in this directory")
         
-        # Show file tree
-        with st.expander("📁 File Structure"):
-            for root, dirs, files in os.walk(output_path):
-                level = root.replace(output_path, '').count(os.sep)
-                indent = ' ' * 4 * level
-                st.text(f"{indent}{os.path.basename(root)}/")
-                subindent = ' ' * 4 * (level + 1)
-                for file in files:
-                    st.text(f"{subindent}{file}")
-                    
-    except Exception as e:
-        st.error(f"❌ Error: {str(e)}")
-        st.exception(e)
+        # Show session state downloads
+        if st.session_state.downloaded_scenarios:
+            st.subheader("📋 Recent Scenario Downloads")
+            df_data = []
+            for scenario in st.session_state.downloaded_scenarios:
+                df_data.append({
+                    "Scenario Name": scenario["name"],
+                    "ID": scenario["id"],
+                    "Status": scenario["status"],
+                    "Path": scenario.get("path", "N/A")
+                })
+            
+            import pandas as pd
+            df = pd.DataFrame(df_data)
+            st.dataframe(df, use_container_width=True)
 
-# Information section
-with st.expander("ℹ️ How to use"):
-    st.markdown("""
-    1. **Get your IDs:**
-        - Project ID, Job ID, and Suite ID can be found in the Autoware Evaluator URL
-        - Example URL: `https://evaluation.ci.web.auto/v3/projects/{project_id}/jobs/{job_id}`
-    
-    2. **Choose download type:**
-        - **Archives (ZIP):** Downloads zip files and extracts specific phase data
-        - **Result JSON only:** Downloads only the result JSON files
-    
-    3. **Output:**
-        - Files will be saved to the specified output directory
-        - Each scenario gets its own folder
-    """)
