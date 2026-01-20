@@ -9,6 +9,7 @@ import glob
 import yaml
 import tempfile
 import traceback
+import pandas as pd
 from pathlib import Path
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
@@ -727,6 +728,42 @@ with tab1:
         if st.button("Stop Downloads", key="stop_downloads_btn"):
             st.session_state.stop_downloads = True
             st.warning("Stop requested. Current download will finish then halt.")
+
+
+    if st.button("List Available Logs Info"):
+        if not all([project_id, job_id, suite_id]):
+            st.error("Please fill in all required fields: Project ID, Job ID, and Suite ID")
+            st.stop()
+        try:
+            # Initialize JobResult
+            job_result = JobResult(
+                environment=environment,
+                project_id=project_id,
+                job_id=job_id,
+                suite_id=suite_id,
+                output_path=output_path
+            )
+            log_dicts = job_result.get_case_simlation_log_info()
+            st.subheader("Simulation Logs Info")
+            if log_dicts:
+                display_keys = [
+                    "scenario_name", 
+                    "archive_id", 
+                    "result_json_id", 
+                    "scenario_id", 
+                    "scenario_ver"
+                ]
+                # Flatten to DataFrame for selected keys
+                table_data = [
+                    {k: log.get(k, "") for k in display_keys} 
+                    for log in log_dicts
+                ]
+                df = pd.DataFrame(table_data)
+                st.dataframe(df)
+            else:
+                st.info("No log info found for the current suite/job/project combination.")
+        except Exception as e:
+            st.error(f"Failed to retrieve log info: {str(e)}")
 
     if st.button("Download Results", type="primary"):
         st.session_state.stop_downloads = False
