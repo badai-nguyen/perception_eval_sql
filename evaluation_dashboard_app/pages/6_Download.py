@@ -178,13 +178,46 @@ class JobResult:
 
         st.write(f"Found {len(log_dicts)} logs")
         remain_list = []
+        download_rows = []
         for i, log_info in enumerate(log_dicts):
+            if st.session_state.get("stop_downloads"):
+                st.warning("Download stopped by user.")
+                break
             # Show progress in Streamlit
             with st.spinner(f"Downloading {i+1}/{len(log_dicts)}: {log_info['scenario_name']}"):
                 # Add a condition to skip if necessary
-                if "second" not in log_info["scenario_name"]:
-                    self.download_archive_log(log_info, "archive_id", "zip")
-            remain_list.append(log_info)
+                if "second" in log_info["scenario_name"]:
+                    status = "skipped"
+                    detail = "matched skip rule"
+                else:
+                    try:
+                        ok = self.download_archive_log(log_info, "archive_id", "zip")
+                        status = "downloaded" if ok else "failed"
+                        detail = "ok" if ok else "download failed"
+                    except Exception as e:
+                        status = "failed"
+                        detail = str(e)
+                download_rows.append(
+                    {
+                        "archive_id": log_info["archive_id"],
+                        "result_json_id": log_info["result_json_id"],
+                        "scenario_name": log_info["scenario_name"],
+                        "scenario_id": log_info["scenario_id"],
+                        "scenario_ver": log_info["scenario_ver"],
+                        "status": status,
+                        "detail": detail,
+                    }
+                )
+                remain_list.append(log_info)
+
+        if download_rows:
+            try:
+                import pandas as pd
+
+                st.subheader("📋 Download Status")
+                st.dataframe(pd.DataFrame(download_rows), use_container_width=True)
+            except Exception as e:
+                st.warning(f"Could not render download table: {e}")
         
         with st.spinner("Extracting archives..."):
             self.extract_archives(phase)
@@ -195,6 +228,9 @@ class JobResult:
         st.write(f"Found {len(log_dicts)} result JSON files")
         
         for i, log_info in enumerate(log_dicts):
+            if st.session_state.get("stop_downloads"):
+                st.warning("Download stopped by user.")
+                break
             with st.spinner(f"Downloading JSON {i+1}/{len(log_dicts)}: {log_info['scenario_name']}"):
                 self.download_archive_log(log_info, "result_json_id", "json")
         
@@ -256,7 +292,7 @@ class JobResult:
         progress_bar.empty()
         return simlation_archive_log_info
 
-    def download_archive_log(self, log_info, type, format):
+    def download_archive_log(self, log_info, type, format) -> bool:
         url = (
             self.__api_base_url
             + "/projects/"
@@ -276,14 +312,19 @@ class JobResult:
             content = self.__auth_session.post(url, data=post_obj)
         except Exception as e:
             st.error(f"Can not get log_id {log_info[type]}: {str(e)}")
-            return
+            return False
 
         # Create output directory if it doesn't exist
         os.makedirs(self.__output_path, exist_ok=True)
         
         output_file = os.path.join(self.__output_path, dl_filename)
-        download_file(content["url"], output_file)
+        try:
+            download_file(content["url"], output_file)
+        except Exception as e:
+            st.error(f"Failed to download {dl_filename}: {e}")
+            return False
         st.success(f"Downloaded: {dl_filename}")
+        return True
 
     def extract_archives(self, phase):
         archive_paths = glob.glob(os.path.join(self.__output_path, "*.zip"))
@@ -577,6 +618,8 @@ if 'downloaded_scenarios' not in st.session_state:
     st.session_state.downloaded_scenarios = []
 if 'current_tab' not in st.session_state:
     st.session_state.current_tab = "Download Results"
+if "stop_downloads" not in st.session_state:
+    st.session_state.stop_downloads = False
 
 
 def find_eval_result_dirs(root_dir: str, recursive: bool = True) -> List[str]:
@@ -679,7 +722,14 @@ with tab1:
         
 
     # Main content area
+    stop_col, _ = st.columns([1, 5])
+    with stop_col:
+        if st.button("Stop Downloads", key="stop_downloads_btn"):
+            st.session_state.stop_downloads = True
+            st.warning("Stop requested. Current download will finish then halt.")
+
     if st.button("Download Results", type="primary"):
+        st.session_state.stop_downloads = False
         if not all([project_id, job_id, suite_id]):
             st.error("Please fill in all required fields: Project ID, Job ID, and Suite ID")
             st.stop()
