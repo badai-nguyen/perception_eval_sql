@@ -8,6 +8,7 @@ import shutil
 import glob
 import yaml
 import tempfile
+import traceback
 from pathlib import Path
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
@@ -294,7 +295,8 @@ class JobResult:
             
             dir_path = archive_path.replace(".zip", "")
             shutil.unpack_archive(archive_path, dir_path)
-            os.remove(archive_path)
+            print("dir_path", dir_path)
+            #os.remove(archive_path)
 
             for sub_dir_path in os.listdir(dir_path):
                 if Path(sub_dir_path).name == "scenario.yaml":
@@ -577,6 +579,39 @@ if 'current_tab' not in st.session_state:
     st.session_state.current_tab = "Download Results"
 
 
+def find_eval_result_dirs(root_dir: str, recursive: bool = True) -> List[str]:
+    if not os.path.isdir(root_dir):
+        return []
+    if recursive:
+        walker = os.walk(root_dir)
+    else:
+        walker = [(root_dir, [d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d))], [])]
+    result_dirs = []
+    for current_dir, subdirs, files in walker:
+        if "scenario.yaml" in files and "scene_result.pkl" in files:
+            result_dirs.append(current_dir)
+    return sorted(result_dirs)
+
+
+def run_eval_result_for_dir(result_dir: str, overwrite: bool = False) -> Dict[str, Any]:
+    result_file = os.path.join(result_dir, "result.txt")
+    if os.path.exists(result_file) and not overwrite:
+        return {"path": result_dir, "status": "skipped", "detail": "result.txt exists"}
+
+    try:
+        from perception_eval_result_summarizer import run_eval_result
+
+        report_text = run_eval_result(result_dir)
+        with open(result_file, "w", encoding="utf-8") as f:
+            f.write(report_text)
+        return {"path": result_dir, "status": "success", "detail": "completed"}
+    except Exception as e:
+        error_output = f"Error: {e}\n{traceback.format_exc()}"
+        with open(result_file, "w", encoding="utf-8") as f:
+            f.write(error_output)
+        return {"path": result_dir, "status": "failed", "detail": str(e)}
+
+
 # Sidebar for configuration
 with st.sidebar:
     st.header("Configuration")
@@ -633,7 +668,9 @@ with st.sidebar:
         set_config_value("phase", phase)
 
 # Main tabs
-tab1, tab2, tab3 = st.tabs(["📥 Download Results", "🗺️ Download Scenarios", "📊 View Downloads"])
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["📥 Download Results", "🗺️ Download Scenarios", "📊 View Downloads", "🧮 Eval Results"]
+)
 
 
     
@@ -852,3 +889,62 @@ with tab3:
             df = pd.DataFrame(df_data)
             st.dataframe(df, use_container_width=True)
 
+
+with tab4:
+    st.header("Eval Results (per directory)")
+
+    eval_root = st.text_input(
+        "Root directory to evaluate",
+        value=get_config_value("eval_root", output_path),
+        help="Directory containing downloaded scenario results",
+    )
+    set_config_value("eval_root", eval_root)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        eval_recursive = st.checkbox(
+            "Search subdirectories",
+            value=get_config_value("eval_recursive", True),
+            help="If checked, search all subdirectories for scenario results",
+        )
+    with col2:
+        eval_overwrite = st.checkbox(
+            "Overwrite existing result.txt",
+            value=get_config_value("eval_overwrite", False),
+            help="If unchecked, directories with result.txt will be skipped",
+        )
+    set_config_value("eval_recursive", eval_recursive)
+    set_config_value("eval_overwrite", eval_overwrite)
+
+    if st.button("Run eval_result for all directories", type="primary", key="run_eval_result"):
+        with st.spinner("Searching for result directories..."):
+            target_dirs = find_eval_result_dirs(eval_root, recursive=eval_recursive)
+
+        if not target_dirs:
+            st.warning("No directories found with scenario.yaml and scene_result.pkl")
+            st.stop()
+
+        st.write(f"Found {len(target_dirs)} directories to process")
+        progress = st.progress(0)
+        results = []
+
+        for i, result_dir in enumerate(target_dirs):
+            progress.progress((i + 1) / len(target_dirs))
+            results.append(run_eval_result_for_dir(result_dir, overwrite=eval_overwrite))
+
+        progress.progress(1.0)
+
+        success_count = sum(1 for r in results if r["status"] == "success")
+        skipped_count = sum(1 for r in results if r["status"] == "skipped")
+        failed_count = sum(1 for r in results if r["status"] == "failed")
+
+        st.subheader("📊 Eval Summary")
+        st.write(f"- ✅ Success: {success_count}")
+        st.write(f"- ⏭️ Skipped: {skipped_count}")
+        st.write(f"- ❌ Failed: {failed_count}")
+
+        if results:
+            import pandas as pd
+
+            st.subheader("📋 Details")
+            st.dataframe(pd.DataFrame(results), use_container_width=True)
