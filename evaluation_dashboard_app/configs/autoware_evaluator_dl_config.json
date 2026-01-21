@@ -1,0 +1,12 @@
+{
+  "environment": "default",
+  "project_id": "x2_dev",
+  "job_id": "d4204a04-e0df-5dd4-8b35-c689b10afe9c",
+  "suite_id": "84c2a34e-387d-4218-927a-e06308e6fccc",
+  "output_path": "./downloads",
+  "download_type": "Archives (ZIP)",
+  "phase": "perception.object_recognition.tracking.objects",
+  "eval_root": "./downloads",
+  "eval_recursive": true,
+  "eval_overwrite": false
+}

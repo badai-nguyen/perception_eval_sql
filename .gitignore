@@ -1,2 +1,7 @@
 # data
 data/
+downloads/
+*.pyc
+*.txt
+*.pkl
+*.zip
