@@ -15,6 +15,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 from typing import Text, Optional, List, Dict, Any
 from lib.WebAPI import scenarioAPI
+from lib.perception_eval_result_summarizer import run_eval_result
 
 # --- Persistent user config helpers ---
 CONFIG_FILE = os.path.expanduser("./configs/autoware_evaluator_dl_config.json")
@@ -149,11 +150,15 @@ def download_file(
     chunk_size: int = 1024 * 1024,
     timeout: int = 10,
     min_progress_mb: float = 5.0,
+    skip_large_file: bool = False,
+    large_file_mb: float = 50.0,
 ) -> int:
     """
     Download a file with optional progress display.
 
     Progress is shown only if the total file size is >= min_progress_mb.
+
+    If skip_large_file is True and file size >= large_file_mb, skip and return 0.
 
     Returns:
         int: downloaded size in bytes
@@ -165,6 +170,13 @@ def download_file(
 
     total_size = int(r.headers.get("content-length", 0))
     show_progress = total_size >= min_progress_mb * 1024 * 1024
+
+    # Check for large file skip
+    if skip_large_file and total_size > 0 and (total_size / (1024 * 1024)) >= large_file_mb:
+        print(
+            f"Skipping download of {output_file}: file size {total_size/1024/1024:.1f} MB exceeds threshold ({large_file_mb} MB)"
+        )
+        return 0
 
     downloaded = 0
     start_time = time.time()
@@ -366,7 +378,7 @@ class JobResult:
         
         output_file = os.path.join(self.__output_path, dl_filename)
         try:
-            download_file(content["url"], output_file)
+            download_file(content["url"], output_file, skip_large_file=True)
         except Exception as e:
             st.error(f"Failed to download {dl_filename}: {e}")
             return False
@@ -383,7 +395,6 @@ class JobResult:
             
             dir_path = archive_path.replace(".zip", "")
             shutil.unpack_archive(archive_path, dir_path)
-            print("dir_path", dir_path)
             #os.remove(archive_path)
 
             for sub_dir_path in os.listdir(dir_path):
@@ -689,7 +700,6 @@ def run_eval_result_for_dir(result_dir: str, overwrite: bool = False) -> Dict[st
         return {"path": result_dir, "status": "skipped", "detail": "result.txt exists"}
 
     try:
-        from perception_eval_result_summarizer import run_eval_result
 
         report_text = run_eval_result(result_dir)
         with open(result_file, "w", encoding="utf-8") as f:
@@ -1052,6 +1062,7 @@ with tab4:
     if st.button("Run eval_result for all directories", type="primary", key="run_eval_result"):
         with st.spinner("Searching for result directories..."):
             target_dirs = find_eval_result_dirs(eval_root, recursive=eval_recursive)
+            print("target_dirs", target_dirs)
 
         if not target_dirs:
             st.warning("No directories found with scenario.yaml and scene_result.pkl")
