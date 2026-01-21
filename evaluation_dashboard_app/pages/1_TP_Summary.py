@@ -19,6 +19,10 @@ if mode == "Compare Mode":
     df_b = runB["summary"] if runB else None
     df_cmp = st.session_state.get("df_cmp")
 
+st.subheader("Loaded Runs")
+st.markdown(f"**Baseline (A):** `{runA['path']}`")
+if mode == "Compare Mode":
+    st.markdown(f"**Candidate (B):** `{runB['path']}`")
 # ========== View Selector ==========
 if mode == "Compare Mode":
     view = st.sidebar.selectbox(

@@ -20,6 +20,10 @@ df_raw_A = runA["score"]
 runB = st.session_state.get("runB")
 df_raw_B = runB["score"] if runB else None
 
+st.subheader("Loaded Runs")
+st.markdown(f"**Baseline (A):** `{runA['path']}`")
+if mode == "Compare Mode":
+    st.markdown(f"**Candidate (B):** `{runB['path']}`")
 # =========================
 # Constants
 # =========================

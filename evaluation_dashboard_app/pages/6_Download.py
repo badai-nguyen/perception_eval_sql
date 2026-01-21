@@ -801,12 +801,10 @@ def generate_summary_and_score_csv(input_path: str) -> Dict[str, Any]:
         line += f"{dic.get('Option', '')},"
         line += f"{dic.get('criteria0', {}).get('GT_OBJ', '')},"
 
-        for k, v in dic.items():
-            if k == "Option":
-                continue
-            if not isinstance(v, dict):
-                continue
-
+        dic_items = [(k, v) for k, v in dic.items() if k != "Option" and isinstance(v, dict)]
+        num_items = len(dic_items)
+        for idx, (k, v) in enumerate(dic_items):
+            is_last = idx == (num_items - 1)
             line += f"{k},"
             line += f"{v.get('NM', '')},"
             line += f"{v.get('TP/TN', '')},"
@@ -839,9 +837,10 @@ def generate_summary_and_score_csv(input_path: str) -> Dict[str, Any]:
             obj_cnts = v.get("OBJ_CNTS", {})
             if isinstance(obj_cnts, dict):
                 obj_parts = [f"{obj}:{cnt}" for obj, cnt in obj_cnts.items()]
-                line += ";".join(obj_parts) + ","
-            else:
-                line += ","
+                line += ";".join(obj_parts) 
+            # Only add trailing comma if not last
+                if not is_last:
+                    line += ","
 
         score_lines.append(line + "\n")
 
@@ -1204,47 +1203,69 @@ with tab4:
     set_config_value("eval_recursive", eval_recursive)
     set_config_value("eval_overwrite", eval_overwrite)
 
-    if st.button("Run eval_result for all directories", type="primary", key="run_eval_result"):
-        with st.spinner("Searching for result directories..."):
-            target_dirs = find_eval_result_dirs(eval_root, recursive=eval_recursive)
-            print("target_dirs", target_dirs)
+    # New option: Only generate summary/score csv
+    only_generate_summary = st.checkbox(
+        "Only generate Summary.csv and Score.csv",
+        value=False,
+        help="If checked, skip running eval_result per directory and generate only the summary/score CSVs from existing results."
+    )
 
-        if not target_dirs:
-            st.warning("No directories found with scenario.yaml and scene_result.pkl")
-            st.stop()
+    if st.button(
+        "Run eval_result for all directories" if not only_generate_summary else "Generate Summary and Score CSV only",
+        type="primary",
+        key="run_eval_result"
+    ):
+        import pandas as pd
 
-        st.write(f"Found {len(target_dirs)} directories to process")
-        progress = st.progress(0)
-        results = []
+        if only_generate_summary:
+            with st.spinner("Generating Summary.csv and Score.csv..."):
+                try:
+                    csv_info = generate_summary_and_score_csv(eval_root)
+                    st.success(
+                        f"Generated Summary.csv ({csv_info['summary_rows']} rows) and "
+                        f"Score.csv ({csv_info['score_rows']} rows) in `{eval_root}`"
+                    )
+                except Exception as e:
+                    st.error(f"Failed to generate CSV files: {e}")
+        else:
+            with st.spinner("Searching for result directories..."):
+                target_dirs = find_eval_result_dirs(eval_root, recursive=eval_recursive)
+                print("target_dirs", target_dirs)
 
-        for i, result_dir in enumerate(target_dirs):
-            progress.progress((i + 1) / len(target_dirs))
-            results.append(run_eval_result_for_dir(result_dir, overwrite=eval_overwrite))
+            if not target_dirs:
+                st.warning("No directories found with scenario.yaml and scene_result.pkl")
+                st.stop()
 
-        progress.progress(1.0)
+            st.write(f"Found {len(target_dirs)} directories to process")
+            progress = st.progress(0)
+            results = []
 
-        success_count = sum(1 for r in results if r["status"] == "success")
-        skipped_count = sum(1 for r in results if r["status"] == "skipped")
-        failed_count = sum(1 for r in results if r["status"] == "failed")
+            for i, result_dir in enumerate(target_dirs):
+                progress.progress((i + 1) / len(target_dirs))
+                results.append(run_eval_result_for_dir(result_dir, overwrite=eval_overwrite))
 
-        st.subheader("📊 Eval Summary")
-        st.write(f"- ✅ Success: {success_count}")
-        st.write(f"- ⏭️ Skipped: {skipped_count}")
-        st.write(f"- ❌ Failed: {failed_count}")
+            progress.progress(1.0)
 
-        if results:
-            import pandas as pd
+            success_count = sum(1 for r in results if r["status"] == "success")
+            skipped_count = sum(1 for r in results if r["status"] == "skipped")
+            failed_count = sum(1 for r in results if r["status"] == "failed")
 
-            st.subheader("📋 Details")
-            st.dataframe(pd.DataFrame(results), use_container_width=True)
+            st.subheader("📊 Eval Summary")
+            st.write(f"- ✅ Success: {success_count}")
+            st.write(f"- ⏭️ Skipped: {skipped_count}")
+            st.write(f"- ❌ Failed: {failed_count}")
 
-        # Generate summary CSVs at the eval_root level
-        with st.spinner("Generating Summary.csv and Score.csv..."):
-            try:
-                csv_info = generate_summary_and_score_csv(eval_root)
-                st.success(
-                    f"Generated Summary.csv ({csv_info['summary_rows']} rows) and "
-                    f"Score.csv ({csv_info['score_rows']} rows) in `{eval_root}`"
-                )
-            except Exception as e:
-                st.error(f"Failed to generate CSV files: {e}")
+            if results:
+                st.subheader("📋 Details")
+                st.dataframe(pd.DataFrame(results), use_container_width=True)
+
+            # Generate summary CSVs at the eval_root level
+            with st.spinner("Generating Summary.csv and Score.csv..."):
+                try:
+                    csv_info = generate_summary_and_score_csv(eval_root)
+                    st.success(
+                        f"Generated Summary.csv ({csv_info['summary_rows']} rows) and "
+                        f"Score.csv ({csv_info['score_rows']} rows) in `{eval_root}`"
+                    )
+                except Exception as e:
+                    st.error(f"Failed to generate CSV files: {e}")

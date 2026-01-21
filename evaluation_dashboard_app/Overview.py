@@ -45,26 +45,48 @@ def build_summary_delta(df_a, df_b):
         result[f"{m}_delta"] = df_b.loc[common_idx, m] - df_a.loc[common_idx, m]
     return result.reset_index()
 
+def _safe_default(default_lst, options_lst):
+    # Returns only those elements from default_lst that are also in options_lst
+    # both expected to be list-like objects of hashables
+    if not isinstance(default_lst, list):
+        default_lst = list(default_lst) if default_lst is not None else []
+    options_set = set(options_lst)
+    safe = [x for x in default_lst if x in options_set]
+    return safe
+
 def create_filter_widgets(all_runs_data):
-    # Collect and sort unique labels
+    # Collect and sort unique labels, taking care of possible missing or empty labels
     pl, prodl = set(), set()
     for run in all_runs_data:
         summary = run["summary"]
-        pl.update(summary["perception_label"].dropna().unique())
-        prodl.update(summary["product_label"].dropna().unique())
+        # Guard against completely missing columns or all-na
+        if "perception_label" in summary.columns:
+            pl.update(
+                [x for x in summary["perception_label"].dropna().unique() if str(x).strip() != ""]
+            )
+        if "product_label" in summary.columns:
+            prodl.update(
+                [x for x in summary["product_label"].dropna().unique() if str(x).strip() != ""]
+            )
     perception_labels, product_labels = sorted(pl), sorted(prodl)
     label2ja = {label: PRODUCT_LABEL_JA.get(label, label) for label in product_labels}
     ja2label = {v: k for k, v in label2ja.items()}
     ja_cand = [label2ja.get(l, l) for l in product_labels]
 
-    # Preserve UI state
-    st.session_state.setdefault("selected_perception_labels", perception_labels)
-    st.session_state.setdefault("selected_product_ja_labels", ja_cand)
+    # Preserve UI state but only keep defaults that exist in actual options (avoid StreamlitAPIException)
+    prev_perc = st.session_state.get("selected_perception_labels", perception_labels)
+    prev_prod_ja = st.session_state.get("selected_product_ja_labels", ja_cand)
+
+    safe_default_perc = _safe_default(prev_perc, perception_labels)
+    safe_default_prod_ja = _safe_default(prev_prod_ja, ja_cand)
+
+    st.session_state["selected_perception_labels"] = safe_default_perc
+    st.session_state["selected_product_ja_labels"] = safe_default_prod_ja
 
     selected_perception_labels = st.sidebar.multiselect("Perception Label Filter", perception_labels,
-        default=st.session_state["selected_perception_labels"], key="perception_filter_widget")
+        default=safe_default_perc, key="perception_filter_widget")
     selected_ja_labels = st.sidebar.multiselect("Product Label Filter", ja_cand,
-        default=st.session_state["selected_product_ja_labels"], key="product_filter_widget")
+        default=safe_default_prod_ja, key="product_filter_widget")
 
     st.session_state["selected_perception_labels"] = selected_perception_labels
     st.session_state["selected_product_ja_labels"] = selected_ja_labels
@@ -78,9 +100,13 @@ def create_filter_widgets(all_runs_data):
 
 def apply_filters(run_data, filters):
     s = run_data["summary"]
-    if filters["perception_labels"]:
+    if filters["perception_labels"] and "perception_label" in s.columns:
+        # Filter only non-empty perception_label
+        s = s[s["perception_label"].notna() & (s["perception_label"].astype(str).str.strip() != "")]
         s = s[s["perception_label"].isin(filters["perception_labels"])]
-    if filters["product_labels"]:
+    if filters["product_labels"] and "product_label" in s.columns:
+        # Filter only non-empty product_label
+        s = s[s["product_label"].notna() & (s["product_label"].astype(str).str.strip() != "")]
         s = s[s["product_label"].isin(filters["product_labels"])]
     return {**run_data, "summary": s}
 
@@ -95,15 +121,23 @@ def display_metric_with_stats_single(metric, s):
 def show_grouped_metrics_plot(df, group_col, label_map=None, mode="single", df_b=None):
     st.markdown(f"#### Metrics by {group_col.replace('_', ' ').title()}")
     metrics = ["TP", "xstd", "ystd", "xrms", "yrms"]
-    if group_col not in df.columns or df.empty or (mode == "compare" and df_b is not None and df_b.empty):
+    # If column is not present or dataframe empty or all values are NaN/empty
+    if (group_col not in df.columns or df.empty or
+        df[group_col].dropna().astype(str).str.strip().eq("").all() or
+        (mode == "compare" and df_b is not None and (df_b.empty or df_b[group_col].dropna().astype(str).str.strip().eq("").all()))
+    ):
         st.info("No data for group breakdown."); return
     df, col_map = df.copy(), (label_map if label_map else {})
+    # drop rows with NaN or empty
+    df = df[df[group_col].notna() & (df[group_col].astype(str).str.strip() != "")]
     df["__label_jp"] = df[group_col].map(col_map) if col_map else df[group_col]
     show_mode = "compare" if (mode == "compare" and df_b is not None) else "single"
     colors = {"A": "#31356E", "B": "#008E9B", "Δ(B-A)": "#E86A33"}
     for m in metrics:
         st.markdown(f"##### {m.upper()} by {group_col.replace('_', ' ').title()}")
         if show_mode == "single":
+            if df.empty:
+                st.info("No data for group breakdown."); continue
             plot_df = df.groupby("__label_jp")[m].mean().reset_index().rename(columns={m:"Mean"})
             fig = px.bar(plot_df, x="__label_jp", y="Mean", labels={"__label_jp": group_col, "Mean": f"{m} mean"},
                          text_auto=".2f", color_discrete_sequence=["#31356E"])
@@ -111,6 +145,9 @@ def show_grouped_metrics_plot(df, group_col, label_map=None, mode="single", df_b
             st.plotly_chart(fig, width="stretch")
         else:
             df_b_c = df_b.copy()
+            if group_col not in df_b_c.columns:
+                st.info("No data for group breakdown."); continue
+            df_b_c = df_b_c[df_b_c[group_col].notna() & (df_b_c[group_col].astype(str).str.strip() != "")]
             df_b_c["__label_jp"] = df_b_c[group_col].map(col_map) if col_map else df_b_c[group_col]
             mean_a, mean_b = df.groupby("__label_jp")[m].mean(), df_b_c.groupby("__label_jp")[m].mean()
             plot_labels = sorted(set(mean_a.index).union(mean_b.index))
@@ -168,7 +205,12 @@ st.subheader("Summary")
 def show_tp_mean_by_label(df, label_col, label_jp_map=None, run_name=None):
     if label_col not in df.columns or df.empty:
         return
-    group_tp = df.groupby(label_col)["TP"].mean()
+    # drop rows that are NA or blank
+    xdf = df[df[label_col].notna() & (df[label_col].astype(str).str.strip() != "")]
+    if xdf.empty:
+        st.info(f"No data for {label_col.replace('_', ' ')} breakdown.")
+        return
+    group_tp = xdf.groupby(label_col)["TP"].mean()
     labels = group_tp.index.tolist()
     labels_disp = [label_jp_map.get(l, l) for l in labels] if label_jp_map else labels
     title = f"TP mean by {label_col.replace('_', ' ').title()}"
@@ -183,9 +225,16 @@ def show_tp_mean_by_label(df, label_col, label_jp_map=None, run_name=None):
     st.plotly_chart(fig, width="stretch")
 
 def show_tp_mean_by_label_compare(df_a, df_b, label_col, label_jp_map=None):
-    if label_col not in df_a.columns or label_col not in df_b.columns: return
-    group_a = df_a.groupby(label_col)["TP"].mean()
-    group_b = df_b.groupby(label_col)["TP"].mean()
+    if label_col not in df_a.columns or label_col not in df_b.columns:
+        return
+    # drop rows with missing or blank for both
+    xdf_a = df_a[df_a[label_col].notna() & (df_a[label_col].astype(str).str.strip() != "")]
+    xdf_b = df_b[df_b[label_col].notna() & (df_b[label_col].astype(str).str.strip() != "")]
+    if xdf_a.empty and xdf_b.empty:
+        st.info(f"No data for {label_col.replace('_', ' ')} breakdown.")
+        return
+    group_a = xdf_a.groupby(label_col)["TP"].mean()
+    group_b = xdf_b.groupby(label_col)["TP"].mean()
     all_labels = sorted(set(group_a.index).union(group_b.index))
     a_vals = [group_a.get(l, float('nan')) for l in all_labels]
     b_vals = [group_b.get(l, float('nan')) for l in all_labels]
