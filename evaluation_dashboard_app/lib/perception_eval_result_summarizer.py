@@ -9,8 +9,12 @@ import os
 import glob
 import yaml
 import sys
-import os
-import sys
+from lib.plot_geom_lib import (
+    calculate_common_area,
+    calc_line_polygon_distance,
+    calc_line_vector_intersection_time,
+    plot_rectangles_with_common_area,
+)
 
 # Attempt to source ROS 2 workspace for perception_eval if not already sourced
 install_setup = "/home/leigu/pilot-auto.x2.v4.3/install/setup.bash"
@@ -27,7 +31,11 @@ if os.path.exists(install_setup):
             value = value.rstrip('\n')
             if key not in env_before or env_before[key] != value:
                 os.environ[key] = value
-from perception_eval.tool import PerceptionAnalyzer3D
+try:
+    from perception_eval.tool import PerceptionAnalyzer3D
+except Exception as exc:
+    PerceptionAnalyzer3D = None
+    _perception_eval_import_error = exc
 
 # from perception_analyzer_v import PerceptionAnalyzerV
 obj_group_base = {
@@ -259,12 +267,6 @@ def create_bbox_movie(result_directory: str, folder_name: str, fps: int = 10):
 
 
 def calc_score_group(df, result_directory):
-    from plot_geom_lib import (
-        calculate_common_area,
-        calc_line_polygon_distance,
-        calc_line_vector_intersection_time,
-        plot_rectangles_with_common_area,
-    )
     def get_frame_index(df, i):
         if not isnull(df.loc[(i, "ground_truth"), "frame"]):
             return df.loc[(i, "ground_truth"), "frame"]
@@ -787,6 +789,11 @@ def _format_summary_line(sum_rat: pd.DataFrame, sum_err: pd.DataFrame, label: st
 
 
 def summarize_eval_result(result_root: str) -> dict:
+    if PerceptionAnalyzer3D is None:
+        raise ImportError(
+            "PerceptionAnalyzer3D is unavailable. "
+            "Install/sourcing perception_eval or use calc_score_* to generate score.json."
+        ) from _perception_eval_import_error
     result_directory = os.path.join(result_root, "")
     scenario_paths = sorted(glob.glob(os.path.join(result_directory, "*.yaml")))
     if not scenario_paths:
@@ -830,6 +837,42 @@ def summarize_eval_result(result_root: str) -> dict:
         ),
     }
     return summary
+
+
+def generate_score_json(result_root: str) -> str:
+    """
+    Generate score.json for a result directory without any plotting.
+
+    Returns:
+        str: path to the generated score.json
+    """
+    if PerceptionAnalyzer3D is None:
+        raise ImportError(
+            "PerceptionAnalyzer3D is unavailable. "
+            "Install/sourcing perception_eval or use calc_score_* to generate score.json."
+        ) from _perception_eval_import_error
+    result_directory = os.path.join(result_root, "")
+    scenario_paths = sorted(glob.glob(os.path.join(result_directory, "*.yaml")))
+    if not scenario_paths:
+        raise FileNotFoundError(f"No scenario yaml found in {result_directory}")
+
+    scenario_name = scenario_paths[0]
+    pickle_path = os.path.join(result_directory, "scene_result.pkl")
+    if not os.path.exists(pickle_path):
+        raise FileNotFoundError(f"Missing scene_result.pkl in {result_directory}")
+
+    test_id = os.path.basename(os.path.normpath(result_root))
+
+    analyzer = PerceptionAnalyzer3D.from_scenario(result_directory, scenario_name)
+    analyzer.add_from_pkl(pickle_path)
+
+    # Score generation only; skip all plots.
+    if "pedestrians_with_umbrella" in test_id:
+        calc_score_group(analyzer.df, result_directory)
+    else:
+        calc_score_single(analyzer.df, result_directory)
+
+    return os.path.join(result_directory, "score.json")
 
 
 def format_eval_report(summary: dict) -> str:
