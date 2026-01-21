@@ -722,6 +722,141 @@ def run_eval_result_for_dir(result_dir: str, overwrite: bool = False) -> Dict[st
         return {"path": result_dir, "status": "failed", "detail": str(e)}
 
 
+def generate_summary_and_score_csv(input_path: str) -> Dict[str, Any]:
+    """
+    Generate Summary.csv and Score.csv in the input_path directory
+    based on each subdirectory's result.txt and score.json.
+    """
+    result_folders = glob.glob(os.path.join(input_path, "*/"))
+    result_folders.sort()
+
+    summary_lines: List[str] = []
+    score_lines: List[str] = []
+
+    # Summary.csv
+    summary_header = "Scenario,TP,TP_xave,TP_xstd,TP_xrms,TP_yave,TP_ystd,TP_yrms,TP_vx,TP_vy\n"
+    # in streamlit, Summary.csv does not need header line
+    #summary_lines.append(summary_header)
+    for folder in result_folders:
+        result_txt = os.path.join(folder, "result.txt")
+        if not os.path.exists(result_txt):
+            continue
+
+        data: List[float] = []
+        with open(result_txt, "r", encoding="utf-8") as txt:
+            found = False
+            for input_line in txt:
+                if not found:
+                    if "TP xave xstd xrms yave ystd yrms vx vy" in input_line:
+                        found = True
+                else:
+                    parts = [p for p in input_line.split(" ") if p.strip() != ""]
+                    try:
+                        data = [float(s) for s in parts]
+                    except ValueError:
+                        data = []
+                    break
+
+        if not data:
+            continue
+
+        scenario_name = Path(folder).name
+        # Keep the same derived fields as the reference script.
+        tp_percent = data[0] * 100
+        x_ave = data[1]
+        x_std = data[2]
+        x_rms = abs(data[1]) + data[2] * 3
+        y_ave = data[4]
+        y_std = data[5]
+        y_rms = abs(data[4]) + data[5] * 3
+        vx = data[7]
+        vy = data[8]
+
+        summary_lines.append(
+            f"{scenario_name},{tp_percent:.3f},{x_ave:.3f},{x_std:.3f},"
+            f"{x_rms:.3f},{y_ave:.3f},{y_std:.3f},{y_rms:.3f},"
+            f"{vx:.3f},{vy:.3f}\n"
+        )
+
+    # Score.csv
+    score_header = "Scenario,Option,GT_OBJ,"
+    for _ in range(4):
+        score_header += (
+            "Distance,NM,TP/TN,ADD,AIL,UIL,PFN/PFP,UUID Num,"
+            "Practical Pass Rate,MAX_DIST_THRESH,OBJ_CNTS,"
+        )
+    score_header += "\n"
+    # in streamlit, Score.csv does not need header line
+    #score_lines.append(score_header)
+
+    for folder in result_folders:
+        score_json = os.path.join(folder, "score.json")
+        if not os.path.exists(score_json):
+            continue
+
+        with open(score_json, "r", encoding="utf-8") as f:
+            dic = json.load(f)
+
+        line = f"{Path(folder).name},"
+        line += f"{dic.get('Option', '')},"
+        line += f"{dic.get('criteria0', {}).get('GT_OBJ', '')},"
+
+        for k, v in dic.items():
+            if k == "Option":
+                continue
+            if not isinstance(v, dict):
+                continue
+
+            line += f"{k},"
+            line += f"{v.get('NM', '')},"
+            line += f"{v.get('TP/TN', '')},"
+            line += f"{v.get('ADD', '')},"
+            line += f"{v.get('AIL', '')},"
+            line += f"{v.get('UIL', '')},"
+            line += f"{v.get('PFN/PFP', '')},"
+            line += f"{v.get('UUID_NUM', '')},"
+
+            nm = v.get("NM", 0)
+            try:
+                nm_value = float(nm)
+            except (TypeError, ValueError):
+                nm_value = 0.0
+            if nm_value == 0:
+                line += "100.0,"
+            else:
+                try:
+                    pass_rate = 100.0 * (
+                        float(v.get("TP/TN", 0))
+                        + float(v.get("AIL", 0))
+                        + float(v.get("ADD", 0))
+                    ) / nm_value
+                except (TypeError, ValueError, ZeroDivisionError):
+                    pass_rate = 0.0
+                line += f"{pass_rate:.3f},"
+
+            line += f"{v.get('MAX_DIST_THRESH', '')},"
+
+            obj_cnts = v.get("OBJ_CNTS", {})
+            if isinstance(obj_cnts, dict):
+                obj_parts = [f"{obj}:{cnt}" for obj, cnt in obj_cnts.items()]
+                line += ";".join(obj_parts) + ","
+            else:
+                line += ","
+
+        score_lines.append(line + "\n")
+
+    with open(os.path.join(input_path, "Summary.csv"), mode="w", encoding="utf-8") as f:
+        f.writelines(summary_lines)
+    with open(os.path.join(input_path, "Score.csv"), mode="w", encoding="utf-8") as f:
+        f.writelines(score_lines)
+
+    return {
+        "summary_path": os.path.join(input_path, "Summary.csv"),
+        "score_path": os.path.join(input_path, "Score.csv"),
+        "summary_rows": max(len(summary_lines) - 1, 0),
+        "score_rows": max(len(score_lines) - 1, 0),
+    }
+
 # Sidebar for configuration
 with st.sidebar:
     st.header("Configuration")
@@ -1102,3 +1237,14 @@ with tab4:
 
             st.subheader("📋 Details")
             st.dataframe(pd.DataFrame(results), use_container_width=True)
+
+        # Generate summary CSVs at the eval_root level
+        with st.spinner("Generating Summary.csv and Score.csv..."):
+            try:
+                csv_info = generate_summary_and_score_csv(eval_root)
+                st.success(
+                    f"Generated Summary.csv ({csv_info['summary_rows']} rows) and "
+                    f"Score.csv ({csv_info['score_rows']} rows) in `{eval_root}`"
+                )
+            except Exception as e:
+                st.error(f"Failed to generate CSV files: {e}")
