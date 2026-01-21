@@ -15,7 +15,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 from typing import Text, Optional, List, Dict, Any
 from lib.WebAPI import scenarioAPI
-from lib.perception_eval_result_summarizer import run_eval_result
+from lib.perception_eval_result_summarizer import run_eval_result, generate_score_json
 
 # --- Persistent user config helpers ---
 CONFIG_FILE = os.path.expanduser("./configs/autoware_evaluator_dl_config.json")
@@ -696,14 +696,24 @@ def find_eval_result_dirs(root_dir: str, recursive: bool = True) -> List[str]:
 
 def run_eval_result_for_dir(result_dir: str, overwrite: bool = False) -> Dict[str, Any]:
     result_file = os.path.join(result_dir, "result.txt")
+    score_file = os.path.join(result_dir, "score.json")
     if os.path.exists(result_file) and not overwrite:
-        return {"path": result_dir, "status": "skipped", "detail": "result.txt exists"}
+        if os.path.exists(score_file):
+            return {"path": result_dir, "status": "skipped", "detail": "result.txt exists"}
+        try:
+            generate_score_json(result_dir)
+            return {"path": result_dir, "status": "success", "detail": "score.json generated"}
+        except Exception as e:
+            error_output = f"Error: {e}\n{traceback.format_exc()}"
+            with open(result_file, "a", encoding="utf-8") as f:
+                f.write(f"\n{error_output}")
+            return {"path": result_dir, "status": "failed", "detail": str(e)}
 
     try:
-
         report_text = run_eval_result(result_dir)
         with open(result_file, "w", encoding="utf-8") as f:
             f.write(report_text)
+        generate_score_json(result_dir)
         return {"path": result_dir, "status": "success", "detail": "completed"}
     except Exception as e:
         error_output = f"Error: {e}\n{traceback.format_exc()}"
