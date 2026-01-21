@@ -142,16 +142,62 @@ class AuthcliHelper:
         else:
             raise Exception(f"{response.status_code} Authorization error: {response.content}")
 
-def download_file(url: str, output_file: str):
-    """Helper function to download files"""
-    response = requests.get(url, stream=True)
-    if response.status_code == 200:
-        with open(output_file, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-        return True
-    else:
-        raise Exception(f"Failed to download file: {response.status_code}")
+def download_file(
+    url: str,
+    output_file: str | Path,
+    *,
+    chunk_size: int = 1024 * 1024,
+    timeout: int = 10,
+    min_progress_mb: float = 5.0,
+) -> int:
+    """
+    Download a file with optional progress display.
+
+    Progress is shown only if the total file size is >= min_progress_mb.
+
+    Returns:
+        int: downloaded size in bytes
+    """
+    output_file = Path(output_file)
+
+    r = requests.get(url, stream=True, timeout=timeout)
+    r.raise_for_status()
+
+    total_size = int(r.headers.get("content-length", 0))
+    show_progress = total_size >= min_progress_mb * 1024 * 1024
+
+    downloaded = 0
+    start_time = time.time()
+
+    print(f"Downloading file to {output_file} with total size {total_size/1024/1024:.1f} MB")
+    with open(output_file, "wb") as f:
+        for chunk in r.iter_content(chunk_size=chunk_size):
+            if not chunk:
+                continue
+
+            f.write(chunk)
+            downloaded += len(chunk)
+
+            if not show_progress or total_size == 0:
+                continue
+
+            elapsed = time.time() - start_time
+            speed = downloaded / max(elapsed, 1e-6)
+            percent = downloaded / total_size * 100
+            eta = (total_size - downloaded) / max(speed, 1e-6)
+
+            print(
+                f"\r{percent:6.2f}% "
+                f"({downloaded / 1e6:.1f}/{total_size / 1e6:.1f} MB) "
+                f"ETA {eta:5.1f}s",
+                end="",
+                flush=True,
+            )
+
+    if show_progress:
+        print("\nDownload complete")
+
+    return downloaded
 
 class JobResult:
     def __init__(
