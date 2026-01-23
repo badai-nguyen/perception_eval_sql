@@ -1,5 +1,31 @@
 # 評価ダッシュボード
 
+## 必須インストール
+
+本ダッシュボード・評価ツールの動作には、以下の前提と Python パッケージが必要です。  
+
+
+### Python パッケージ（基本機能）
+```sh
+pip install \
+  streamlit pandas plotly duckdb numpy \
+  requests pyyaml matplotlib shapely
+```
+
+### Python パッケージ（ダウンロード機能）
+```sh
+# Install authentication library (Download/Scenario API)
+pip install git+https://github.com/tier4/webauto-auth-py.git
+```
+
+```sh
+# Install CLI tool (評価実行コマンド生成で利用する場合)
+pipx install git+ssh://git@github.com/tier4/v_and_v_util.git
+```
+
+### pilot-auto / perception_eval（Summary/Score 生成時のみ）
+- `perception_eval` が使える pilot-auto 環境が必要です（下記「使い方」参照）
+
 ## 概要
 Streamlit で動作する評価ダッシュボードです。`data/` 配下の評価結果（`Summary.csv` / `Score.csv` / `.parquet`）を読み込み、複数のページで可視化します。画像は現在の UI イメージです。
 
@@ -32,13 +58,18 @@ script/
 ```
 
 ## 使い方
-1. `data/` に評価結果を配置します。
-   - `Summary.csv` / `Score.csv` を `data/<run_id>/` に配置
-   - 検出統計/BB ビュー用の `.parquet` を `data/` 直下に配置
+
+1. サマリーやスコア生成（6_Download.py の「Summary.csv / Score.csv を生成」）を実行するには、**事前に下記コマンドで ROS 2 環境を有効化する必要があります**:
+   ```
+   source path_to_pilot/install/setup.zsh
+   ```
+   ※ この作業は 6_Download.py の「Summary/Score CSV 生成」で必要です。
+
 2. Streamlit を起動します。
-```
-streamlit run Overview.py
-```
+   ```
+   streamlit run Overview.py
+   ```
+
 3. サイドバーからページやフィルタを選択して可視化します。
 
 ## ページ説明
@@ -72,11 +103,6 @@ streamlit run Overview.py
 ### `pages/6_Download.py`
 - Evaluator の結果ダウンロードと評価実行
 - `result.txt` / `score.json` から `Summary.csv` / `Score.csv` を生成
-
-## ライブラリ
-### `lib/run_loader.py`
-- `data/<run_id>/Summary.csv` と `Score.csv` を読み込むローダ
-- Overview から利用され、各ページに渡される
 
 ## データ形式（概略）
 - `Summary.csv`: `id`, `TP`, `xstd`, `xrms`, `ystd`, `yrms`, `vx`, `vy`, `perception_label`, `product_label`

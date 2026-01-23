@@ -52,7 +52,7 @@ tp_min, tp_max = st.sidebar.slider(
     "TP range (%)",
     float(tp_values.min()),
     float(tp_values.max()),
-    (40.0, 80.0),
+    (0.0, 100.0),
 )
 clip_vel = st.sidebar.checkbox("Clip velocity outliers", value=True)
 

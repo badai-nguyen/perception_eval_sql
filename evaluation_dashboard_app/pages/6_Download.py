@@ -10,6 +10,7 @@ import yaml
 import tempfile
 import traceback
 import pandas as pd
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
@@ -722,6 +723,11 @@ def run_eval_result_for_dir(result_dir: str, overwrite: bool = False) -> Dict[st
         return {"path": result_dir, "status": "failed", "detail": str(e)}
 
 
+def _run_eval_result_worker(result_dir: str, overwrite: bool) -> Dict[str, Any]:
+    """Worker wrapper so the main thread owns Streamlit progress updates."""
+    return run_eval_result_for_dir(result_dir, overwrite=overwrite)
+
+
 def generate_summary_and_score_csv(input_path: str) -> Dict[str, Any]:
     """
     Generate Summary.csv and Score.csv in the input_path directory
@@ -1187,7 +1193,7 @@ with tab4:
     )
     set_config_value("eval_root", eval_root)
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         eval_recursive = st.checkbox(
             "Search subdirectories",
@@ -1200,8 +1206,27 @@ with tab4:
             value=get_config_value("eval_overwrite", False),
             help="If unchecked, directories with result.txt will be skipped",
         )
+    with col3:
+        eval_parallel = st.checkbox(
+            "Run in parallel",
+            value=get_config_value("eval_parallel", False),
+            help="If checked, run eval_result in parallel",
+        )
+        if eval_parallel:
+            eval_workers = st.number_input(
+                "Eval worker threads",
+                min_value=1,
+                max_value=16,
+                value=get_config_value("eval_workers", 1),
+                help="Number of parallel threads used to run eval_result",
+            )   
+            set_config_value("eval_workers", eval_workers)
+        else:
+            eval_workers = 1
+            set_config_value("eval_workers", eval_workers)
     set_config_value("eval_recursive", eval_recursive)
     set_config_value("eval_overwrite", eval_overwrite)
+    set_config_value("eval_parallel", eval_parallel)
 
     # New option: Only generate summary/score csv
     only_generate_summary = st.checkbox(
@@ -1240,9 +1265,30 @@ with tab4:
             progress = st.progress(0)
             results = []
 
-            for i, result_dir in enumerate(target_dirs):
-                progress.progress((i + 1) / len(target_dirs))
-                results.append(run_eval_result_for_dir(result_dir, overwrite=eval_overwrite))
+            # sequential evaluation
+            if not eval_parallel:
+                for i, result_dir in enumerate(target_dirs):
+                    progress.progress((i + 1) / len(target_dirs))
+                    results.append(run_eval_result_for_dir(result_dir, overwrite=eval_overwrite))
+            else:
+
+                max_workers = max(1, min(int(eval_workers), len(target_dirs)))
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_map = {
+                        executor.submit(_run_eval_result_worker, result_dir, eval_overwrite): result_dir
+                        for result_dir in target_dirs
+                    }
+                    completed = 0
+                    for future in as_completed(future_map):
+                        completed += 1
+                        progress.progress(completed / len(target_dirs))
+                        try:
+                            results.append(future.result())
+                        except Exception as e:
+                            result_dir = future_map.get(future, "unknown")
+                            results.append(
+                                {"path": result_dir, "status": "failed", "detail": str(e)}
+                            )
 
             progress.progress(1.0)
 

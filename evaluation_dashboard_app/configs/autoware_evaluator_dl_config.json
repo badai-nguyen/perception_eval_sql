@@ -6,7 +6,9 @@
   "output_path": "./data/20260121",
   "download_type": "Archives (ZIP)",
   "phase": "perception.object_recognition.tracking.objects",
-  "eval_root": "./data/20260122",
+  "eval_root": "./data/20260121",
   "eval_recursive": true,
-  "eval_overwrite": true
+  "eval_overwrite": true,
+  "eval_workers": 1,
+  "eval_parallel": false
 }
