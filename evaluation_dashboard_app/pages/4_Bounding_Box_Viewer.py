@@ -2,6 +2,7 @@ import duckdb
 import streamlit as st
 import plotly.graph_objects as go
 import numpy as np
+import pandas as pd
 import glob
 import os
 from typing import Tuple

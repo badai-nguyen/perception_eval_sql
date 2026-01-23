@@ -278,15 +278,3 @@ else:
     with st.expander("Show metric breakdowns by label", expanded=False):
         show_grouped_metrics_plot(df_summary, group_col="perception_label", mode="single")
         show_grouped_metrics_plot(df_summary, group_col="product_label", label_map=PRODUCT_LABEL_JA, mode="single")
-
-
-# Gen2_Perception_DevOps_On_Vehicle_Shiojiri
-# https://evaluation.tier4.jp/evaluation/suites/84c2a34e-387d-4218-927a-e06308e6fccc?project_id=x2_dev&tab=catalogs
-# https://tier4.atlassian.net/wiki/spaces/CB/pages/4301390239/PDD+D+T+Devops
-# Gen2_Perception_DevOps_On_Vehicle_Shiojiri_4
-# Gen2_Perception_DevOps_On_Vehicle_Shiojiri_5
-# Gen2_Perception_DevOps_On_Vehicle_Shiojiri_6
-# Gen2_Perception_DevOps_On_Vehicle_Shiojiri_7
-# Gen2_Perception_DevOps_On_Vehicle_Shiojiri_8
-# Gen2_Perception_DevOps_On_Vehicle_Shiojiri_9
-# Gen2_Perception_DevOps_On_Vehicle_Shiojiri_10
