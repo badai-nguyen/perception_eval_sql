@@ -53,7 +53,6 @@ evaluation_dashboard_app/
     5_Tools.py
     6_Download.py
   lib/
-    
   configs/
     autoware_evaluator_dl_config.json
   data/
@@ -67,7 +66,7 @@ evaluation_dashboard_app/
 
 1. サマリーやスコア生成（`pages/6_Download.py` の「Summary.csv / Score.csv を生成」）を実行するには、**事前に下記コマンドで pilot-auto（ROS 2）環境を有効化する必要があります**:
    ```
-   source path_to_pilot/install/setup.zsh
+   source path_to_pilot/install/setup.sh
    ```
    ※ この作業は `pages/6_Download.py` の「Summary/Score CSV 生成」で必要です。
 
@@ -117,4 +116,3 @@ evaluation_dashboard_app/
 
 ## 補足
 - 最初に `Overview` を開いて Run を読み込む必要があります（各ページは `st.session_state` 前提）。
-- 画像は本ダッシュボードの表示例です。

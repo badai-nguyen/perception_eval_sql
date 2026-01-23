@@ -89,7 +89,7 @@ if not selected_labels:
 
 # --- invalidオブジェクト表示オプション ---
 with st.sidebar:
-    show_invalid = st.sidebar.checkbox("Show invalid (zero-size) objects", value=False)
+    show_invalid = st.checkbox("Show invalid (zero-size) objects", value=False)
 
 
 # ----------------------------
