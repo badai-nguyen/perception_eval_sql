@@ -395,7 +395,7 @@ class JobResult:
             
             dir_path = archive_path.replace(".zip", "")
             shutil.unpack_archive(archive_path, dir_path)
-            #os.remove(archive_path)
+            os.remove(archive_path)
 
             for sub_dir_path in os.listdir(dir_path):
                 if Path(sub_dir_path).name == "scenario.yaml":
@@ -891,7 +891,7 @@ with st.sidebar:
     
     output_path = st.text_input(
         "Output Path",
-        value=get_config_value("output_path", "./downloads"),
+        value=get_config_value("output_path", "./data/download"),
         help="Path where files will be saved"
     )
     set_config_value("output_path", output_path)

@@ -21,6 +21,7 @@ script/
     3_Detection_Stats.py
     4_Bounding_Box_Viewer.py
     5_Tools.py
+    6_Download.py
   lib/
     run_loader.py
   data/
@@ -67,6 +68,10 @@ streamlit run Overview.py
 ### `pages/5_Tools.py`
 - 評価実行コマンド生成ツール
 - Report/Suite URL から Job ID / Suite ID を抽出
+
+### `pages/6_Download.py`
+- Evaluator の結果ダウンロードと評価実行
+- `result.txt` / `score.json` から `Summary.csv` / `Score.csv` を生成
 
 ## ライブラリ
 ### `lib/run_loader.py`
