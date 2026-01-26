@@ -233,7 +233,7 @@ class JobResult:
         # web resource
         self.__auth_session = AuthcliHelper(self.__environment)
 
-    def download_archive_and_unzip(self, phase):
+    def download_archive_and_unzip(self, phase, skip_large_file=False, large_file_mb=50.0):
         log_dicts = self.get_case_simlation_log_info()
 
         st.write(f"Found {len(log_dicts)} logs")
@@ -251,7 +251,7 @@ class JobResult:
                     detail = "matched skip rule"
                 else:
                     try:
-                        ok = self.download_archive_log(log_info, "archive_id", "zip")
+                        ok = self.download_archive_log(log_info, "archive_id", "zip", skip_large_file=skip_large_file, large_file_mb=large_file_mb)
                         status = "downloaded" if ok else "failed"
                         detail = "ok" if ok else "download failed"
                     except Exception as e:
@@ -352,7 +352,7 @@ class JobResult:
         progress_bar.empty()
         return simlation_archive_log_info
 
-    def download_archive_log(self, log_info, type, format) -> bool:
+    def download_archive_log(self, log_info, type, format, skip_large_file=False, large_file_mb=50.0) -> bool:
         url = (
             self.__api_base_url
             + "/projects/"
@@ -379,7 +379,7 @@ class JobResult:
         
         output_file = os.path.join(self.__output_path, dl_filename)
         try:
-            download_file(content["url"], output_file, skip_large_file=True)
+            download_file(content["url"], output_file, skip_large_file=skip_large_file, large_file_mb=large_file_mb)
         except Exception as e:
             st.error(f"Failed to download {dl_filename}: {e}")
             return False
@@ -917,6 +917,30 @@ with st.sidebar:
         )
         set_config_value("phase", phase)
 
+        # Add options to control skipping large files
+        col_large_skip1, col_large_skip2 = st.columns([2, 3])
+        with col_large_skip1:
+            skip_large_file = st.checkbox(
+                "Skip large files?",
+                value=get_config_value("skip_large_file", False),
+                help="If checked, skips downloading ZIP files over the specified size."
+            )
+            set_config_value("skip_large_file", skip_large_file)
+        with col_large_skip2:
+            large_file_mb = st.number_input(
+                "Skip threshold (MB)",
+                value=get_config_value("large_file_mb", 50.0),
+                min_value=1.0,
+                max_value=5000.0,
+                step=1.0,
+                help="ZIP files larger than this size will be skipped if 'Skip large files?' is checked."
+            )
+            set_config_value("large_file_mb", large_file_mb)
+    else:
+        skip_large_file = False
+        large_file_mb = 50.0  # Doesn't apply
+
+
 # Main tabs
 tab1, tab2, tab3, tab4 = st.tabs(
     ["📥 Download Results", "🗺️ Download Scenarios", "📊 View Downloads", "🧮 Eval Results"]
@@ -989,6 +1013,8 @@ with tab1:
         set_config_value("download_type", download_type)
         if download_type == "Archives (ZIP)":
             set_config_value("phase", phase)
+            set_config_value("skip_large_file", skip_large_file)
+            set_config_value("large_file_mb", large_file_mb)
         
         try:
             # Initialize JobResult
@@ -1000,11 +1026,16 @@ with tab1:
                 output_path=output_path
             )
             
+            download_successful = False
             if download_type == "Archives (ZIP)":
                 with st.expander("Downloading Archives", expanded=True):
-                    remain_list = job_result.download_archive_and_unzip(phase)
+                    remain_list = job_result.download_archive_and_unzip(
+                        phase, 
+                        skip_large_file=skip_large_file, 
+                        large_file_mb=large_file_mb
+                    )
                     st.success(f"✅ Downloaded and extracted {len(remain_list)} archives")
-                    
+                    download_successful = len(remain_list) > 0
                     # Show summary
                     st.subheader("📊 Summary")
                     st.write(f"- Total scenarios processed: {len(remain_list)}")
@@ -1014,7 +1045,7 @@ with tab1:
                 with st.expander("Downloading Result JSON", expanded=True):
                     log_dicts = job_result.download_result_json()
                     st.success(f"✅ Downloaded {len(log_dicts)} JSON files")
-                    
+                    download_successful = len(log_dicts) > 0
                     # Show summary
                     st.subheader("📊 Summary")
                     st.write(f"- Total JSON files: {len(log_dicts)}")
@@ -1029,6 +1060,10 @@ with tab1:
                     subindent = ' ' * 4 * (level + 1)
                     for file in files:
                         st.text(f"{subindent}{file}")
+            
+            # Suggest next step if download succeeded
+            if download_successful:
+                st.info("🎉 Download complete! To generate the final summary CSV files, go to the **'Eval Results (per directory)'** tab and run the evaluation.")
                         
         except Exception as e:
             st.error(f"❌ Error: {str(e)}")
@@ -1241,6 +1276,15 @@ with tab4:
         key="run_eval_result"
     ):
         import pandas as pd
+        # Check if PerceptionAnalyzer3D (from perception_eval) is available before proceeding
+        from lib.perception_eval_result_summarizer import PerceptionAnalyzer3D, _perception_eval_import_error
+        if PerceptionAnalyzer3D is None:
+            st.error(
+                "perception_eval is not available (PerceptionAnalyzer3D import failed). "
+                "Make sure you have run `source install.sh` to set up your environment, then, run `streamlit run Overview.py` to start the dashboard.\n\n"
+                f"Original error: {_perception_eval_import_error}"
+            )
+            st.stop()
 
         if only_generate_summary:
             with st.spinner("Generating Summary.csv and Score.csv..."):
