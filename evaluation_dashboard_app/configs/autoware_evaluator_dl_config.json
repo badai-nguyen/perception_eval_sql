@@ -1,14 +1,16 @@
 {
   "environment": "default",
   "project_id": "x2_dev",
-  "job_id": "78f6da50-fb82-506b-91a2-f632e65a5428",
+  "job_id": "bff65ac6-f5ed-5300-b8ba-aa28ce344d2a",
   "suite_id": "84c2a34e-387d-4218-927a-e06308e6fccc",
-  "output_path": "./data/20260121",
+  "output_path": "./data/separate_iou_threshold_ped_byc_0.2_yolox_off",
   "download_type": "Archives (ZIP)",
   "phase": "perception.object_recognition.tracking.objects",
-  "eval_root": "./data/20260121",
+  "eval_root": "./data/separate_iou_threshold_ped_byc_0.2_yolox_off",
   "eval_recursive": true,
   "eval_overwrite": true,
   "eval_workers": 1,
-  "eval_parallel": false
+  "eval_parallel": false,
+  "skip_large_file": true,
+  "large_file_mb": 50.0
 }

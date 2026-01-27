@@ -320,10 +320,12 @@ if mode == "Compare Mode":
         top_changes = merged.copy()
         top_changes["abs_delta"] = top_changes[f"{metric}_delta"].abs()
         top_changes = top_changes.sort_values("abs_delta", ascending=False).head(20)
+        cols = BASE_COLS + [f"{metric}_A", f"{metric}_B", f"{metric}_delta"]
+        if metric != "pass_rate":
+            cols.append("pass_rate_delta")
         st.dataframe(
             top_changes[
-                BASE_COLS
-                + [f"{metric}_A", f"{metric}_B", f"{metric}_delta", "pass_rate_delta"]
+                cols
             ],
             width="stretch",
         )
