@@ -150,7 +150,7 @@ def download_file(
     *,
     chunk_size: int = 1024 * 1024,
     timeout: int = 10,
-    min_progress_mb: float = 5.0,
+    min_progress_mb: float = 20.0,
     skip_large_file: bool = False,
     large_file_mb: float = 50.0,
 ) -> int:

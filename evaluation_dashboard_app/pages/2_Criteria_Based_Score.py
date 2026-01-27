@@ -177,6 +177,102 @@ if mode == "Compare Mode":
             points="all",
         )
         st.plotly_chart(fig, width="stretch")
+
+        # ---- Improved Per Scenario Pass Rate Compare Plot ----
+        st.subheader("Per Scenario Pass Rate Comparison (A vs B)")
+
+        per_scenario_A = df_view_A.groupby("Scenario", as_index=False)["pass_rate"].mean()
+        per_scenario_B = df_view_B.groupby("Scenario", as_index=False)["pass_rate"].mean()
+        per_scenario = per_scenario_A.merge(per_scenario_B, on="Scenario", suffixes=("_A", "_B"))
+        per_scenario["delta"] = per_scenario["pass_rate_B"] - per_scenario["pass_rate_A"]
+
+        # Let user filter/sort the scenario comparison by various methods to make it easier to see
+        filter_method = st.radio(
+            "Scenario Filter/Sort", 
+            ["All", "Top N by Delta", "Top N by Baseline (A)", "Custom contains string"],
+            horizontal=True,
+        )
+
+        if filter_method == "Top N by Delta":
+            N = st.number_input("Show Top N Scenarios by Delta (|delta|):", min_value=5, max_value=100, value=20)
+            per_scenario = per_scenario.reindex(per_scenario["delta"].abs().sort_values(ascending=False).index)
+            per_scenario_vis = per_scenario.head(N)
+        elif filter_method == "Top N by Baseline (A)":
+            N = st.number_input("Show Top N Scenarios by Baseline (A) Pass Rate:", min_value=5, max_value=100, value=20)
+            per_scenario = per_scenario.sort_values("pass_rate_A", ascending=False)
+            per_scenario_vis = per_scenario.head(N)
+        elif filter_method == "Custom contains string":
+            search = st.text_input("Show scenarios with name containing (case-insensitive):", "")
+            per_scenario_vis = per_scenario[per_scenario["Scenario"].str.contains(search, case=False, na=False)] if search else per_scenario
+        else:
+            per_scenario_vis = per_scenario.copy()
+
+        # Use bar plot instead of scatter, for more useful comparison if there are many scenarios
+        per_scenario_vis_long = pd.melt(
+            per_scenario_vis,
+            id_vars=["Scenario"],
+            value_vars=["pass_rate_A", "pass_rate_B"],
+            var_name="Run",
+            value_name="pass_rate",
+        )
+        per_scenario_vis_long["Run"] = per_scenario_vis_long["Run"].map({"pass_rate_A": "Baseline (A)", "pass_rate_B": "Candidate (B)"})
+        per_scenario_vis_long = per_scenario_vis_long.sort_values(["Scenario", "Run"])
+
+        fig = px.bar(
+            per_scenario_vis_long,
+            x="Scenario",
+            y="pass_rate",
+            color="Run",
+            barmode="group",
+            text_auto=".2f",
+            title="Per Scenario Pass Rate by Run (filtered)",
+        )
+        st.plotly_chart(fig, width="stretch")
+
+        # Show the delta for each scenario as a separate barplot below, sorted by delta
+        st.subheader("Per Scenario Pass Rate Delta (B - A)")
+        fig2 = px.bar(
+            per_scenario_vis.sort_values("delta", key=abs, ascending=False),
+            x="Scenario",
+            y="delta",
+            color="delta",
+            color_continuous_scale="RdYlGn",
+            text_auto=".2f",
+            title="Delta (B - A)"
+        )
+        st.plotly_chart(fig2, width="stretch")
+
+        # Optionally show a table for the user to inspect
+        with st.expander("Show Table: Per Scenario Pass Rates and Delta"):
+            # Show dataframe with delta values, but avoid styling due to colormap compatibility issue
+            st.dataframe(
+                per_scenario_vis[["Scenario", "pass_rate_A", "pass_rate_B", "delta"]],
+                width="stretch"
+            )
+
+        # The user can still optionally "restore" the scatter plot if they want
+        if st.checkbox("Show scatter plot (Baseline (A) Pass Rate vs Candidate (B))", value=False):
+            scatter_fig = px.scatter(
+                per_scenario_vis,
+                x="pass_rate_A",
+                y="pass_rate_B",
+                text="Scenario",
+                labels={
+                    "pass_rate_A": "Baseline (A) Pass Rate",
+                    "pass_rate_B": "Candidate (B) Pass Rate",
+                },
+                title="Per Scenario Pass Rate: Baseline (A) vs Candidate (B) (filtered)",
+            )
+            scatter_fig.add_shape(
+                type="line",
+                x0=0, y0=0, x1=1, y1=1,
+                line=dict(dash='dash', color='gray'),
+                xref="x", yref="y"
+            )
+            scatter_fig.update_traces(textposition="top center")
+            st.plotly_chart(scatter_fig, width="stretch")
+        # ---- End Improved Per Scenario Pass Rate Compare Plot ----
+
     else:
         merged = df_view_A.merge(
             df_view_B,
