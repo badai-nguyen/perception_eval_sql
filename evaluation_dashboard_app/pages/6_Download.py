@@ -1277,14 +1277,14 @@ with tab4:
     ):
         import pandas as pd
         # Check if PerceptionAnalyzer3D (from perception_eval) is available before proceeding
-        from lib.perception_eval_result_summarizer import PerceptionAnalyzer3D, _perception_eval_import_error
-        if PerceptionAnalyzer3D is None:
-            st.error(
-                "perception_eval is not available (PerceptionAnalyzer3D import failed). "
-                "Make sure you have run `source install.sh` to set up your environment, then, run `streamlit run Overview.py` to start the dashboard.\n\n"
-                f"Original error: {_perception_eval_import_error}"
-            )
-            st.stop()
+        # from lib.perception_eval_result_summarizer import PerceptionAnalyzer3D, _perception_eval_import_error
+        # if PerceptionAnalyzer3D is None:
+        #     st.error(
+        #         "perception_eval is not available (PerceptionAnalyzer3D import failed). "
+        #         "Make sure you have run `source install.sh` to set up your environment, then, run `streamlit run Overview.py` to start the dashboard.\n\n"
+        #         f"Original error: {_perception_eval_import_error}"
+        #     )
+        #     st.stop()
 
         if only_generate_summary:
             with st.spinner("Generating Summary.csv and Score.csv..."):
