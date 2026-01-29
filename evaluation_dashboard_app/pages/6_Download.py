@@ -923,7 +923,8 @@ with st.sidebar:
             skip_large_file = st.checkbox(
                 "Skip large files?",
                 value=get_config_value("skip_large_file", False),
-                help="If checked, skips downloading ZIP files over the specified size."
+                help="Large archive is in an abnormal state."
+                    "Skipping them is the correct behavior. Uncheck only if you explicitly want to download them."
             )
             set_config_value("skip_large_file", skip_large_file)
         with col_large_skip2:
@@ -1245,7 +1246,8 @@ with tab4:
         eval_parallel = st.checkbox(
             "Run in parallel",
             value=get_config_value("eval_parallel", False),
-            help="If checked, run eval_result in parallel",
+            help="Temporarily disabled. Parallel execution currently provides no measurable benefit.",    
+            disabled=True
         )
         if eval_parallel:
             eval_workers = st.number_input(
