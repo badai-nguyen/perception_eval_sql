@@ -233,12 +233,28 @@ class JobResult:
         # web resource
         self.__auth_session = AuthcliHelper(self.__environment)
 
+    def _safe_path_component(self, value: str) -> str:
+        cleaned = value.replace(os.sep, "_").replace("/", "_").strip()
+        return cleaned if cleaned else "unknown"
+
+    def _get_output_path_for_log(self, log_info: Dict[str, Any]) -> str:
+        if self.__suite_id:
+            return self.__output_path
+        suite_id = log_info.get("suite_id", "unknown")
+        suite_name = log_info.get("suite_name", "")
+        if suite_name:
+            suite_dir = f"{self._safe_path_component(suite_name)}_{self._safe_path_component(suite_id)}"
+        else:
+            suite_dir = self._safe_path_component(suite_id)
+        return os.path.join(self.__output_path, suite_dir)
+
     def download_archive_and_unzip(self, phase, skip_large_file=False, large_file_mb=50.0):
         log_dicts = self.get_case_simlation_log_info()
 
         st.write(f"Found {len(log_dicts)} logs")
         remain_list = []
         download_rows = []
+        suite_output_paths = set()
         for i, log_info in enumerate(log_dicts):
             if st.session_state.get("stop_downloads"):
                 st.warning("Download stopped by user.")
@@ -251,7 +267,16 @@ class JobResult:
                     detail = "matched skip rule"
                 else:
                     try:
-                        ok = self.download_archive_log(log_info, "archive_id", "zip", skip_large_file=skip_large_file, large_file_mb=large_file_mb)
+                        output_dir = self._get_output_path_for_log(log_info)
+                        suite_output_paths.add(output_dir)
+                        ok = self.download_archive_log(
+                            log_info,
+                            "archive_id",
+                            "zip",
+                            output_path=output_dir,
+                            skip_large_file=skip_large_file,
+                            large_file_mb=large_file_mb,
+                        )
                         status = "downloaded" if ok else "failed"
                         detail = "ok" if ok else "download failed"
                     except Exception as e:
@@ -259,6 +284,8 @@ class JobResult:
                         detail = str(e)
                 download_rows.append(
                     {
+                        "suite_name": log_info.get("suite_name", ""),
+                        "suite_id": log_info.get("suite_id", ""),
                         "archive_id": log_info["archive_id"],
                         "result_json_id": log_info["result_json_id"],
                         "scenario_name": log_info["scenario_name"],
@@ -280,22 +307,27 @@ class JobResult:
                 st.warning(f"Could not render download table: {e}")
         
         with st.spinner("Extracting archives..."):
-            self.extract_archives(phase)
+            for output_dir in sorted(suite_output_paths):
+                self.extract_archives(phase, output_dir)
         return remain_list
 
     def download_result_json(self):
         log_dicts = self.get_case_simlation_log_info()
         st.write(f"Found {len(log_dicts)} result JSON files")
+        suite_output_paths = set()
         
         for i, log_info in enumerate(log_dicts):
             if st.session_state.get("stop_downloads"):
                 st.warning("Download stopped by user.")
                 break
             with st.spinner(f"Downloading JSON {i+1}/{len(log_dicts)}: {log_info['scenario_name']}"):
-                self.download_archive_log(log_info, "result_json_id", "json")
+                output_dir = self._get_output_path_for_log(log_info)
+                suite_output_paths.add(output_dir)
+                self.download_archive_log(log_info, "result_json_id", "json", output_path=output_dir)
         
         with st.spinner("Organizing files..."):
-            self.organize_files_into_directories(self.__output_path)
+            for output_dir in sorted(suite_output_paths):
+                self.organize_files_into_directories(output_dir)
         return log_dicts
 
     def get_case_simlation_log_info(self) -> list:
@@ -330,17 +362,23 @@ class JobResult:
             next_token = data.get("next_token", "")
             
             for report in data["reports"]:
-                if report["suite"]["id"] == self.__suite_id:
-                    if "simulation_archive" in report["logs"]:
-                        simlation_archive_log_info.append(
-                            {
-                                "archive_id": report["logs"]["simulation_archive"]["id"],
-                                "result_json_id": report["logs"]["simulation_result_json"]["id"],
-                                "scenario_name": report["scenario"]["display_name"],
-                                "scenario_id": report["scenario"]["id"],
-                                "scenario_ver": report["scenario"]["version_id"],
-                            }
-                        )
+                suite_info = report.get("suite", {})
+                suite_id = suite_info.get("id", "")
+                suite_name = suite_info.get("display_name", "")
+                if self.__suite_id and suite_id != self.__suite_id:
+                    continue
+                if "simulation_archive" in report["logs"]:
+                    simlation_archive_log_info.append(
+                        {
+                            "suite_id": suite_id,
+                            "suite_name": suite_name,
+                            "archive_id": report["logs"]["simulation_archive"]["id"],
+                            "result_json_id": report["logs"]["simulation_result_json"]["id"],
+                            "scenario_name": report["scenario"]["display_name"],
+                            "scenario_id": report["scenario"]["id"],
+                            "scenario_ver": report["scenario"]["version_id"],
+                        }
+                    )
             
             # Update progress
             if next_token:
@@ -352,7 +390,15 @@ class JobResult:
         progress_bar.empty()
         return simlation_archive_log_info
 
-    def download_archive_log(self, log_info, type, format, skip_large_file=False, large_file_mb=50.0) -> bool:
+    def download_archive_log(
+        self,
+        log_info,
+        type,
+        format,
+        output_path: Optional[str] = None,
+        skip_large_file=False,
+        large_file_mb=50.0
+    ) -> bool:
         url = (
             self.__api_base_url
             + "/projects/"
@@ -375,9 +421,10 @@ class JobResult:
             return False
 
         # Create output directory if it doesn't exist
-        os.makedirs(self.__output_path, exist_ok=True)
+        output_dir = output_path or self.__output_path
+        os.makedirs(output_dir, exist_ok=True)
         
-        output_file = os.path.join(self.__output_path, dl_filename)
+        output_file = os.path.join(output_dir, dl_filename)
         try:
             download_file(content["url"], output_file, skip_large_file=skip_large_file, large_file_mb=large_file_mb)
         except Exception as e:
@@ -386,8 +433,8 @@ class JobResult:
         st.success(f"Downloaded: {dl_filename}")
         return True
 
-    def extract_archives(self, phase):
-        archive_paths = glob.glob(os.path.join(self.__output_path, "*.zip"))
+    def extract_archives(self, phase, output_path: str):
+        archive_paths = glob.glob(os.path.join(output_path, "*.zip"))
         st.write(f"Found {len(archive_paths)} archives to extract")
         
         progress_bar = st.progress(0)
@@ -745,6 +792,7 @@ def generate_summary_and_score_csv(input_path: str) -> Dict[str, Any]:
     #summary_lines.append(summary_header)
     for folder in result_folders:
         result_txt = os.path.join(folder, "result.txt")
+        print("result_txt", result_txt)
         if not os.path.exists(result_txt):
             continue
 
@@ -891,7 +939,7 @@ with st.sidebar:
     suite_id = st.text_input(
         "Suite ID",
         value=get_config_value("suite_id", ""),
-        help="Enter the suite ID"
+        help="Enter the suite ID (leave empty to download all suites)"
     )
     set_config_value("suite_id", suite_id)
     
@@ -962,8 +1010,8 @@ with tab1:
 
 
     if st.button("List Available Logs Info"):
-        if not all([project_id, job_id, suite_id]):
-            st.error("Please fill in all required fields: Project ID, Job ID, and Suite ID")
+        if not all([project_id, job_id]):
+            st.error("Please fill in all required fields: Project ID and Job ID")
             st.stop()
         try:
             # Initialize JobResult
@@ -978,6 +1026,8 @@ with tab1:
             st.subheader("Simulation Logs Info")
             if log_dicts:
                 display_keys = [
+                    "suite_name",
+                    "suite_id",
                     "scenario_name", 
                     "archive_id", 
                     "result_json_id", 
@@ -998,8 +1048,8 @@ with tab1:
 
     if st.button("Download Results", type="primary"):
         st.session_state.stop_downloads = False
-        if not all([project_id, job_id, suite_id]):
-            st.error("Please fill in all required fields: Project ID, Job ID, and Suite ID")
+        if not all([project_id, job_id]):
+            st.error("Please fill in all required fields: Project ID and Job ID")
             st.stop()
         
         # Create output directory
@@ -1116,8 +1166,8 @@ with tab2:
         )
     
     if st.button("Download Scenarios", type="primary", key="download_scenarios"):
-        if not all([project_id, job_id, suite_id]):
-            st.error("Please fill in all required fields: Project ID, Job ID, and Suite ID")
+        if not all([project_id, job_id]):
+            st.error("Please fill in all required fields: Project ID and Job ID")
             st.stop()
         
         # Parse scenario IDs
