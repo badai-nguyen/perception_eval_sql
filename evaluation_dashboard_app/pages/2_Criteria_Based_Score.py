@@ -132,6 +132,18 @@ if mode == "Compare Mode":
         st.subheader(f"Criteria {criteria_idx} Data — Candidate (B)")
         st.dataframe(df_view_B, width="stretch")
 
+    st.subheader("Summary")
+    count_a = len(df_view_A)
+    count_b = len(df_view_B)
+    mean_a = df_view_A["pass_rate"].mean() if count_a else 0.0
+    mean_b = df_view_B["pass_rate"].mean() if count_b else 0.0
+    delta_mean = mean_b - mean_a
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Rows (A)", f"{count_a:,}")
+    col2.metric("Rows (B)", f"{count_b:,}")
+    col3.metric("Pass rate mean (A)", f"{mean_a:.3f}")
+    col4.metric("Pass rate mean (B)", f"{mean_b:.3f}", f"{delta_mean:+.3f}")
+
     compare_view = st.sidebar.radio(
         "Compare View",
         ["Overlay", "Delta"],
@@ -273,6 +285,13 @@ if mode == "Compare Mode":
             st.plotly_chart(scatter_fig, width="stretch")
         # ---- End Improved Per Scenario Pass Rate Compare Plot ----
 
+        st.download_button(
+            "Download filtered data as CSV",
+            df_compare.to_csv(index=False).encode("utf-8"),
+            file_name="criteria_compare_filtered.csv",
+            mime="text/csv",
+        )
+
     else:
         merged = df_view_A.merge(
             df_view_B,
@@ -329,6 +348,7 @@ if mode == "Compare Mode":
             ],
             width="stretch",
         )
+
 else:
     df_view = build_view(df_raw_A, criteria_idx)
     if show_debug:
@@ -336,6 +356,15 @@ else:
         st.dataframe(df_raw_A.head(10), width="stretch")
         st.subheader(f"Criteria {criteria_idx} Data")
         st.dataframe(df_view, width="stretch")
+
+    st.subheader("Summary")
+    count = len(df_view)
+    mean_pass = df_view["pass_rate"].mean() if count else 0.0
+    median_pass = df_view["pass_rate"].median() if count else 0.0
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Rows", f"{count:,}")
+    col2.metric("Pass rate mean", f"{mean_pass:.3f}")
+    col3.metric("Pass rate median", f"{median_pass:.3f}")
 
     st.subheader(f"{metric} Distribution")
     fig = px.histogram(
@@ -371,3 +400,12 @@ else:
     )
     st.plotly_chart(fig, width="stretch")
 
+    st.subheader("Top / Bottom Scenarios by Pass Rate")
+    scenario_metric = df_view.groupby("Scenario", as_index=False)["pass_rate"].mean()
+    top_n = st.number_input("Top N scenarios", min_value=5, max_value=100, value=20, key="single_top_n")
+    sort_order = st.radio("Order", ["Highest first", "Lowest first"], horizontal=True, key="single_scen_order")
+    scenario_metric = scenario_metric.sort_values(
+        "pass_rate",
+        ascending=sort_order == "Lowest first",
+    ).head(int(top_n))
+    st.dataframe(scenario_metric, width="stretch")
