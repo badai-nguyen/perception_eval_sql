@@ -285,7 +285,7 @@ class JobResult:
                 import pandas as pd
 
                 st.subheader("📋 Download Status")
-                st.dataframe(pd.DataFrame(download_rows), use_container_width=True)
+                st.dataframe(pd.DataFrame(download_rows), width="stretch")
             except Exception as e:
                 st.warning(f"Could not render download table: {e}")
         
@@ -1335,7 +1335,7 @@ with tab3:
             
             import pandas as pd
             df = pd.DataFrame(df_data)
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width="stretch")
 
 
 with tab4:
@@ -1468,7 +1468,7 @@ with tab4:
 
             if results:
                 st.subheader("📋 Details")
-                st.dataframe(pd.DataFrame(results), use_container_width=True)
+                st.dataframe(pd.DataFrame(results), width="stretch")
 
             # Generate summary CSVs at the eval_root level
             with st.spinner("Generating Summary.csv and Score.csv..."):

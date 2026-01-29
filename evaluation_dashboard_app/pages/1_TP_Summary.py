@@ -117,58 +117,132 @@ if use_delta and count:
 col1, col2 = st.columns(2)
 
 with col1:
-    st.subheader("Position RMS (X vs Y)")
-    xrms_col = "xrms_delta" if use_delta else "xrms"
-    yrms_col = "yrms_delta" if use_delta else "yrms"
-    fig_rms = px.scatter(
-        df_f,
-        x=xrms_col,
-        y=yrms_col,
-        color=tp_col,
-        hover_data=["id"],
-        labels={
-            xrms_col: "Δ X RMS" if use_delta else "X RMS",
-            yrms_col: "Δ Y RMS" if use_delta else "Y RMS",
-            tp_col: "Δ TP" if use_delta else "TP",
-        },
-        color_continuous_scale="Viridis",
-    )
-    st.plotly_chart(fig_rms, width="stretch")
+    st.subheader("Absolute Position RMS (X vs Y)")
+    # Always compare the two sources side by side (before and after/delta)
+    if use_delta:
+        # Show both reference and target RMS comparisons for X and Y, as well as their deltas
+        fig_rms_x_compare = px.scatter(
+            df_f,
+            x="xrms_B",
+            y="xrms",
+            color=tp_col,
+            hover_data=["id", "xrms_delta", "yrms_delta"],
+            labels={
+                "xrms_B": "X RMS (B)",
+                "xrms": "X RMS (A)",
+                tp_col: "Δ TP",
+                "xrms_delta": "Δ X RMS",
+                "yrms_delta": "Δ Y RMS",
+            },
+            title="Scatter: X RMS (B) vs X RMS (A)",
+            color_continuous_scale="Viridis",
+        )
+        fig_rms_x_compare.update_traces(marker=dict(size=8, opacity=0.6))
+        st.plotly_chart(fig_rms_x_compare, width="stretch")
+        fig_rms_y_compare = px.scatter(
+            df_f,
+            x="yrms_B",
+            y="yrms",
+            color=tp_col,
+            hover_data=["id", "xrms_delta", "yrms_delta"],
+            labels={
+                "yrms_B": "Y RMS (B)",
+                "yrms": "Y RMS (A)",
+                tp_col: "Δ TP",
+                "xrms_delta": "Δ X RMS",
+                "yrms_delta": "Δ Y RMS",
+            },
+            title="Scatter: Y RMS (B) vs Y RMS (A)",
+            color_continuous_scale="Viridis",
+        )
+        fig_rms_y_compare.update_traces(marker=dict(size=8, opacity=0.6))
+        st.plotly_chart(fig_rms_y_compare, width="stretch")
+    else:
+        # Just show the submission's RMS (x/y) for standard analysis
+        fig_rms = px.scatter(
+            df_f,
+            x="xrms",
+            y="yrms",
+            color=tp_col,
+            hover_data=["id"],
+            labels={
+                "xrms": "X RMS",
+                "yrms": "Y RMS",
+                tp_col: "TP",
+            },
+            color_continuous_scale="Viridis",
+        )
+        fig_rms.update_traces(marker=dict(size=8, opacity=0.7))
+        st.plotly_chart(fig_rms, width="stretch")
 
 with col2:
     st.subheader("Velocity (vx vs vy)")
-    vx_col = "vx_delta" if use_delta else "vx"
-    vy_col = "vy_delta" if use_delta else "vy"
-    fig_vel = px.scatter(
-        df_f,
-        x=vx_col,
-        y=vy_col,
-        color=tp_col,
-        hover_data=["id"],
-        labels={
-            vx_col: "Δ Vx" if use_delta else "Vx",
-            vy_col: "Δ Vy" if use_delta else "Vy",
-            tp_col: "Δ TP" if use_delta else "TP",
-        },
-        color_continuous_scale="Plasma",
-    )
-    st.plotly_chart(fig_vel, width="stretch")
+
+    def plot_velocity(df, vx, vy, vx_label, vy_label):
+        fig = px.scatter(
+            df,
+            x=vx,
+            y=vy,
+            color=tp_col,
+            hover_data=["id"],
+            labels={
+                vx: vx_label,
+                vy: vy_label,
+                tp_col: "TP",
+            },
+            color_continuous_scale="Plasma",
+            title=f"{vx_label} vs {vy_label}",
+        )
+        st.plotly_chart(fig, width="stretch")
+
+    if use_delta:
+        plot_velocity(df_f, "vx", "vy", "Vx (A)", "Vy (A)")
+        plot_velocity(df_f, "vx_B", "vy_B", "Vx (B)", "Vy (B)")
+    else:
+        plot_velocity(df_f, "vx", "vy", "Vx", "Vy")
 
 # ========== Metric Distribution ==========
 st.subheader("Metric Distribution")
 metrics = ["xstd", "ystd", "xrms", "yrms", "vx", "vy", "TP"]
 metrics_delta = [f"{m}_delta" for m in metrics]
 metric_options = metrics_delta if use_delta else metrics
-metric = st.selectbox("Select metric", metric_options)
+default_metric = "TP_delta" if use_delta else "TP"
+if default_metric in metric_options:
+    default_index = metric_options.index(default_metric)
+else:
+    default_index = 0
+metric = st.selectbox("Select metric", metric_options, index=default_index)
 
+# Show a simple, single-color (monochrome) distribution for clarity
 fig_hist = px.histogram(
     df_f,
     x=metric,
-    nbins=30,
-    color=tp_col,
-    marginal="box"
+    nbins=40,
+    color_discrete_sequence=["#636EFA"],  # Plotly blue
+    marginal="box",  # Adds a box plot at the top
+    opacity=0.85,
+)
+fig_hist.update_layout(
+    showlegend=False,
+    bargap=0.04,
+    xaxis_title=metric,
+    yaxis_title="Count",
 )
 st.plotly_chart(fig_hist, width="stretch")
+
+# Optionally, add a KDE/violin plot for more insight into distribution
+st.subheader("Density (KDE/Violin)")
+fig_density = px.violin(
+    df_f,
+    y=metric,
+    box=True,
+    points="all",
+)
+fig_density.update_layout(
+    yaxis_title=metric,
+    showlegend=False,
+)
+st.plotly_chart(fig_density, width="stretch")
 
 # ========== Scenario-level Delta Analysis (Compare Mode) ==========
 if mode == "Compare Mode" and use_delta and "id" in df_cmp.columns:
