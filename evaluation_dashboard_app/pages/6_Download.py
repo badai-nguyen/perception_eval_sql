@@ -16,40 +16,21 @@ from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 from typing import Text, Optional, List, Dict, Any
 from lib.WebAPI import scenarioAPI
+from lib.user_config import UserConfig
 from lib.perception_eval_result_summarizer import run_eval_result, generate_score_json
 
-# --- Persistent user config helpers ---
-CONFIG_FILE = os.path.expanduser("./configs/autoware_evaluator_dl_config.json")
 # Constants
 SCENARIO_API_BASE = "https://scenario.ci.web.auto/v1"
 EVALUATION_API_BASE = "https://evaluation.ci.web.auto/v3"
 
-def load_user_config():
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
-
-def save_user_config(config):
-    try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2)
-    except Exception as e:
-        st.warning(f"Could not save config: {e}")
-
 # Initialize or load user config
-_user_config = load_user_config()
+_user_config = UserConfig(warning_fn=st.warning)
 
 def get_config_value(key, default=None):
     return _user_config.get(key, default)
 
 def set_config_value(key, value):
-    if _user_config.get(key) != value:
-        _user_config[key] = value
-        save_user_config(_user_config)
+    _user_config.set(key, value)
 
 # Try to import the authentication module, with fallback handling
 # https://github.com/tier4/webauto-auth-py.git

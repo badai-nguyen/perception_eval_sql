@@ -4,6 +4,7 @@ from pathlib import Path
 from lib.run_loader import load_run
 import plotly.express as px
 import plotly.graph_objects as go
+from lib.user_config import UserConfig
 
 # ====== CONFIG AND CONSTANTS ======
 st.set_page_config(page_title="Overview", layout="wide", initial_sidebar_state="expanded")
@@ -166,15 +167,30 @@ def show_grouped_metrics_plot(df, group_col, label_map=None, mode="single", df_b
             st.plotly_chart(fig, width="stretch")
 
 # ====== SIDEBAR UI ======
+user_config = UserConfig(warning_fn=st.warning)
+saved_mode = user_config.get("overview_mode", "Single Mode")
 st.sidebar.header("Mode")
-mode = st.sidebar.radio("Mode", ["Single Mode", "Compare Mode"]); st.session_state["mode"] = mode
+mode_options = ["Single Mode", "Compare Mode"]
+mode_index = mode_options.index(saved_mode) if saved_mode in mode_options else 0
+mode = st.sidebar.radio("Mode", mode_options, index=mode_index)
+st.session_state["mode"] = mode
+user_config.set("overview_mode", mode)
 st.title("Overview")
 run_dirs = sorted([p for p in RUN_ROOT.iterdir() if p.is_dir()])
-run_a_dir = st.sidebar.selectbox("Baseline (A)", run_dirs, format_func=lambda p: p.name)
+run_names = [p.name for p in run_dirs]
+saved_run_a = user_config.get("overview_run_a", run_names[0] if run_names else "")
+run_a_index = run_names.index(saved_run_a) if saved_run_a in run_names else 0
+run_a_dir = st.sidebar.selectbox("Baseline (A)", run_dirs, index=run_a_index, format_func=lambda p: p.name)
+user_config.set("overview_run_a", run_a_dir.name)
 run_b_dir = None
 if mode == "Compare Mode":
-    idx = 1 if len(run_dirs) > 1 else 0
-    run_b_dir = st.sidebar.selectbox("Candidate (B)", run_dirs, index=idx, format_func=lambda p: p.name)
+    saved_run_b = user_config.get("overview_run_b", "")
+    if saved_run_b in run_names:
+        run_b_index = run_names.index(saved_run_b)
+    else:
+        run_b_index = 1 if len(run_dirs) > 1 else 0
+    run_b_dir = st.sidebar.selectbox("Candidate (B)", run_dirs, index=run_b_index, format_func=lambda p: p.name)
+    user_config.set("overview_run_b", run_b_dir.name)
 
 # ====== LOAD DATA ======
 def safe_load_run(path, label='Run'):
