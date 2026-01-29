@@ -15,5 +15,6 @@
   "eval_workers": 1,
   "eval_recursive": true,
   "eval_overwrite": false,
-  "eval_parallel": false
+  "eval_parallel": false,
+  "suite_ids": []
 }

@@ -200,12 +200,14 @@ class JobResult:
         project_id: Text,
         job_id: Text,
         suite_id: Text,
+        suite_ids: Optional[List[str]],
         output_path: Text,
     ):
         self.__environment = environment
         self.__project_id = project_id
         self.__job_id = job_id
         self.__suite_id = suite_id
+        self.__suite_ids = [sid for sid in (suite_ids or []) if sid]
         self.__output_path = output_path
         self.__api_base_url = "https://evaluation.ci.web.auto/v3"
         if self.__environment in ["dev", "stg"]:
@@ -219,7 +221,7 @@ class JobResult:
         return cleaned if cleaned else "unknown"
 
     def _get_output_path_for_log(self, log_info: Dict[str, Any]) -> str:
-        if self.__suite_id:
+        if self.__suite_id and not self.__suite_ids:
             return self.__output_path
         suite_id = log_info.get("suite_id", "unknown")
         suite_name = log_info.get("suite_name", "")
@@ -346,7 +348,10 @@ class JobResult:
                 suite_info = report.get("suite", {})
                 suite_id = suite_info.get("id", "")
                 suite_name = suite_info.get("display_name", "")
-                if self.__suite_id and suite_id != self.__suite_id:
+                if self.__suite_ids:
+                    if suite_id not in self.__suite_ids:
+                        continue
+                elif self.__suite_id and suite_id != self.__suite_id:
                     continue
                 if "simulation_archive" in report["logs"]:
                     simlation_archive_log_info.append(
@@ -707,6 +712,8 @@ if 'current_tab' not in st.session_state:
     st.session_state.current_tab = "Download Results"
 if "stop_downloads" not in st.session_state:
     st.session_state.stop_downloads = False
+if "suite_options" not in st.session_state:
+    st.session_state.suite_options = []
 
 
 def find_eval_result_dirs(root_dir: str, recursive: bool = True) -> List[str]:
@@ -949,13 +956,62 @@ with st.sidebar:
         help="Enter the suite ID (leave empty to download all suites)"
     )
     set_config_value("suite_id", suite_id)
-    
+
     output_path = st.text_input(
         "Output Path",
         value=get_config_value("output_path", "./data/download"),
         help="Path where files will be saved"
     )
     set_config_value("output_path", output_path)
+
+    fetch_suites = st.button("Fetch suites from job", help="Retrieve suites for the current Project ID and Job ID")
+    if fetch_suites:
+        if not all([project_id, job_id]):
+            st.error("Please fill in Project ID and Job ID before fetching suites.")
+        else:
+            try:
+                with st.spinner("Fetching suites..."):
+                    job_result = JobResult(
+                        environment=environment,
+                        project_id=project_id,
+                        job_id=job_id,
+                        suite_id="",
+                        suite_ids=None,
+                        output_path=output_path
+                    )
+                    log_dicts = job_result.get_case_simlation_log_info()
+                suite_map = {}
+                for log_info in log_dicts:
+                    sid = log_info.get("suite_id", "")
+                    sname = log_info.get("suite_name", "")
+                    if sid:
+                        suite_map[sid] = sname or sid
+                st.session_state.suite_options = [
+                    {"id": sid, "name": suite_map[sid]} for sid in sorted(suite_map, key=lambda s: suite_map[s].lower())
+                ]
+                if st.session_state.suite_options:
+                    st.success(f"Found {len(st.session_state.suite_options)} suites.")
+                else:
+                    st.info("No suites found for this job.")
+            except Exception as e:
+                st.error(f"Failed to fetch suites: {str(e)}")
+
+    suite_options = st.session_state.suite_options
+    suite_id_map = {f"{opt['name']} ({opt['id']})": opt["id"] for opt in suite_options}
+    saved_suite_ids = get_config_value("suite_ids", []) or []
+    default_suite_labels = [
+        label for label, sid in suite_id_map.items() if sid in saved_suite_ids
+    ]
+    suite_labels = sorted(suite_id_map.keys())
+    selected_suite_labels = st.multiselect(
+        "Suites to download (optional)",
+        options=suite_labels,
+        default=default_suite_labels,
+        help="Pick one or more suites from the job. Leave empty to download all suites.",
+        disabled=not suite_labels,
+    )
+    suite_ids = [suite_id_map[label] for label in selected_suite_labels]
+    set_config_value("suite_ids", suite_ids)
     
     download_type = st.radio(
         "Download Type",
@@ -1016,6 +1072,8 @@ with tab1:
             st.warning("Stop requested. Current download will finish then halt.")
 
 
+    selected_suite_ids = suite_ids or ([suite_id] if suite_id else [])
+
     if st.button("List Available Logs Info"):
         if not all([project_id, job_id]):
             st.error("Please fill in all required fields: Project ID and Job ID")
@@ -1027,6 +1085,7 @@ with tab1:
                 project_id=project_id,
                 job_id=job_id,
                 suite_id=suite_id,
+                suite_ids=selected_suite_ids,
                 output_path=output_path
             )
             log_dicts = job_result.get_case_simlation_log_info()
@@ -1067,6 +1126,7 @@ with tab1:
         set_config_value("project_id", project_id)
         set_config_value("job_id", job_id)
         set_config_value("suite_id", suite_id)
+        set_config_value("suite_ids", selected_suite_ids)
         set_config_value("output_path", output_path)
         set_config_value("download_type", download_type)
         if download_type == "Archives (ZIP)":
@@ -1081,6 +1141,7 @@ with tab1:
                 project_id=project_id,
                 job_id=job_id,
                 suite_id=suite_id,
+                suite_ids=selected_suite_ids,
                 output_path=output_path
             )
             
@@ -1190,6 +1251,7 @@ with tab2:
                 project_id=project_id,
                 job_id=job_id,
                 suite_id=suite_id,
+                suite_ids=selected_suite_ids,
                 output_path=output_path
             )
             
