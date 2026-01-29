@@ -780,19 +780,44 @@ def generate_summary_and_score_csv(input_path: str) -> Dict[str, Any]:
     Generate Summary.csv and Score.csv in the input_path directory
     based on each subdirectory's result.txt and score.json.
     """
+    def _infer_suite_name(dir_name: str) -> str:
+        base = Path(dir_name).name.rstrip("/")
+        parts = base.rsplit("_", 1)
+        if len(parts) == 2:
+            maybe_uuid = parts[1]
+            if len(maybe_uuid) == 36 and maybe_uuid.count("-") == 4:
+                return parts[0]
+        return base
+
     result_folders = glob.glob(os.path.join(input_path, "*/"))
     result_folders.sort()
+    result_entries: List[Dict[str, str]] = []
+    flat_results = False
+    for folder in result_folders:
+        if os.path.exists(os.path.join(folder, "result.txt")):
+            flat_results = True
+            result_entries.append({"suite": "", "path": folder})
+
+    if not flat_results:
+        for suite_dir in result_folders:
+            suite_name = _infer_suite_name(suite_dir)
+            suite_cases = glob.glob(os.path.join(suite_dir, "*/"))
+            suite_cases.sort()
+            for case_dir in suite_cases:
+                if os.path.exists(os.path.join(case_dir, "result.txt")):
+                    result_entries.append({"suite": suite_name, "path": case_dir})
 
     summary_lines: List[str] = []
     score_lines: List[str] = []
 
     # Summary.csv
-    summary_header = "Scenario,TP,TP_xave,TP_xstd,TP_xrms,TP_yave,TP_ystd,TP_yrms,TP_vx,TP_vy\n"
+    summary_header = "Scenario,TP,TP_xave,TP_xstd,TP_xrms,TP_yave,TP_ystd,TP_yrms,TP_vx,TP_vy,Suite\n"
     # in streamlit, Summary.csv does not need header line
     #summary_lines.append(summary_header)
-    for folder in result_folders:
+    for entry in result_entries:
+        folder = entry["path"]
+        suite_name = entry["suite"]
         result_txt = os.path.join(folder, "result.txt")
-        print("result_txt", result_txt)
         if not os.path.exists(result_txt):
             continue
 
@@ -829,7 +854,7 @@ def generate_summary_and_score_csv(input_path: str) -> Dict[str, Any]:
         summary_lines.append(
             f"{scenario_name},{tp_percent:.3f},{x_ave:.3f},{x_std:.3f},"
             f"{x_rms:.3f},{y_ave:.3f},{y_std:.3f},{y_rms:.3f},"
-            f"{vx:.3f},{vy:.3f}\n"
+            f"{vx:.3f},{vy:.3f},{suite_name}\n"
         )
 
     # Score.csv
@@ -843,7 +868,8 @@ def generate_summary_and_score_csv(input_path: str) -> Dict[str, Any]:
     # in streamlit, Score.csv does not need header line
     #score_lines.append(score_header)
 
-    for folder in result_folders:
+    for entry in result_entries:
+        folder = entry["path"]
         score_json = os.path.join(folder, "score.json")
         if not os.path.exists(score_json):
             continue
