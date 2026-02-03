@@ -33,6 +33,89 @@ pipx install git+ssh://git@github.com/tier4/v_and_v_util.git
 ## 概要
 Streamlit で動作する評価ダッシュボードです。`data/` 配下の評価結果（`Summary.csv`、`Score.csv`、`.parquet`）を読み込み、複数ページで可視化できます。さらに、`pages/6_Download.py` では評価結果（`result.txt` など）の一括集計や `Summary.csv` / `Score.csv` の自動生成、結果ディレクトリの検索・ダウンロード管理も可能です。
 
+## 使い方
+
+1. サマリーやスコア生成（`pages/6_Download.py` の「Summary.csv / Score.csv を生成」）を実行するには、**事前に下記コマンドで pilot-auto（ROS 2）環境を有効化する必要があります**:
+   ```
+   source path_to_pilot/install/setup.sh
+   ```
+   ※ この作業は `pages/6_Download.py` の「Summary/Score CSV 生成」で必要です。
+
+2. `evaluation_dashboard_app/` で Streamlit を起動します。
+   ```
+   streamlit run Overview.py
+   ```
+
+3. サイドバーからページやフィルタを選択して可視化します。
+
+### 可視化のクイックスタート（推奨ワークフロー）
+
+あるテストのログを取得してから、サマリーを生成し、Overview で詳細を確認するまでの流れは次の 3 ステップです。
+
+1. **Download ページで特定テストのログをダウンロードする**
+2. **Download ページの「Eval Results」でサマリー／スコアを生成する**
+3. **Overview ページでそのログ（Run）を選択し、詳細を表示する**
+
+以下、各ステップで行うことと、注意点をまとめます。
+
+#### ステップ 1: Download ページでログをダウンロードする
+
+- **ページ**: サイドバーから **Download**（`6_Download.py`）を開く。
+- **タブ**: **「Download Results」** を選択する。
+- **入力**:
+  - **Project ID** と **Job ID** を入力する（必要に応じて Suite ID も指定）。
+  - **Output Path** には、**このテスト用のフォルダ**を指定する。  
+    Overview で「Run」として選べるようにするには、`data/` の直下に 1 テスト 1 フォルダで置くのがおすすめです。  
+    例: `./data/my_test_20250203` のように `./data/<テスト名>` とする。
+- **Download Type**:
+  - **Archives (ZIP)**: ZIP をダウンロードして解凍し、指定 Phase のデータを取り出す。ローカルでフルに解析する場合向け。
+  - **Result JSON only**: 結果 JSON のみ取得。軽量で、サマリー／スコア生成だけしたい場合向け。
+- **実行**: 「Download Results」をクリックし、完了するまで待つ。
+- 
+- **結果**: 指定した Output Path の下に、ジョブ／スイートに応じたディレクトリ構造でログ（および必要に応じて `result.txt`・`score.json` の元データ）が保存される。
+
+![Download ページの設定（Download Results タブ）](docs/images/download_config.png)
+
+![ダウンロード実行後](docs/images/download_result.png)
+
+#### ステップ 2: Eval Results でサマリー分析結果を生成する
+
+- **ページ**: 同じ **Download** ページのまま。
+- **タブ**: **「Eval Results (per directory)」**（または「Eval Results」）に切り替える。
+- **Root directory to evaluate**:
+  - ステップ 1 でダウンロード先に指定した **Output Path と同じパス**を指定する。  
+    例: `./data/my_test_20250203`
+- **オプション**:
+  - **Search subdirectories**: サブディレクトリも検索して `result.txt` / `score.json` を探す。通常はオンでよい。
+  - **Only generate Summary.csv and Score.csv**:  
+    既に各ディレクトリに `result.txt` や `score.json` がある場合にチェックすると、`perception_eval` の再実行をスキップし、既存結果から **Summary.csv** と **Score.csv** だけを生成する。  
+    初回で `result.txt` などがまだない場合はチェックせず、「Run eval_result for all directories」でフル評価を実行する。
+- **実行**:
+  - 「Run eval_result for all directories」または「Generate Summary and Score CSV only」をクリックする。
+- **結果**: 指定したルートディレクトリ直下に **Summary.csv** と **Score.csv** が生成される。  
+  これが「サマリー分析結果」であり、Overview および TP Summary / Criteria Based Score など各ページが参照するデータになる。
+
+![Eval Results タブ（サマリー／スコア生成）](docs/images/eval_result.png)
+
+※ Summary/Score 生成時に `perception_eval` を使う場合は、事前に pilot-auto 環境の `source path_to_pilot/install/setup.sh` を実行しておく必要があります（「使い方」参照）。
+
+#### ステップ 3: Overview ページでログを選んで詳細を表示する
+
+- **ページ**: サイドバーから **Overview**（`Overview.py`）を開く。
+- **Run の選択**:
+  - Overview は `data/` 直下の **各サブディレクトリ**を 1 つの「Run」として扱う。
+  - ステップ 1 の Output Path を `./data/<テスト名>` にしていた場合、その `<テスト名>` がサイドバーの **「Baseline (A)」** のドロップダウンに表示される。
+  - 表示したいテストのログ（Run）を **Baseline (A)** で選択する。比較したい場合は **Compare Mode** にし、**Candidate (B)** にもう 1 つの Run を選ぶ。
+- **表示内容**:
+  - 選択した Run の **Summary.csv** に基づく全体指標（TP mean、XRMS / YRMS / XSTD / YSTD など）が表示される。
+  - Perception Label / Product Label でフィルタすると、ラベル別の TP や指標の内訳を確認できる。
+  - 他のページ（TP Summary、Criteria Based Score、Detection Stats、Bounding Box Viewer）は、この Overview で選んだ Run を `st.session_state` で共有しているため、**先に Overview で Run を選んでから**各ページに移動すると、同じテストの詳細が表示される。
+
+![Overview ページ（Run 選択と指標表示）](docs/images/overview.png)
+
+**ポイント**:
+- 新しいテストを追加するたびに、Download では **Output Path を `./data/<新しいテスト名>`** にし、Eval Results で同じパスを「Root directory to evaluate」に指定して Summary/Score を生成すると、Overview の Run 一覧にそのテストが現れ、選択するだけで詳細を追える。
+
 ## 主な機能
 - 概要ページで Run の選択、単体/比較モードの切替、全体指標を表示
 - TP/位置/速度の統計ビューア（散布図・分布）
@@ -62,20 +145,6 @@ evaluation_dashboard_app/
     *.parquet
 ```
 
-## 使い方
-
-1. サマリーやスコア生成（`pages/6_Download.py` の「Summary.csv / Score.csv を生成」）を実行するには、**事前に下記コマンドで pilot-auto（ROS 2）環境を有効化する必要があります**:
-   ```
-   source path_to_pilot/install/setup.sh
-   ```
-   ※ この作業は `pages/6_Download.py` の「Summary/Score CSV 生成」で必要です。
-
-2. `evaluation_dashboard_app/` で Streamlit を起動します。
-   ```
-   streamlit run Overview.py
-   ```
-
-3. サイドバーからページやフィルタを選択して可視化します。
 
 ## ページ説明
 ### `Overview.py`
