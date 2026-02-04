@@ -36,7 +36,13 @@ PRODUCT_LABEL_JA = {
 
 # ====== HELPER FUNCTIONS ======
 def build_summary_delta(df_a, df_b):
-    df_a, df_b = df_a.set_index("id"), df_b.set_index("id")
+    # Decide key columns
+    if "perception_label" in df_a.columns and "perception_label" in df_b.columns:
+        key_cols = ["id", "perception_label"]
+    else:
+        key_cols = ["id"]
+
+    df_a, df_b = df_a.set_index(key_cols), df_b.set_index(key_cols)
     common_idx = df_a.index.intersection(df_b.index)
     result = pd.DataFrame(index=common_idx)
     metrics = ["TP", "xstd", "ystd", "xrms", "yrms", "vx", "vy"]

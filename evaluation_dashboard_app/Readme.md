@@ -15,7 +15,7 @@ pip install \
 ### Python パッケージ（ダウンロード機能）
 ```sh
 # Install authentication library (Download/Scenario API)
-pip install git+https://github.com/tier4/webauto-auth-py.git
+pip install git+ssh://git@github.com/tier4/webauto-auth-py.git
 ```
 
 ```sh

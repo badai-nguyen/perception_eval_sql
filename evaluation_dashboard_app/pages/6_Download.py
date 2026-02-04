@@ -946,13 +946,46 @@ with st.sidebar:
     )
     set_config_value("project_id", project_id)
 
-    job_id = st.text_input(
-        "Job ID",
-        value=get_config_value("job_id", ""),
-        help="Enter the job ID"
+    def extract_job_id_from_url(input_str):
+        import re
+        import urllib.parse
+
+        # Try to extract job id from known URL patterns
+        try:
+            parsed_url = urllib.parse.urlparse(input_str)
+            # Only if it's http(s) and /reports/xxxx pattern
+            if parsed_url.scheme in ("http", "https"):
+                match = re.search(r'/reports/([a-f0-9\-]{16,})', parsed_url.path)
+                if match:
+                    return match.group(1)
+            # If not, return as is
+            return input_str
+        except Exception:
+            return input_str
+    # Initialize session state
+    if "job_id" not in st.session_state:
+        st.session_state.job_id = get_config_value("job_id", "")
+
+    # Callback when input changes
+    def on_job_id_change():
+        raw = st.session_state.job_id
+        parsed = extract_job_id_from_url(raw)
+
+        # Update text input with extracted ID
+        st.session_state.job_id = parsed
+
+        # Save config
+        set_config_value("job_id", parsed)
+
+
+    # Text input bound to session state
+    st.text_input(
+        "Job ID (or Evaluator report URL)",
+        key="job_id",
+        help="Enter the job ID or paste a full Evaluator report URL",
+        on_change=on_job_id_change,
     )
-    set_config_value("job_id", job_id)
-    
+    set_config_value("job_id", st.session_state.job_id)
     suite_id = st.text_input(
         "Suite ID",
         value=get_config_value("suite_id", ""),
@@ -969,7 +1002,7 @@ with st.sidebar:
 
     fetch_suites = st.button("Fetch suites from job", help="Retrieve suites for the current Project ID and Job ID")
     if fetch_suites:
-        if not all([project_id, job_id]):
+        if not all([project_id, st.session_state.job_id]):
             st.error("Please fill in Project ID and Job ID before fetching suites.")
         else:
             try:
@@ -977,7 +1010,7 @@ with st.sidebar:
                     job_result = JobResult(
                         environment=environment,
                         project_id=project_id,
-                        job_id=job_id,
+                        job_id=st.session_state.job_id,
                         suite_id="",
                         suite_ids=None,
                         output_path=output_path
@@ -1102,7 +1135,7 @@ with tab1:
     selected_suite_ids = suite_ids or ([suite_id] if suite_id else [])
 
     if st.button("List Available Logs Info"):
-        if not all([project_id, job_id]):
+        if not all([project_id, st.session_state.job_id]):
             st.error("Please fill in all required fields: Project ID and Job ID")
             st.stop()
         try:
@@ -1110,7 +1143,7 @@ with tab1:
             job_result = JobResult(
                 environment=environment,
                 project_id=project_id,
-                job_id=job_id,
+                job_id=st.session_state.job_id,
                 suite_id=suite_id,
                 suite_ids=selected_suite_ids,
                 output_path=output_path
@@ -1141,7 +1174,7 @@ with tab1:
 
     if st.button("Download Results", type="primary"):
         st.session_state.stop_downloads = False
-        if not all([project_id, job_id]):
+        if not all([project_id, st.session_state.job_id]):
             st.error("Please fill in all required fields: Project ID and Job ID")
             st.stop()
         
@@ -1151,7 +1184,7 @@ with tab1:
         # Save all params to config so they're always updated with last inputs
         set_config_value("environment", environment)
         set_config_value("project_id", project_id)
-        set_config_value("job_id", job_id)
+        set_config_value("job_id", st.session_state.job_id)
         set_config_value("suite_id", suite_id)
         set_config_value("suite_ids", selected_suite_ids)
         set_config_value("output_path", output_path)
@@ -1167,7 +1200,7 @@ with tab1:
             job_result = JobResult(
                 environment=environment,
                 project_id=project_id,
-                job_id=job_id,
+                job_id=st.session_state.job_id,
                 suite_id=suite_id,
                 suite_ids=selected_suite_ids,
                 output_path=output_path
@@ -1264,7 +1297,7 @@ with tab2:
         )
     
     if st.button("Download Scenarios", type="primary", key="download_scenarios"):
-        if not all([project_id, job_id]):
+        if not all([project_id, st.session_state.job_id]):
             st.error("Please fill in all required fields: Project ID and Job ID")
             st.stop()
         
@@ -1279,7 +1312,7 @@ with tab2:
             job_result = JobResult(
                 environment=environment,
                 project_id=project_id,
-                job_id=job_id,
+                job_id=st.session_state.job_id,
                 suite_id=suite_id,
                 suite_ids=selected_suite_ids,
                 output_path=output_path
