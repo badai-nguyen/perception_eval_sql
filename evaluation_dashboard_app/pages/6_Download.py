@@ -231,7 +231,7 @@ class JobResult:
             suite_dir = self._safe_path_component(suite_id)
         return os.path.join(self.__output_path, suite_dir)
 
-    def download_archive_and_unzip(self, phase, skip_large_file=False, large_file_mb=50.0):
+    def download_archive_and_unzip(self, phase, skip_large_file=False, large_file_mb=50.0, keep_zip_files=False):
         log_dicts = self.get_case_simlation_log_info()
 
         st.write(f"Found {len(log_dicts)} logs")
@@ -259,6 +259,7 @@ class JobResult:
                             output_path=output_dir,
                             skip_large_file=skip_large_file,
                             large_file_mb=large_file_mb,
+                            keep_zip_files=keep_zip_files,
                         )
                         status = "downloaded" if ok else "failed"
                         detail = "ok" if ok else "download failed"
@@ -291,7 +292,7 @@ class JobResult:
         
         with st.spinner("Extracting archives..."):
             for output_dir in sorted(suite_output_paths):
-                self.extract_archives(phase, output_dir)
+                self.extract_archives(phase, output_dir, keep_zip_files)
         return remain_list
 
     def download_result_json(self):
@@ -383,7 +384,8 @@ class JobResult:
         format,
         output_path: Optional[str] = None,
         skip_large_file=False,
-        large_file_mb=50.0
+        large_file_mb=50.0,
+        keep_zip_files=False
     ) -> bool:
         url = (
             self.__api_base_url
@@ -419,7 +421,7 @@ class JobResult:
         st.success(f"Downloaded: {dl_filename}")
         return True
 
-    def extract_archives(self, phase, output_path: str):
+    def extract_archives(self, phase, output_path: str, keep_zip_files=False):
         archive_paths = glob.glob(os.path.join(output_path, "*.zip"))
         st.write(f"Found {len(archive_paths)} archives to extract")
         
@@ -429,7 +431,8 @@ class JobResult:
             
             dir_path = archive_path.replace(".zip", "")
             shutil.unpack_archive(archive_path, dir_path)
-            os.remove(archive_path)
+            if not keep_zip_files:
+                os.remove(archive_path)
 
             for sub_dir_path in os.listdir(dir_path):
                 if Path(sub_dir_path).name == "scenario.yaml":
@@ -1059,18 +1062,42 @@ tab1, tab2, tab3, tab4 = st.tabs(
 )
 
 
-    
+
 with tab1:
     st.header("Download Job Results")
         
-
     # Main content area
-    stop_col, _ = st.columns([1, 5])
+    stop_col, open_folder_col, _ = st.columns([1, 1, 4])
     with stop_col:
         if st.button("Stop Downloads", key="stop_downloads_btn"):
             st.session_state.stop_downloads = True
             st.warning("Stop requested. Current download will finish then halt.")
 
+    # Button to open the output folder in file explorer
+    import platform
+    if open_folder_col.button("Open Output Folder", key="open_folder_btn"):
+        import subprocess
+        import sys
+        try:
+            folder_path = os.path.abspath(output_path)
+            if platform.system() == "Windows":
+                os.startfile(folder_path)
+            elif platform.system() == "Darwin":  # macOS
+                subprocess.Popen(["open", folder_path])
+            else:  # Linux or others
+                subprocess.Popen(["xdg-open", folder_path])
+        except Exception as e:
+            st.error(f"Could not open folder: {e}")
+
+    # Add "Keep ZIP files" option, default False
+    keep_zip_files = False
+    if download_type == "Archives (ZIP)":
+        keep_zip_files = st.checkbox(
+            "Keep ZIP files after extract?",
+            value=get_config_value("keep_zip_files", False),
+            help="If checked, downloaded ZIP archives will be kept after extraction (default: not kept)."
+        )
+        set_config_value("keep_zip_files", keep_zip_files)
 
     selected_suite_ids = suite_ids or ([suite_id] if suite_id else [])
 
@@ -1133,6 +1160,7 @@ with tab1:
             set_config_value("phase", phase)
             set_config_value("skip_large_file", skip_large_file)
             set_config_value("large_file_mb", large_file_mb)
+            set_config_value("keep_zip_files", keep_zip_files)
         
         try:
             # Initialize JobResult
@@ -1151,7 +1179,9 @@ with tab1:
                     remain_list = job_result.download_archive_and_unzip(
                         phase, 
                         skip_large_file=skip_large_file, 
-                        large_file_mb=large_file_mb
+                        large_file_mb=large_file_mb,
+                        # Pass keep_zip_files to underlying logic if supported (add this arg in implementation)
+                        keep_zip_files=keep_zip_files,
                     )
                     st.success(f"✅ Downloaded and extracted {len(remain_list)} archives")
                     download_successful = len(remain_list) > 0

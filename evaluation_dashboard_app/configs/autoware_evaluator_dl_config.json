@@ -18,5 +18,6 @@
   "eval_parallel": false,
   "suite_ids": [
     "84c2a34e-387d-4218-927a-e06308e6fccc"
-  ]
+  ],
+  "keep_zip_files": false
 }
