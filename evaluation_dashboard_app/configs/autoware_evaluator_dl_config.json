@@ -1,14 +1,14 @@
 {
-  "overview_mode": "Single Mode",
-  "overview_run_a": "8342df2a-3807-560a-a2c3-3512a06b2da8",
+  "overview_mode": "Compare Mode",
+  "overview_run_a": "separate_iou_threshold_ped_byc_0.2_yolox_off",
   "overview_run_b": "separated_iou_threshold_default_0.6_yolox_off",
   "environment": "default",
   "project_id": "x2_dev",
-  "job_id": "5134d384-df8d-5874-b2c4-9c9638a0c9cf",
-  "suite_id": "",
-  "output_path": "./data/v4.3.0.1",
+  "job_id": "86ace45e-348c-5aca-b01a-40954d8e3ae0",
+  "suite_id": "84c2a34e-387d-4218-927a-e06308e6fccc",
+  "output_path": "./data/seperate_iou_thresh_ped_0.2_ped_size_valid_yolox_off",
   "download_type": "Archives (ZIP)",
-  "phase": "phase_name",
+  "phase": "perception.object_recognition.tracking.objects",
   "skip_large_file": true,
   "large_file_mb": 50.0,
   "eval_root": "./data/v4.3.1_centerpoint2.5",
@@ -16,5 +16,7 @@
   "eval_recursive": true,
   "eval_overwrite": false,
   "eval_parallel": false,
-  "suite_ids": []
+  "suite_ids": [
+    "84c2a34e-387d-4218-927a-e06308e6fccc"
+  ]
 }
