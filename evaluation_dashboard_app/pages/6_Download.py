@@ -962,6 +962,23 @@ with st.sidebar:
             return input_str
         except Exception:
             return input_str
+
+    def extract_suite_id_from_url(input_str):
+        import re
+        import urllib.parse
+
+        # Try to extract suite id from known URL patterns (e.g. evaluation.tier4.jp/evaluation/suites/<uuid>?project_id=...)
+        try:
+            parsed_url = urllib.parse.urlparse(input_str)
+            if parsed_url.scheme in ("http", "https"):
+                # Match /suites/<uuid> in path (UUID is 8-4-4-4-12 hex)
+                match = re.search(r'/suites/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})', parsed_url.path, re.IGNORECASE)
+                if match:
+                    return match.group(1)
+            return input_str
+        except Exception:
+            return input_str
+
     # Initialize session state
     if "job_id" not in st.session_state:
         st.session_state.job_id = get_config_value("job_id", "")
@@ -980,17 +997,30 @@ with st.sidebar:
 
     # Text input bound to session state
     st.text_input(
-        "Job ID (or Evaluator report URL)",
+        "Job ID/Report URL",
         key="job_id",
         help="Enter the job ID or paste a full Evaluator report URL",
         on_change=on_job_id_change,
     )
     set_config_value("job_id", st.session_state.job_id)
-    suite_id = st.text_input(
-        "Suite ID",
-        value=get_config_value("suite_id", ""),
-        help="Enter the suite ID (leave empty to download all suites)"
+
+    # Suite ID: same URL-based extraction as Job ID
+    if "suite_id" not in st.session_state:
+        st.session_state.suite_id = get_config_value("suite_id", "")
+
+    def on_suite_id_change():
+        raw = st.session_state.suite_id
+        parsed = extract_suite_id_from_url(raw)
+        st.session_state.suite_id = parsed
+        set_config_value("suite_id", parsed)
+
+    st.text_input(
+        "Suite ID/Suite URL (leave empty to download all suites)",
+        key="suite_id",
+        help="Enter the suite ID or paste a full Evaluator suite URL (e.g. https://evaluation.tier4.jp/evaluation/suites/<suite_id>?project_id=...)",
+        on_change=on_suite_id_change,
     )
+    suite_id = st.session_state.suite_id
     set_config_value("suite_id", suite_id)
 
     output_path = st.text_input(
@@ -1110,17 +1140,19 @@ with tab1:
     import platform
     if open_folder_col.button("Open Output Folder", key="open_folder_btn"):
         import subprocess
-        import sys
-        try:
-            folder_path = os.path.abspath(output_path)
-            if platform.system() == "Windows":
-                os.startfile(folder_path)
-            elif platform.system() == "Darwin":  # macOS
-                subprocess.Popen(["open", folder_path])
-            else:  # Linux or others
-                subprocess.Popen(["xdg-open", folder_path])
-        except Exception as e:
-            st.error(f"Could not open folder: {e}")
+        folder_path = os.path.abspath(output_path)
+        if not os.path.isdir(folder_path):
+            st.warning(f"Output folder does not exist yet: `{folder_path}`. Run a download first to create it.")
+        else:
+            try:
+                if platform.system() == "Windows":
+                    os.startfile(folder_path)
+                elif platform.system() == "Darwin":  # macOS
+                    subprocess.Popen(["open", folder_path])
+                else:  # Linux or others
+                    subprocess.Popen(["xdg-open", folder_path])
+            except Exception as e:
+                st.error(f"Could not open folder: {e}")
 
     # Add "Keep ZIP files" option, default False
     keep_zip_files = False
