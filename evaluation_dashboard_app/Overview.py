@@ -6,6 +6,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 from lib.user_config import UserConfig
 
+# ====== URL QUERY PARAMS (OPTIONAL OVERRIDE) ======
+params = st.query_params
+
+url_mode = params.get("mode")    # "single" / "compare" / None
+url_run_a = params.get("run_a")  # str / None
+url_run_b = params.get("run_b")  # str / None
+
 # ====== CONFIG AND CONSTANTS ======
 st.set_page_config(page_title="Overview", layout="wide", initial_sidebar_state="expanded")
 RUN_ROOT = Path("data")
@@ -175,6 +182,12 @@ def show_grouped_metrics_plot(df, group_col, label_map=None, mode="single", df_b
 # ====== SIDEBAR UI ======
 user_config = UserConfig(warning_fn=st.warning)
 saved_mode = user_config.get("overview_mode", "Single Mode")
+# URL override (only if exists)
+if url_mode == "compare":
+    saved_mode = "Compare Mode"
+elif url_mode == "single":
+    saved_mode = "Single Mode"
+
 st.sidebar.header("Mode")
 mode_options = ["Single Mode", "Compare Mode"]
 mode_index = mode_options.index(saved_mode) if saved_mode in mode_options else 0
@@ -185,19 +198,34 @@ st.title("Overview")
 run_dirs = sorted([p for p in RUN_ROOT.iterdir() if p.is_dir()])
 run_names = [p.name for p in run_dirs]
 saved_run_a = user_config.get("overview_run_a", run_names[0] if run_names else "")
+# URL override (only if valid)
+if url_run_a in run_names:
+    saved_run_a = url_run_a
+
 run_a_index = run_names.index(saved_run_a) if saved_run_a in run_names else 0
 run_a_dir = st.sidebar.selectbox("Baseline (A)", run_dirs, index=run_a_index, format_func=lambda p: p.name)
 user_config.set("overview_run_a", run_a_dir.name)
 run_b_dir = None
 if mode == "Compare Mode":
     saved_run_b = user_config.get("overview_run_b", "")
+    # URL override (only if valid)
+    if url_run_b in run_names:
+        saved_run_b = url_run_b
     if saved_run_b in run_names:
         run_b_index = run_names.index(saved_run_b)
     else:
         run_b_index = 1 if len(run_dirs) > 1 else 0
     run_b_dir = st.sidebar.selectbox("Candidate (B)", run_dirs, index=run_b_index, format_func=lambda p: p.name)
     user_config.set("overview_run_b", run_b_dir.name)
+# ====== SYNC URL (NON-DESTRUCTIVE) ======
+query = {
+    "mode": "compare" if mode == "Compare Mode" else "single",
+    "run_a": run_a_dir.name,
+}
 
+if mode == "Compare Mode" and run_b_dir:
+    query["run_b"] = run_b_dir.name
+st.query_params.update(query)
 # ====== LOAD DATA ======
 def safe_load_run(path, label='Run'):
     try:
