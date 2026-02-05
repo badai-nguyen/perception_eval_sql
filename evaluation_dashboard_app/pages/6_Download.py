@@ -11,6 +11,7 @@ import tempfile
 import traceback
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
 from pathlib import Path
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
@@ -1486,6 +1487,40 @@ with tab4:
         help="If checked, skip running eval_result per directory and generate only the summary/score CSVs from existing results."
     )
 
+    notify_when_done = st.checkbox(
+        "Notify when eval finishes (browser notification)",
+        value=get_config_value("eval_notify_when_done", True),
+        help="Show a browser notification when evaluation completes so you can switch to other tabs.",
+    )
+    set_config_value("eval_notify_when_done", notify_when_done)
+
+    def _emit_eval_finished_notification(message: str):
+        import html
+        import streamlit.components.v1 as components
+        try:
+            msg_safe = html.escape(message, quote=True)
+            html_fragment = f"""
+            <span id="eval-msg" data-msg="{msg_safe}"></span>
+            <script>
+            (function() {{
+              if (!("Notification" in window)) return;
+              var el = document.getElementById("eval-msg");
+              var text = el ? (el.getAttribute("data-msg") || "Eval finished.") : "Eval finished.";
+              function show() {{
+                if (Notification.permission === "granted")
+                  new Notification("Eval finished", {{ body: text }});
+                else if (Notification.permission !== "denied")
+                  Notification.requestPermission().then(function(p) {{ if (p === "granted") new Notification("Eval finished", {{ body: text }}); }});
+              }}
+              if (Notification.permission === "granted") show();
+              else if (Notification.permission !== "denied") Notification.requestPermission().then(function(p) {{ if (p === "granted") show(); }});
+            }})();
+            </script>
+            """
+            components.html(html_fragment, height=0)
+        except Exception:
+            pass
+
     if st.button(
         "Run eval_result for all directories" if not only_generate_summary else "Generate Summary and Score CSV only",
         type="primary",
@@ -1510,8 +1545,14 @@ with tab4:
                         f"Generated Summary.csv ({csv_info['summary_rows']} rows) and "
                         f"Score.csv ({csv_info['score_rows']} rows) in `{eval_root}`"
                     )
+                    if notify_when_done:
+                        _emit_eval_finished_notification(
+                            f"Summary.csv ({csv_info['summary_rows']} rows) and Score.csv ({csv_info['score_rows']} rows) in {eval_root}"
+                        )
                 except Exception as e:
                     st.error(f"Failed to generate CSV files: {e}")
+                    if notify_when_done:
+                        _emit_eval_finished_notification(f"Summary/Score CSV generation failed: {e}")
         else:
             with st.spinner("Searching for result directories..."):
                 target_dirs = find_eval_result_dirs(eval_root, recursive=eval_recursive)
@@ -1523,15 +1564,45 @@ with tab4:
 
             st.write(f"Found {len(target_dirs)} directories to process")
             progress = st.progress(0)
+            status_placeholder = st.empty()
             results = []
+            total = len(target_dirs)
+            start_time = time.time()
+
+            def _format_eta(sec: float) -> str:
+                if sec is None or sec < 0 or not float("inf") > sec:
+                    return "—"
+                m, s = divmod(int(round(sec)), 60)
+                h, m = divmod(m, 60)
+                if h > 0:
+                    return f"{h}h {m}m {s}s"
+                if m > 0:
+                    return f"{m}m {s}s"
+                return f"{s}s"
+
+            def _update_progress_status(done: int, total: int, progress_widget, status_placeholder):
+                progress_widget.progress(done / total)
+                elapsed = time.time() - start_time
+                if done > 0 and done < total and elapsed > 0:
+                    rate = done / elapsed
+                    remaining_sec = (total - done) / rate
+                    eta_finish = datetime.now() + timedelta(seconds=remaining_sec)
+                    status_placeholder.caption(
+                        f"**{done}/{total}** directories · Elapsed: {_format_eta(elapsed)} · "
+                        f"Est. remaining: {_format_eta(remaining_sec)} · Est. finish: **{eta_finish.strftime('%H:%M:%S')}**"
+                    )
+                elif done >= total:
+                    status_placeholder.caption(f"**{total}/{total}** done in {_format_eta(elapsed)}.")
+                else:
+                    status_placeholder.caption(f"**{done}/{total}** directories · Elapsed: {_format_eta(elapsed)}")
 
             # sequential evaluation
             if not eval_parallel:
                 for i, result_dir in enumerate(target_dirs):
-                    progress.progress((i + 1) / len(target_dirs))
+                    _update_progress_status(i, total, progress, status_placeholder)
                     results.append(run_eval_result_for_dir(result_dir, overwrite=eval_overwrite))
+                    _update_progress_status(i + 1, total, progress, status_placeholder)
             else:
-
                 max_workers = max(1, min(int(eval_workers), len(target_dirs)))
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     future_map = {
@@ -1541,7 +1612,7 @@ with tab4:
                     completed = 0
                     for future in as_completed(future_map):
                         completed += 1
-                        progress.progress(completed / len(target_dirs))
+                        _update_progress_status(completed, total, progress, status_placeholder)
                         try:
                             results.append(future.result())
                         except Exception as e:
@@ -1551,6 +1622,7 @@ with tab4:
                             )
 
             progress.progress(1.0)
+            _update_progress_status(total, total, progress, status_placeholder)
 
             success_count = sum(1 for r in results if r["status"] == "success")
             skipped_count = sum(1 for r in results if r["status"] == "skipped")
@@ -1573,5 +1645,14 @@ with tab4:
                         f"Generated Summary.csv ({csv_info['summary_rows']} rows) and "
                         f"Score.csv ({csv_info['score_rows']} rows) in `{eval_root}`"
                     )
+                    if notify_when_done:
+                        _emit_eval_finished_notification(
+                            f"Eval done. Success: {success_count}, Skipped: {skipped_count}, Failed: {failed_count}. "
+                            f"Summary.csv and Score.csv in {eval_root}"
+                        )
                 except Exception as e:
                     st.error(f"Failed to generate CSV files: {e}")
+                    if notify_when_done:
+                        _emit_eval_finished_notification(
+                            f"Eval run finished with CSV error. Success: {success_count}, Skipped: {skipped_count}, Failed: {failed_count}. {e}"
+                        )
