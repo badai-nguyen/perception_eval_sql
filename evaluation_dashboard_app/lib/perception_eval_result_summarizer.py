@@ -17,8 +17,12 @@ from lib.plot_geom_lib import (
 )
 
 # Attempt to source ROS 2 workspace for perception_eval if not already sourced
-install_setup = "/home/leigu/pilot-auto.x2.v4.3/install/setup.bash"
-if os.path.exists(install_setup):
+# In Docker: set PILOT_INSTALL_SETUP to the path of setup.bash (e.g. /mnt/pilot/install/setup.bash)
+install_setup = os.environ.get(
+    "PILOT_INSTALL_SETUP",
+    "/home/leigu/pilot-auto.x2.v4.3/install/setup.bash",
+)
+if install_setup and os.path.exists(install_setup):
     # Update environment variables if not already set
     import subprocess
     env_before = dict(os.environ)

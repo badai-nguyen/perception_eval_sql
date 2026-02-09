@@ -43,7 +43,6 @@ PRODUCT_LABEL_JA = {
 
 # ====== HELPER FUNCTIONS ======
 def build_summary_delta(df_a, df_b):
-    # Decide key columns
     if "perception_label" in df_a.columns and "perception_label" in df_b.columns:
         key_cols = ["id", "perception_label"]
     else:
@@ -115,11 +114,9 @@ def create_filter_widgets(all_runs_data):
 def apply_filters(run_data, filters):
     s = run_data["summary"]
     if filters["perception_labels"] and "perception_label" in s.columns:
-        # Filter only non-empty perception_label
         s = s[s["perception_label"].notna() & (s["perception_label"].astype(str).str.strip() != "")]
         s = s[s["perception_label"].isin(filters["perception_labels"])]
     if filters["product_labels"] and "product_label" in s.columns:
-        # Filter only non-empty product_label
         s = s[s["product_label"].notna() & (s["product_label"].astype(str).str.strip() != "")]
         s = s[s["product_label"].isin(filters["product_labels"])]
     return {**run_data, "summary": s}
@@ -135,14 +132,12 @@ def display_metric_with_stats_single(metric, s):
 def show_grouped_metrics_plot(df, group_col, label_map=None, mode="single", df_b=None):
     st.markdown(f"#### Metrics by {group_col.replace('_', ' ').title()}")
     metrics = ["TP", "xstd", "ystd", "xrms", "yrms"]
-    # If column is not present or dataframe empty or all values are NaN/empty
     if (group_col not in df.columns or df.empty or
         df[group_col].dropna().astype(str).str.strip().eq("").all() or
         (mode == "compare" and df_b is not None and (df_b.empty or df_b[group_col].dropna().astype(str).str.strip().eq("").all()))
     ):
         st.info("No data for group breakdown."); return
     df, col_map = df.copy(), (label_map if label_map else {})
-    # drop rows with NaN or empty
     df = df[df[group_col].notna() & (df[group_col].astype(str).str.strip() != "")]
     df["__label_jp"] = df[group_col].map(col_map) if col_map else df[group_col]
     show_mode = "compare" if (mode == "compare" and df_b is not None) else "single"
@@ -195,8 +190,24 @@ mode = st.sidebar.radio("Mode", mode_options, index=mode_index)
 st.session_state["mode"] = mode
 user_config.set("overview_mode", mode)
 st.title("Overview")
+
+# --- Handle RUN_ROOT existence and emptiness ---
+if not RUN_ROOT.exists() or not RUN_ROOT.is_dir():
+    st.warning(f"Data directory not found: '{RUN_ROOT}'.\n\nPlease create the `data/` directory and place your evaluation results inside it.")
+    run_dirs = []
+    run_names = []
+    run_a_dir = None
+    run_b_dir = None
+    st.stop()
+
+# List run directories (subdirectories in RUN_ROOT)
 run_dirs = sorted([p for p in RUN_ROOT.iterdir() if p.is_dir()])
 run_names = [p.name for p in run_dirs]
+
+if not run_dirs:
+    st.warning(f"No runs found in '{RUN_ROOT}'.\n\nPlease add at least one sub-directory with evaluation results inside the `data/` folder, e.g. `data/my_eval_run/`.")
+    st.stop()
+
 saved_run_a = user_config.get("overview_run_a", run_names[0] if run_names else "")
 # URL override (only if valid)
 if url_run_a in run_names:

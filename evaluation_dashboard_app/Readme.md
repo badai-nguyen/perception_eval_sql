@@ -4,7 +4,6 @@
 
 本ダッシュボード・評価ツールの動作には、以下の前提と Python パッケージが必要です。  
 
-
 ### Python パッケージ（基本機能）
 ```sh
 pip install \
@@ -145,7 +144,6 @@ evaluation_dashboard_app/
     *.parquet
 ```
 
-
 ## ページ説明
 ### `Overview.py`
 - 全体のエントリーポイント
@@ -183,45 +181,59 @@ evaluation_dashboard_app/
 - `Score.csv`: Criteria ごとの評価指標ブロック（`Scenario`, `Option`, `GT_OBJ`, 以降は criteria0..n）
 - `.parquet`: 検出統計/BB 表示に必要な `x`, `y`, `length`, `width`, `yaw`, `label`, `source`, `status` など
 
-## Docker
+# Docker 利用ガイド
 
-ビルド時には **GitHub 用の SSH 鍵を渡してください**（tier4/webauto-auth-py と tier4/v_and_v_util を clone するため）。  
-ホストの `~/.ssh/id_rsa` をビルド用にマウントするだけです（ssh-agent 不要）。
+イメージは **ROS ベース**なので、ホストと同じ ROS 環境になります。
+
+### ビルド手順
+
+プライベートリポジトリ（tier4/webauto-auth-py, tier4/v_and_v_util）のため、**GitHub SSH鍵**をビルド時に渡す必要があります。  
+`~/.ssh/id_rsa` を指定してください（ssh-agent 不要）。
 
 ```sh
 cd evaluation_dashboard_app
-docker build --secret id=ssh,src=$HOME/.ssh/id_rsa -t evaluation-dashboard .
+
+# [推奨] 毎回最新依存にしたい場合は --no-cache を指定します。
+# ROSが Humbleの場合（省略可）
+docker build --no-cache --secret id=ssh,src=$HOME/.ssh/id_rsa -t evaluation-dashboard .
+
+# ROS ディストロを Iron/Jazzy 等に切り替えたい場合
+docker build --build-arg ROS_DISTRO=iron --secret id=ssh,src=$HOME/.ssh/id_rsa -t evaluation-dashboard .
 ```
 
-起動例（**データは必ずマウントしてください**）:
+### 起動とデータマウント
+
+データを永続化・可視化するため、`data/` ディレクトリを必ずマウントしてください。
 
 ```sh
 docker run -p 8501:8501 \
   -v "$(pwd)/data:/app/data" \
+  -v ~/.webauto:/root/.webauto \
   evaluation-dashboard
 ```
 
-ブラウザで http://localhost:8501 を開きます。
+→ [http://localhost:8501](http://localhost:8501) をブラウザで開くとダッシュボードが利用できます。
 
-### マウントと環境変数
+#### 推奨マウント
 
-| 用途 | マウント / 環境変数 | 必須 |
-|------|---------------------|------|
-| 評価結果（Run）の読み書き | `-v /host/data:/app/data` | **推奨**（なければコンテナ内の空の `data/` のみ） |
-| 設定の永続化 | `-v "$(pwd)/configs:/app/configs"` | 任意 |
-| Summary/Score CSV 生成（perception_eval） | pilot-auto をマウントし、`-e PILOT_INSTALL_SETUP=/mnt/pilot/install/setup.bash` を指定 | その機能を使う場合 |
+| 用途                   | オプション                                      | 必須/推奨 |
+|------------------------|-------------------------------------------------|-----------|
+| 評価結果の読み書き      | `-v /host/data:/app/data`                       | **推奨**  |
+| 設定ファイル永続化      | `-v $(pwd)/configs:/app/configs`                | 任意      |
 
-Summary/Score 生成までコンテナ内で行う場合は、pilot-auto をマウントしてから起動します:
+### デバッグ・シェルアクセス
 
+実行中のコンテナにシェルで入りたい場合は、以下いずれかの方法を利用できます。
+
+**1. コンテナIDで bash に入る：**
 ```sh
-docker run -p 8501:8501 \
-  -v "$(pwd)/data:/app/data" \
-  -v /path/to/pilot-auto:/mnt/pilot \
-  -e PILOT_INSTALL_SETUP=/mnt/pilot/install/setup.bash \
-  evaluation-dashboard
+docker ps         # [CONTAINER ID]を確認
+docker exec -it [CONTAINER ID] /bin/bash
 ```
 
-※ ビルドに `--secret id=ssh,src=$HOME/.ssh/id_rsa` が必要です。鍵が別のパスならそのパスを指定してください。
-
-## 補足
-- 最初に `Overview` を開いて Run を読み込む必要があります（各ページは `st.session_state` 前提）。
+**2. 起動時、直接 bash で入る：**
+```sh
+docker run -it --entrypoint bash \
+  -v "$(pwd)/data:/app/data" \
+  evaluation-dashboard
+```
