@@ -16,25 +16,6 @@ from lib.plot_geom_lib import (
     plot_rectangles_with_common_area,
 )
 
-# Attempt to source ROS 2 workspace for perception_eval if not already sourced
-# In Docker: set PILOT_INSTALL_SETUP to the path of setup.bash (e.g. /mnt/pilot/install/setup.bash)
-install_setup = os.environ.get(
-    "PILOT_INSTALL_SETUP",
-    "/home/leigu/pilot-auto.x2.v4.3/install/setup.bash",
-)
-if install_setup and os.path.exists(install_setup):
-    # Update environment variables if not already set
-    import subprocess
-    env_before = dict(os.environ)
-    # Run the setup.bash and capture new environment
-    command = ['bash', '-c', f'source {install_setup} && env']
-    proc = subprocess.Popen(command, stdout=subprocess.PIPE)
-    for line in proc.stdout:
-        (key, _, value) = line.decode().partition("=")
-        if key and value:
-            value = value.rstrip('\n')
-            if key not in env_before or env_before[key] != value:
-                os.environ[key] = value
 try:
     from perception_eval.tool import PerceptionAnalyzer3D
 except Exception as exc:
