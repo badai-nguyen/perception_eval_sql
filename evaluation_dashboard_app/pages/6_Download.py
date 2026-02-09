@@ -20,10 +20,6 @@ from lib.WebAPI import scenarioAPI
 from lib.user_config import UserConfig
 from lib.perception_eval_result_summarizer import run_eval_result, generate_score_json
 
-# Constants
-SCENARIO_API_BASE = "https://scenario.ci.web.auto/v1"
-EVALUATION_API_BASE = "https://evaluation.ci.web.auto/v3"
-
 # Initialize or load user config
 _user_config = UserConfig(warning_fn=st.warning)
 

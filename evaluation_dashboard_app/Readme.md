@@ -183,5 +183,45 @@ evaluation_dashboard_app/
 - `Score.csv`: Criteria ごとの評価指標ブロック（`Scenario`, `Option`, `GT_OBJ`, 以降は criteria0..n）
 - `.parquet`: 検出統計/BB 表示に必要な `x`, `y`, `length`, `width`, `yaw`, `label`, `source`, `status` など
 
+## Docker
+
+ビルド時には **GitHub 用の SSH 鍵を渡してください**（tier4/webauto-auth-py と tier4/v_and_v_util を clone するため）。  
+ホストの `~/.ssh/id_rsa` をビルド用にマウントするだけです（ssh-agent 不要）。
+
+```sh
+cd evaluation_dashboard_app
+docker build --secret id=ssh,src=$HOME/.ssh/id_rsa -t evaluation-dashboard .
+```
+
+起動例（**データは必ずマウントしてください**）:
+
+```sh
+docker run -p 8501:8501 \
+  -v "$(pwd)/data:/app/data" \
+  evaluation-dashboard
+```
+
+ブラウザで http://localhost:8501 を開きます。
+
+### マウントと環境変数
+
+| 用途 | マウント / 環境変数 | 必須 |
+|------|---------------------|------|
+| 評価結果（Run）の読み書き | `-v /host/data:/app/data` | **推奨**（なければコンテナ内の空の `data/` のみ） |
+| 設定の永続化 | `-v "$(pwd)/configs:/app/configs"` | 任意 |
+| Summary/Score CSV 生成（perception_eval） | pilot-auto をマウントし、`-e PILOT_INSTALL_SETUP=/mnt/pilot/install/setup.bash` を指定 | その機能を使う場合 |
+
+Summary/Score 生成までコンテナ内で行う場合は、pilot-auto をマウントしてから起動します:
+
+```sh
+docker run -p 8501:8501 \
+  -v "$(pwd)/data:/app/data" \
+  -v /path/to/pilot-auto:/mnt/pilot \
+  -e PILOT_INSTALL_SETUP=/mnt/pilot/install/setup.bash \
+  evaluation-dashboard
+```
+
+※ ビルドに `--secret id=ssh,src=$HOME/.ssh/id_rsa` が必要です。鍵が別のパスならそのパスを指定してください。
+
 ## 補足
 - 最初に `Overview` を開いて Run を読み込む必要があります（各ページは `st.session_state` 前提）。
