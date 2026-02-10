@@ -134,6 +134,7 @@ evaluation_dashboard_app/
     4_Bounding_Box_Viewer.py
     5_Tools.py
     6_Download.py
+    7_Data_Management.py
   lib/
   configs/
     autoware_evaluator_dl_config.json
@@ -175,6 +176,9 @@ evaluation_dashboard_app/
 ### `pages/6_Download.py`
 - Evaluator の結果ダウンロードと評価実行
 - `result.txt` / `score.json` から `Summary.csv` / `Score.csv` を生成
+
+### `pages/7_Data_Management.py`
+- サーバー複数ユーザー運用向け: Run 一覧・サイズ表示、不要 Run の削除、共有リンクのコピー
 
 ## データ形式（概略）
 - `Summary.csv`: `id`, `TP`, `xstd`, `xrms`, `ystd`, `yrms`, `vx`, `vy`, `perception_label`, `product_label`
@@ -220,6 +224,16 @@ docker run -p 8501:8501 \
 |------------------------|-------------------------------------------------|-----------|
 | 評価結果の読み書き      | `-v /host/data:/app/data`                       | **推奨**  |
 | 設定ファイル永続化      | `-v $(pwd)/configs:/app/configs`                | 任意      |
+
+### 複数ユーザーでサーバー運用する場合（Multi-User Deployment）
+
+複数人が同じサーバーにアクセスしてダウンロード・評価・結果確認・共有・データ管理を行う場合は、以下を参照してください。
+
+- **データルート**: 環境変数 `EVAL_DASHBOARD_DATA_ROOT` で評価データのルートを指定できます（省略時は `data`）。例: `-e EVAL_DASHBOARD_DATA_ROOT=/var/eval_dashboard/data`
+- **パス制限**: ダウンロードの Output Path と Eval の Root directory は、このデータルート配下に制限され、パストラバーサルは拒否されます。
+- **Data Management ページ**: Run 一覧・サイズ表示・削除・共有リンクのコピーができます。不要な Run を削除して容量を管理できます。
+- **結果の共有**: Overview の URL に `?mode=...&run_a=...&run_b=...` を付けると、同じ Run 表示を共有できます。Data Management や Overview の「Share this view」でリンクをコピーできます。
+- 詳細は [docs/MULTI_USER_DEPLOYMENT.md](docs/MULTI_USER_DEPLOYMENT.md) を参照してください。
 
 ### デバッグ・シェルアクセス
 

@@ -18,6 +18,7 @@ from urllib3.util import Retry
 from typing import Text, Optional, List, Dict, Any
 from lib.WebAPI import scenarioAPI
 from lib.user_config import UserConfig
+from lib.path_utils import get_data_root, resolve_under_data_root
 from lib.perception_eval_result_summarizer import run_eval_result, generate_score_json
 
 # Initialize or load user config
@@ -1020,10 +1021,11 @@ with st.sidebar:
     suite_id = st.session_state.suite_id
     set_config_value("suite_id", suite_id)
 
+    _default_output = str(get_data_root() / "download")
     output_path = st.text_input(
         "Output Path",
-        value=get_config_value("output_path", "./data/download"),
-        help="Path where files will be saved"
+        value=get_config_value("output_path", _default_output),
+        help="Path where files will be saved (must be under the server data root)"
     )
     set_config_value("output_path", output_path)
 
@@ -1206,7 +1208,12 @@ with tab1:
         if not all([project_id, st.session_state.job_id]):
             st.error("Please fill in all required fields: Project ID and Job ID")
             st.stop()
-        
+        resolved_output, path_err = resolve_under_data_root(output_path, allow_create=True)
+        if path_err:
+            st.error(f"Output path is invalid: {path_err}. Use a path under the server data root.")
+            st.stop()
+        output_path = str(resolved_output)
+        set_config_value("output_path", output_path)
         # Create output directory
         os.makedirs(output_path, exist_ok=True)
         
@@ -1436,7 +1443,7 @@ with tab4:
     eval_root = st.text_input(
         "Root directory to evaluate",
         value=get_config_value("eval_root", output_path),
-        help="Directory containing downloaded scenario results",
+        help="Directory containing downloaded scenario results (must be under the server data root)",
     )
     set_config_value("eval_root", eval_root)
 
@@ -1523,6 +1530,12 @@ with tab4:
         key="run_eval_result"
     ):
         import pandas as pd
+        resolved_eval_root, eval_path_err = resolve_under_data_root(eval_root, allow_missing=True)
+        if eval_path_err:
+            st.error(f"Eval root path is invalid: {eval_path_err}. Use a path under the server data root.")
+            st.stop()
+        eval_root = str(resolved_eval_root)
+        set_config_value("eval_root", eval_root)
         # Check if PerceptionAnalyzer3D (from perception_eval) is available before proceeding
         # from lib.perception_eval_result_summarizer import PerceptionAnalyzer3D, _perception_eval_import_error
         # if PerceptionAnalyzer3D is None:

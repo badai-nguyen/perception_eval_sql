@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from pathlib import Path
 from lib.run_loader import load_run
+from lib.path_utils import get_data_root, get_data_root_display, list_run_directories, path_display
 import plotly.express as px
 import plotly.graph_objects as go
 from lib.user_config import UserConfig
@@ -15,7 +16,7 @@ url_run_b = params.get("run_b")  # str / None
 
 # ====== CONFIG AND CONSTANTS ======
 st.set_page_config(page_title="Overview", layout="wide", initial_sidebar_state="expanded")
-RUN_ROOT = Path("data")
+RUN_ROOT = get_data_root()
 PRODUCT_LABEL_JA = {
     "Occlusion-Case": "遮蔽ケース",
     "False-Positive-Grass": "草誤検知（草停止）",
@@ -193,7 +194,7 @@ st.title("Overview")
 
 # --- Handle RUN_ROOT existence and emptiness ---
 if not RUN_ROOT.exists() or not RUN_ROOT.is_dir():
-    st.warning(f"Data directory not found: '{RUN_ROOT}'.\n\nPlease create the `data/` directory and place your evaluation results inside it.")
+    st.warning(f"Data directory not found: '{get_data_root_display()}'.\n\nPlease create the data directory and place your evaluation results inside it.")
     run_dirs = []
     run_names = []
     run_a_dir = None
@@ -201,11 +202,11 @@ if not RUN_ROOT.exists() or not RUN_ROOT.is_dir():
     st.stop()
 
 # List run directories (subdirectories in RUN_ROOT)
-run_dirs = sorted([p for p in RUN_ROOT.iterdir() if p.is_dir()])
+run_dirs = list_run_directories()
 run_names = [p.name for p in run_dirs]
 
 if not run_dirs:
-    st.warning(f"No runs found in '{RUN_ROOT}'.\n\nPlease add at least one sub-directory with evaluation results inside the `data/` folder, e.g. `data/my_eval_run/`.")
+    st.warning(f"No runs found in '{get_data_root_display()}'.\n\nPlease add at least one sub-directory with evaluation results, e.g. `{get_data_root_display()}/my_eval_run/`.")
     st.stop()
 
 saved_run_a = user_config.get("overview_run_a", run_names[0] if run_names else "")
@@ -258,9 +259,14 @@ else:
 
 # ====== MAIN PAGE METRICS & CHARTS ======
 st.subheader("Loaded Runs")
-st.markdown(f"**Baseline (A):** `{runA['path']}`")
+st.markdown(f"**Baseline (A):** `{path_display(runA['path'])}`")
 if mode == "Compare Mode":
-    st.markdown(f"**Candidate (B):** `{runB['path']}`")
+    st.markdown(f"**Candidate (B):** `{path_display(runB['path'])}`")
+# Shareable link (for multi-user: share this view with others)
+share_q = f"mode={'compare' if mode == 'Compare Mode' else 'single'}&run_a={run_a_dir.name}"
+if mode == "Compare Mode" and run_b_dir:
+    share_q += f"&run_b={run_b_dir.name}"
+st.caption(f"Share this view: append `?{share_q}` to your server URL (e.g. from Data Management page).")
 
 st.subheader("Summary")
 def show_tp_mean_by_label(df, label_col, label_jp_map=None, run_name=None):
