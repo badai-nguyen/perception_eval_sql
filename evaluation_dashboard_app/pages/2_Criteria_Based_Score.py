@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+from lib.path_utils import path_display
 
 st.set_page_config(layout="wide")
 st.title("Criteria-based Evaluation Viewer")
@@ -21,9 +22,9 @@ runB = st.session_state.get("runB")
 df_raw_B = runB["score"] if runB else None
 
 st.subheader("Loaded Runs")
-st.markdown(f"**Baseline (A):** `{runA['path']}`")
+st.markdown(f"**Baseline (A):** `{path_display(runA['path'])}`")
 if mode == "Compare Mode":
-    st.markdown(f"**Candidate (B):** `{runB['path']}`")
+    st.markdown(f"**Candidate (B):** `{path_display(runB['path'])}`")
     if df_raw_B is None:
         st.warning("Compare Mode requires a Candidate (B) run from the Overview page.")
         st.stop()

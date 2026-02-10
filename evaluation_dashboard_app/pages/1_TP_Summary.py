@@ -1,6 +1,7 @@
 import streamlit as st
 import plotly.express as px
 import pandas as pd
+from lib.path_utils import path_display
 
 st.set_page_config(layout="wide")
 st.title("TP / Position / Velocity Statistics Viewer")
@@ -21,9 +22,9 @@ if mode == "Compare Mode":
     df_cmp = st.session_state.get("df_cmp")
 
 st.subheader("Loaded Runs")
-st.markdown(f"**Baseline (A):** `{runA['path']}`")
+st.markdown(f"**Baseline (A):** `{path_display(runA['path'])}`")
 if mode == "Compare Mode":
-    st.markdown(f"**Candidate (B):** `{runB['path']}`")
+    st.markdown(f"**Candidate (B):** `{path_display(runB['path'])}`")
 # Fail early if compare data is incomplete
 if mode == "Compare Mode" and (df_b is None or df_cmp is None):
     st.warning("Compare mode requires both Run B and delta data. Reload from Overview.")
