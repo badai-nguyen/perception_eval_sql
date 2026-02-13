@@ -21,6 +21,12 @@ from lib.user_config import UserConfig
 from lib.path_utils import get_data_root, resolve_under_data_root
 from lib.perception_eval_result_summarizer import run_eval_result, generate_score_json
 
+try:
+    from lib.perception_catalog_io import pkl_archive_to_parquet
+    CATALOG_IO_AVAILABLE = True
+except ImportError:
+    CATALOG_IO_AVAILABLE = False
+
 # Initialize or load user config
 _user_config = UserConfig(warning_fn=st.warning)
 
@@ -1084,7 +1090,7 @@ with st.sidebar:
         index=["Archives (ZIP)", "Result JSON only"].index(get_config_value("download_type", "Archives (ZIP)"))
     )
     set_config_value("download_type", download_type)
-    
+
     if download_type == "Archives (ZIP)":
         phase = st.text_input(
             "Phase to extract",
@@ -1230,35 +1236,30 @@ with tab1:
             set_config_value("skip_large_file", skip_large_file)
             set_config_value("large_file_mb", large_file_mb)
             set_config_value("keep_zip_files", keep_zip_files)
-        
+
         try:
-            # Initialize JobResult
             job_result = JobResult(
                 environment=environment,
                 project_id=project_id,
                 job_id=st.session_state.job_id,
                 suite_id=suite_id,
                 suite_ids=selected_suite_ids,
-                output_path=output_path
+                output_path=output_path,
             )
-            
             download_successful = False
             if download_type == "Archives (ZIP)":
                 with st.expander("Downloading Archives", expanded=True):
                     remain_list = job_result.download_archive_and_unzip(
-                        phase, 
-                        skip_large_file=skip_large_file, 
+                        phase,
+                        skip_large_file=skip_large_file,
                         large_file_mb=large_file_mb,
-                        # Pass keep_zip_files to underlying logic if supported (add this arg in implementation)
                         keep_zip_files=keep_zip_files,
                     )
                     st.success(f"✅ Downloaded and extracted {len(remain_list)} archives")
                     download_successful = len(remain_list) > 0
-                    # Show summary
                     st.subheader("📊 Summary")
                     st.write(f"- Total scenarios processed: {len(remain_list)}")
                     st.write(f"- Output directory: `{output_path}`")
-                    
             else:  # Result JSON only
                 with st.expander("Downloading Result JSON", expanded=True):
                     log_dicts = job_result.download_result_json()
@@ -1496,6 +1497,52 @@ with tab4:
         help="Show a browser notification when evaluation completes so you can switch to other tabs.",
     )
     set_config_value("eval_notify_when_done", notify_when_done)
+
+    # Parquet generation from existing pkl (same files as downloaded)
+    if CATALOG_IO_AVAILABLE:
+        with st.expander("Generate parquet from pkl", expanded=False):
+            st.caption("Build scene_result.parquet from existing .pkl (or .pkl.z) files in a directory (e.g. under your download output, searched recursively).")
+            parquet_parent = st.text_input(
+                "Directory containing pkl files",
+                value=get_config_value("parquet_parent", eval_root),
+                key="parquet_parent",
+                help="Path to the folder that contains .pkl (or .pkl.z) scene result files. Subfolders will be searched recursively.",
+            )
+            if st.button("Generate parquet from pkl", key="generate_parquet_btn"):
+                resolved, err = resolve_under_data_root(parquet_parent, allow_missing=True)
+                if err:
+                    st.error(f"Path is invalid: {err}. Use a path under the server data root.")
+                else:
+                    pkl_dir = Path(resolved)
+                    if not pkl_dir.is_dir():
+                        st.warning(f"Not a directory: `{pkl_dir}`.")
+                    else:
+                        # Search for pkl and pkl.z files recursively
+                        all_pkl_files = list(pkl_dir.rglob("*.pkl")) + list(pkl_dir.rglob("*.pkl.z"))
+                        pkl_count = len(all_pkl_files)
+                        if pkl_count == 0:
+                            st.warning(f"No .pkl or .pkl.z files in `{pkl_dir}` or its subdirectories.")
+                        else:
+                            try:
+                                skip_log = []
+                                def on_skip(path: str, reason: str):
+                                    skip_log.append((path, reason))
+                                with st.spinner("Building parquet from pkl (recursively)..."):
+                                    parquet_path = pkl_archive_to_parquet(
+                                        pkl_dir,
+                                        on_skip=on_skip,
+                                    )
+                                st.success(f"Saved: `{parquet_path}`")
+                                set_config_value("parquet_parent", parquet_parent)
+                                if skip_log:
+                                    with st.expander("Skipped pkl files"):
+                                        for path, reason in skip_log:
+                                            st.text(f"{os.path.basename(path)}: {reason}")
+                            except Exception as e:
+                                st.error(f"Parquet generation failed: {e}")
+                                st.exception(e)
+    else:
+        st.caption("Parquet from pkl: install perception_catalog_analyzer to enable.")
 
     def _emit_eval_finished_notification(message: str):
         import html

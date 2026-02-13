@@ -216,14 +216,18 @@ docker run -p 8501:8501 \
   evaluation-dashboard
 ```
 
-→ [http://localhost:8501](http://localhost:8501) をブラウザで開くとダッシュボードが利用できます。
+### バックグラウンドでの起動例（-d オプション）
 
-#### 推奨マウント
+コンテナをバックグラウンド（デタッチド）で起動したい場合は、`-d` オプションを追加し、`--name` でコンテナ名も指定できます。  
+コードやノートブックも含めて `/app` 配下をホストと同期する場合は以下のようにします。
 
-| 用途                   | オプション                                      | 必須/推奨 |
-|------------------------|-------------------------------------------------|-----------|
-| 評価結果の読み書き      | `-v /host/data:/app/data`                       | **推奨**  |
-| 設定ファイル永続化      | `-v $(pwd)/configs:/app/configs`                | 任意      |
+```sh
+docker run -d --name evaluation-dashboard \
+  -p 8501:8501 \
+  -v "$(pwd):/app" \
+  -v ~/.webauto:/root/.webauto \
+  evaluation-dashboard
+```
 
 ### 複数ユーザーでサーバー運用する場合（Multi-User Deployment）
 

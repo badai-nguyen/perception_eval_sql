@@ -315,52 +315,101 @@ filters_comp = {
 # Main Content
 # =============================
 
-if st.checkbox("Debug: Inspect Parquet"):
-    schema_df = con.execute("""
-        DESCRIBE SELECT * FROM read_parquet(?)
-    """, [target_file]).df()
+if st.checkbox("Debug: Inspect Parquet (Both Files)"):
+    col_left, col_right = st.columns(2)
+    file_labels = [
+        ("Target File", target_file),
+        ("Compared File", compared_target_file)
+    ]
+    schema_results = []
+    for col, (label, file_path) in zip([col_left, col_right], file_labels):
+        with col:
+            st.markdown(f"### {label}")
+            # Schema
+            schema_df = con.execute("""
+                DESCRIBE SELECT * FROM read_parquet(?)
+            """, [file_path]).df()
+            schema_results.append((label, schema_df))
+            st.write("**Schema (Column Names, Types)**")
+            st.markdown("Shows the schema (column names and their DuckDB/Parquet data types) of the selected Parquet file. Useful to check data structure and types as interpreted by DuckDB.")
+            st.dataframe(schema_df)
 
-    stats_df = con.execute("""
-        SELECT
-            COUNT(*) AS total_rows,
-            COUNT(t4dataset_id) AS non_null_ids,
-            COUNT(DISTINCT t4dataset_id) AS distinct_ids
-        FROM read_parquet(?)
-    """, [target_file]).df()
-    views_df = con.execute("""
-        SELECT table_name
-        FROM information_schema.tables
-        WHERE table_schema = 'main'
-    """).df()
+            # Preview rows
+            row_options = [10, 20, 50, 100, 200, "All"]
+            preview_key = f"preview_row_limit_{label.replace(' ', '_').lower()}"
+            row_choice = st.selectbox(f"Preview rows to show ({label})", row_options, index=1, key=preview_key)
+            if row_choice == "All":
+                limit_clause = ""
+            else:
+                limit_clause = f"LIMIT {row_choice}"
+            preview_df = con.execute(f"""
+                SELECT *
+                FROM read_parquet(?)
+                {limit_clause}
+            """, [file_path]).df()
+            st.write(f"**Preview (First {row_choice} rows)**")
+            st.markdown(f"Shows the first {row_choice} preview rows from the Parquet file. Use this preview to examine example data contents and check that your file is as expected.")
+            st.dataframe(preview_df)
 
+            # Stats
+            stats_df = con.execute("""
+                SELECT
+                    COUNT(*) AS total_rows,
+                    COUNT(t4dataset_id) AS non_null_ids,
+                    COUNT(DISTINCT t4dataset_id) AS distinct_ids
+                FROM read_parquet(?)
+            """, [file_path]).df()
+            st.write("**Stats (Row Count, t4dataset_id non-null count, Distinct t4dataset_id count)**")
+            st.markdown("""
+            - `total_rows`: Total rows in the file  
+            - `non_null_ids`: Rows where t4dataset_id is not null  
+            - `distinct_ids`: Unique t4dataset_id values
 
-    st.write("**Schema (Column Names, Types)**")
-    st.markdown("Shows the schema (column names and their DuckDB/Parquet datatypes) of the selected Parquet file. Useful to check data structure and types as interpreted by DuckDB.")
-    st.dataframe(schema_df)
-    row_options = [10, 20, 50, 100, 200, "All"]
-    row_choice = st.selectbox("Preview rows to show", row_options, index=1, key="preview_row_limit")
-    if row_choice == "All":
-        limit_clause = ""
-    else:
-        limit_clause = f"LIMIT {row_choice}"
-    preview_df = con.execute(f"""
-        SELECT *
-        FROM read_parquet(?)
-        {limit_clause}
-    """, [target_file]).df()
-    st.write("**Preview (First preview rows)**")
-    st.markdown(f"Shows the first {row_choice} preview rows from the Parquet file. Use this preview to examine example data contents and check that your file is as expected.")
-    st.dataframe(preview_df)
+            This helps rapidly assess the completeness and distribution of the key ID field.
+            """)
+            st.dataframe(stats_df)
 
-    st.write("**Stats (Row Count, t4dataset_id non-null count, Distinct t4dataset_id count)**")
-    st.markdown("""
-    - `total_rows`: Total rows in the file  
-    - `non_null_ids`: Rows where t4dataset_id is not null  
-    - `distinct_ids`: Unique t4dataset_id values
+    # --- Show info about schema differences ---
+    if len(schema_results) == 2:
+        label1, df1 = schema_results[0]
+        label2, df2 = schema_results[1]
+        cols1 = set(zip(df1["column_name"], df1["column_type"]))
+        cols2 = set(zip(df2["column_name"], df2["column_type"]))
+        names1 = set(df1["column_name"])
+        names2 = set(df2["column_name"])
 
-    This helps rapidly assess the completeness and distribution of the key ID field.
-    """)
-    st.dataframe(stats_df)
+        added = names2 - names1
+        removed = names1 - names2
+        common = names1 & names2
+
+        # Changed types
+        types1 = {row["column_name"]: row["column_type"] for _, row in df1.iterrows()}
+        types2 = {row["column_name"]: row["column_type"] for _, row in df2.iterrows()}
+        dtype_changes = []
+        for cname in sorted(common):
+            t1 = types1.get(cname)
+            t2 = types2.get(cname)
+            if t1 != t2:
+                dtype_changes.append((cname, t1, t2))
+
+        with st.expander("⚖️ Difference between schemas", expanded=True):
+            if not (added or removed or dtype_changes):
+                st.success("✅ The schemas are identical (column names and types match exactly).")
+            else:
+                st.markdown("#### Schema differences (between the two files):")
+
+                if added:
+                    st.error(f"Columns only in `{label2}`: {', '.join(sorted(added))}")
+                if removed:
+                    st.error(f"Columns only in `{label1}`: {', '.join(sorted(removed))}")
+                if dtype_changes:
+                    st.warning("Columns with different types:")
+                    dtype_df = pd.DataFrame(dtype_changes, columns=["Column", f"Type in {label1}", f"Type in {label2}"])
+                    st.dataframe(dtype_df, hide_index=True)
+            if added or removed or dtype_changes:
+                # Show details for debugging purposes
+                st.caption("Check above differences to adapt code or troubleshoot data loading issues.")
+
 
 
 # =============================
@@ -720,8 +769,9 @@ try:
     ),
     joined AS (
         SELECT
-            COALESCE(b.t4dataset_id, c.t4dataset_id) AS t4dataset_id,
-            COALESCE(b.frame_index, c.frame_index) AS frame_index,
+            -- Explicit casts to avoid binder errors in COALESCE
+            COALESCE(CAST(b.t4dataset_id AS VARCHAR), CAST(c.t4dataset_id AS VARCHAR)) AS t4dataset_id,
+            COALESCE(CAST(b.frame_index AS VARCHAR), CAST(c.frame_index AS VARCHAR)) AS frame_index,
             COALESCE(b.gt_uuid, c.gt_uuid) AS gt_uuid,
             COALESCE(b.tp_base, FALSE) AS tp_base,
             COALESCE(c.tp_comp, FALSE) AS tp_comp
@@ -776,16 +826,23 @@ else:
             query = f"""
             SELECT
                 label,
-                AVG(ABS(x_error)) FILTER (WHERE status = 'TP') AS mean_abs_x_error,
-                AVG(ABS(y_error)) FILTER (WHERE status = 'TP') AS mean_abs_y_error,
-                AVG(ABS(yaw_error)) FILTER (WHERE status = 'TP') AS mean_abs_yaw_error
+                AVG(ABS(CAST(x_error AS DOUBLE))) FILTER (
+                    WHERE status = 'TP' AND x_error IS NOT NULL
+                ) AS mean_abs_x_error,
+                AVG(ABS(CAST(y_error AS DOUBLE))) FILTER (
+                    WHERE status = 'TP' AND y_error IS NOT NULL
+                ) AS mean_abs_y_error,
+                AVG(ABS(CAST(yaw_error AS DOUBLE))) FILTER (
+                    WHERE status = 'TP' AND yaw_error IS NOT NULL
+                ) AS mean_abs_yaw_error
             FROM view_eval_flat
             WHERE {filter_clause_base}
             GROUP BY label
             ORDER BY label
             """
+
             df_error_base = con.execute(query).df()
-        
+            print(df_error_base)
             if not df_error_base.empty:
                 fig = go.Figure()
                 fig.add_trace(go.Bar(
@@ -824,9 +881,9 @@ else:
             query = f"""
             SELECT
                 label,
-                AVG(ABS(x_error)) FILTER (WHERE status = 'TP') AS mean_abs_x_error,
-                AVG(ABS(y_error)) FILTER (WHERE status = 'TP') AS mean_abs_y_error,
-                AVG(ABS(yaw_error)) FILTER (WHERE status = 'TP') AS mean_abs_yaw_error
+                AVG(ABS(CAST(x_error AS DOUBLE))) FILTER (WHERE status = 'TP') AS mean_abs_x_error,
+                AVG(ABS(CAST(y_error AS DOUBLE))) FILTER (WHERE status = 'TP') AS mean_abs_y_error,
+                AVG(ABS(CAST(yaw_error AS DOUBLE))) FILTER (WHERE status = 'TP') AS mean_abs_yaw_error
             FROM view_eval_flat_comp
             WHERE {filter_clause_comp}
             GROUP BY label
