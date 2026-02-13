@@ -1498,52 +1498,6 @@ with tab4:
     )
     set_config_value("eval_notify_when_done", notify_when_done)
 
-    # Parquet generation from existing pkl (same files as downloaded)
-    if CATALOG_IO_AVAILABLE:
-        with st.expander("Generate parquet from pkl", expanded=False):
-            st.caption("Build scene_result.parquet from existing .pkl (or .pkl.z) files in a directory (e.g. under your download output, searched recursively).")
-            parquet_parent = st.text_input(
-                "Directory containing pkl files",
-                value=get_config_value("parquet_parent", eval_root),
-                key="parquet_parent",
-                help="Path to the folder that contains .pkl (or .pkl.z) scene result files. Subfolders will be searched recursively.",
-            )
-            if st.button("Generate parquet from pkl", key="generate_parquet_btn"):
-                resolved, err = resolve_under_data_root(parquet_parent, allow_missing=True)
-                if err:
-                    st.error(f"Path is invalid: {err}. Use a path under the server data root.")
-                else:
-                    pkl_dir = Path(resolved)
-                    if not pkl_dir.is_dir():
-                        st.warning(f"Not a directory: `{pkl_dir}`.")
-                    else:
-                        # Search for pkl and pkl.z files recursively
-                        all_pkl_files = list(pkl_dir.rglob("*.pkl")) + list(pkl_dir.rglob("*.pkl.z"))
-                        pkl_count = len(all_pkl_files)
-                        if pkl_count == 0:
-                            st.warning(f"No .pkl or .pkl.z files in `{pkl_dir}` or its subdirectories.")
-                        else:
-                            try:
-                                skip_log = []
-                                def on_skip(path: str, reason: str):
-                                    skip_log.append((path, reason))
-                                with st.spinner("Building parquet from pkl (recursively)..."):
-                                    parquet_path = pkl_archive_to_parquet(
-                                        pkl_dir,
-                                        on_skip=on_skip,
-                                    )
-                                st.success(f"Saved: `{parquet_path}`")
-                                set_config_value("parquet_parent", parquet_parent)
-                                if skip_log:
-                                    with st.expander("Skipped pkl files"):
-                                        for path, reason in skip_log:
-                                            st.text(f"{os.path.basename(path)}: {reason}")
-                            except Exception as e:
-                                st.error(f"Parquet generation failed: {e}")
-                                st.exception(e)
-    else:
-        st.caption("Parquet from pkl: install perception_catalog_analyzer to enable.")
-
     def _emit_eval_finished_notification(message: str):
         import html
         import streamlit.components.v1 as components
@@ -1571,11 +1525,54 @@ with tab4:
         except Exception:
             pass
 
-    if st.button(
-        "Run eval_result for all directories" if not only_generate_summary else "Generate Summary and Score CSV only",
-        type="primary",
-        key="run_eval_result"
-    ):
+    btn_col1, btn_col2 = st.columns(2)
+    with btn_col1:
+        run_eval_clicked = st.button(
+            "Run eval_result for all directories" if not only_generate_summary else "Generate Summary and Score CSV only",
+            type="primary",
+            key="run_eval_result"
+        )
+    with btn_col2:
+        generate_parquet_clicked = st.button(
+            "Generate parquet from pkl",
+            key="generate_parquet_btn",
+            disabled=not CATALOG_IO_AVAILABLE,
+            help="Build scene_result.parquet from .pkl files in the evaluate path above (same as Run eval)." if CATALOG_IO_AVAILABLE else "Install perception_catalog_analyzer to enable.",
+        )
+
+    if generate_parquet_clicked and CATALOG_IO_AVAILABLE:
+        resolved, err = resolve_under_data_root(eval_root, allow_missing=True)
+        if err:
+            st.error(f"Path is invalid: {err}. Use a path under the server data root.")
+        else:
+            pkl_dir = Path(resolved)
+            if not pkl_dir.is_dir():
+                st.warning(f"Not a directory: `{pkl_dir}`.")
+            else:
+                all_pkl_files = list(pkl_dir.rglob("*.pkl")) + list(pkl_dir.rglob("*.pkl.z"))
+                pkl_count = len(all_pkl_files)
+                if pkl_count == 0:
+                    st.warning(f"No .pkl or .pkl.z files in `{pkl_dir}` or its subdirectories.")
+                else:
+                    try:
+                        skip_log = []
+                        def on_skip(path: str, reason: str):
+                            skip_log.append((path, reason))
+                        with st.spinner("Building parquet from pkl (recursively)..."):
+                            parquet_path = pkl_archive_to_parquet(
+                                pkl_dir,
+                                on_skip=on_skip,
+                            )
+                        st.success(f"Saved: `{parquet_path}`")
+                        if skip_log:
+                            with st.expander("Skipped pkl files"):
+                                for path, reason in skip_log:
+                                    st.text(f"{os.path.basename(path)}: {reason}")
+                    except Exception as e:
+                        st.error(f"Parquet generation failed: {e}")
+                        st.exception(e)
+
+    if run_eval_clicked:
         import pandas as pd
         resolved_eval_root, eval_path_err = resolve_under_data_root(eval_root, allow_missing=True)
         if eval_path_err:

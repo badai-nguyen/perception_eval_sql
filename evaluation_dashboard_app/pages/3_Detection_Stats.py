@@ -4,12 +4,33 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
-import glob
 import os
+from pathlib import Path
 from typing import Optional, List, Tuple
+
+from lib.path_utils import path_display
 
 st.set_page_config(layout="wide", page_title="Object Detection")
 st.title("Object Detection Evaluation Dashboard")
+
+# =============================
+# Session state from Overview (mode, run paths)
+# =============================
+if "runA" not in st.session_state:
+    st.warning("Please load data from the **Overview** page first (select mode and run(s)).")
+    st.stop()
+
+mode = st.session_state.get("mode", "Single Mode")
+runA = st.session_state["runA"]
+runB = st.session_state.get("runB")
+single_mode = mode == "Single Mode"
+
+def list_parquets_in_run(run_path) -> List[str]:
+    """Return sorted list of absolute paths to .parquet files in the run directory."""
+    p = Path(run_path)
+    if not p.is_dir():
+        return []
+    return sorted([str(f.resolve()) for f in p.glob("*.parquet")])
 
 # =============================
 # DuckDB Connection
@@ -26,6 +47,24 @@ def get_duckdb_connection() -> duckdb.DuckDBPyConnection:
 # =============================
 # Helper Functions
 # =============================
+def validate_parquet_file(con, path: str) -> Tuple[bool, str]:
+    """
+    Try to read the parquet file. Returns (True, "") if ok,
+    (False, error_message) if the file cannot be read (e.g. empty or invalid schema).
+    """
+    try:
+        con.execute("SELECT * FROM read_parquet(?) LIMIT 0", [path])
+        return True, ""
+    except Exception as e:
+        err = str(e).strip()
+        if "non-root column" in err or "Need at least one" in err:
+            return False, (
+                "This Parquet file has no readable columns (DuckDB: 'Need at least one non-root column'). "
+                "The file may be empty, corrupt, or written with a schema DuckDB cannot use. "
+                "Try re-generating the parquet from the Download page or check the source data."
+            )
+        return False, err
+
 def list_values(con, pq: str, expr: str, where: Optional[str] = None) -> List:
     """Get distinct values from parquet file."""
     q = f"SELECT DISTINCT {expr} FROM parquet_scan('{pq}')"
@@ -166,63 +205,107 @@ def build_filter_clause(filters: dict,*, enable_dist_h: bool = True) -> str:
     return " AND ".join(conditions) if conditions else "1=1"
 
 # =============================
+# Parquet files from run path(s)
+# =============================
+parquet_list_a = list_parquets_in_run(runA["path"])
+if not parquet_list_a:
+    st.error(f"No parquet files found in run directory: {path_display(runA['path'])}. Add a .parquet file or generate one from the Download page.")
+    st.stop()
+
+if single_mode:
+    parquet_list_b = []
+    compared_target_file = parquet_list_a[0]  # unused in single mode
+else:
+    if runB is None:
+        st.warning("Compare Mode requires a Candidate (B) run. Select runs on the Overview page.")
+        st.stop()
+    parquet_list_b = list_parquets_in_run(runB["path"])
+    if not parquet_list_b:
+        st.error(f"No parquet files found in Candidate run: {path_display(runB['path'])}.")
+        st.stop()
+
+# =============================
+# Loaded Runs (from Overview)
+# =============================
+st.subheader("Loaded Runs")
+st.markdown(f"**Baseline (A):** `{path_display(runA['path'])}`")
+if not single_mode and runB:
+    st.markdown(f"**Candidate (B):** `{path_display(runB['path'])}`")
+
+# =============================
 # Sidebar - Filters
 # =============================
 with st.sidebar:
     st.header("Filters / Inputs")
     
-    # File selection
-    parquet_files = sorted(glob.glob("data/*.parquet"))
-    if not parquet_files:
-        st.error("No parquet files found in data/ directory")
-        st.stop()
+    # File selection (from run directories)
+    if len(parquet_list_a) == 1:
+        target_file = parquet_list_a[0]
+    else:
+        target_file = st.selectbox(
+            "Target File (Baseline A)",
+            parquet_list_a,
+            format_func=lambda p: os.path.basename(p),
+            key="target_file"
+        )
     
-    target_file = st.selectbox(
-        "Target File",
-        parquet_files,
-        key="target_file"
-    )
-    
-    compared_target_file = st.selectbox(
-        "Compared File",
-        parquet_files,
-        index=min(1, len(parquet_files)-1),
-        key="compared_target_file"
-    )
+    if not single_mode:
+        if len(parquet_list_b) == 1:
+            compared_target_file = parquet_list_b[0]
+        else:
+            compared_target_file = st.selectbox(
+                "Compared File (Candidate B)",
+                parquet_list_b,
+                format_func=lambda p: os.path.basename(p),
+                index=min(1, len(parquet_list_b) - 1),
+                key="compared_target_file"
+            )
     
     con = get_duckdb_connection()
+    print("target_file", target_file)
+    # Validate parquet files are readable before creating views
+    ok, msg = validate_parquet_file(con, target_file)
+    if not ok:
+        st.error(f"**Target file** cannot be read: {msg}")
+        st.stop()
+    if not single_mode:
+        ok_comp, msg_comp = validate_parquet_file(con, compared_target_file)
+        if not ok_comp:
+            st.error(f"**Compared file** cannot be read: {msg_comp}")
+            st.stop()
     
     # Create views
     try:
         create_view_eval_flat(con, target_file, "view_eval_flat")
-        create_view_eval_flat(con, compared_target_file, "view_eval_flat_comp")
         create_view_tpr_fpr(con, "view_tpr_fpr_by_class_dist_topic")
-        create_view_tpr_fpr(con, "view_tpr_fpr_by_class_dist_topic_c")
-        con.execute("""
-            CREATE OR REPLACE VIEW view_tpr_fpr_by_class_dist_topic_c AS
-            WITH stats AS (
+        if not single_mode:
+            create_view_eval_flat(con, compared_target_file, "view_eval_flat_comp")
+            create_view_tpr_fpr(con, "view_tpr_fpr_by_class_dist_topic_c")
+            con.execute("""
+                CREATE OR REPLACE VIEW view_tpr_fpr_by_class_dist_topic_c AS
+                WITH stats AS (
+                    SELECT
+                        t4dataset_id,
+                        topic_name,
+                        label,
+                        distance_bin,
+                        bin_idx,
+                        coalesce(try(CAST(visibility AS VARCHAR)), 'not available') AS visibility,
+                        COUNT(*) FILTER (WHERE source='GT' AND status IN ('TP','FN')) AS gt_total,
+                        COUNT(*) FILTER (WHERE source='GT' AND status='TP') AS tp_gt,
+                        COUNT(*) FILTER (WHERE source='EST' AND status IN ('TP','FP')) AS est_total,
+                        COUNT(*) FILTER (WHERE source='EST' AND status='FP') AS fp_est
+                    FROM view_eval_flat_comp
+                    GROUP BY
+                        t4dataset_id, topic_name, label, distance_bin, bin_idx,
+                        coalesce(try(CAST(visibility AS VARCHAR)), 'not available')
+                )
                 SELECT
-                    t4dataset_id,
-                    topic_name,
-                    label,
-                    distance_bin,
-                    bin_idx,
-                    coalesce(try(CAST(visibility AS VARCHAR)), 'not available') AS visibility,
-                    COUNT(*) FILTER (WHERE source='GT' AND status IN ('TP','FN')) AS gt_total,
-                    COUNT(*) FILTER (WHERE source='GT' AND status='TP') AS tp_gt,
-                    COUNT(*) FILTER (WHERE source='EST' AND status IN ('TP','FP')) AS est_total,
-                    COUNT(*) FILTER (WHERE source='EST' AND status='FP') AS fp_est
-                FROM view_eval_flat_comp
-                GROUP BY
-                    t4dataset_id, topic_name, label, distance_bin, bin_idx,
-                    coalesce(try(CAST(visibility AS VARCHAR)), 'not available')
-            )
-            SELECT
-                *,
-                CASE WHEN gt_total > 0 THEN CAST(tp_gt AS DOUBLE) / gt_total ELSE NULL END AS tpr,
-                CASE WHEN est_total > 0 THEN CAST(fp_est AS DOUBLE) / est_total ELSE NULL END AS fpr
-            FROM stats
-        """)
+                    *,
+                    CASE WHEN gt_total > 0 THEN CAST(tp_gt AS DOUBLE) / gt_total ELSE NULL END AS tpr,
+                    CASE WHEN est_total > 0 THEN CAST(fp_est AS DOUBLE) / est_total ELSE NULL END AS fpr
+                FROM stats
+            """)
     except Exception as e:
         st.error(f"Error creating views: {e}")
         st.stop()
@@ -238,15 +321,18 @@ with st.sidebar:
     else:
         topic_name = "__all__"
     
-    compared_topics = list_values(con, compared_target_file, "topic_name")
-    if compared_topics:
-        compared_topic_name = st.selectbox(
-            "Compared Topic Name",
-            ["__all__"] + compared_topics,
-            key="compared_topic_name"
-        )
+    if not single_mode:
+        compared_topics = list_values(con, compared_target_file, "topic_name")
+        if compared_topics:
+            compared_topic_name = st.selectbox(
+                "Compared Topic Name",
+                ["__all__"] + compared_topics,
+                key="compared_topic_name"
+            )
+        else:
+            compared_topic_name = "__all__"
     else:
-        compared_topic_name = "__all__"
+        compared_topic_name = topic_name
     
     # Label selection
     labels = list_values(con, target_file, "label")
@@ -315,14 +401,20 @@ filters_comp = {
 # Main Content
 # =============================
 
-if st.checkbox("Debug: Inspect Parquet (Both Files)"):
-    col_left, col_right = st.columns(2)
-    file_labels = [
-        ("Target File", target_file),
-        ("Compared File", compared_target_file)
-    ]
+if st.checkbox("Debug: Inspect Parquet (Both Files)" if not single_mode else "Debug: Inspect Parquet"):
+    if single_mode:
+        col_left, _ = st.columns([1, 1])
+        cols_used = [col_left]
+        file_labels = [("Target File", target_file)]
+    else:
+        col_left, col_right = st.columns(2)
+        cols_used = [col_left, col_right]
+        file_labels = [
+            ("Target File", target_file),
+            ("Compared File", compared_target_file)
+        ]
     schema_results = []
-    for col, (label, file_path) in zip([col_left, col_right], file_labels):
+    for col, (label, file_path) in zip(cols_used, file_labels):
         with col:
             st.markdown(f"### {label}")
             # Schema
@@ -369,8 +461,8 @@ if st.checkbox("Debug: Inspect Parquet (Both Files)"):
             """)
             st.dataframe(stats_df)
 
-    # --- Show info about schema differences ---
-    if len(schema_results) == 2:
+    # --- Show info about schema differences (compare mode only) ---
+    if not single_mode and len(schema_results) == 2:
         label1, df1 = schema_results[0]
         label2, df2 = schema_results[1]
         cols1 = set(zip(df1["column_name"], df1["column_type"]))
@@ -418,42 +510,45 @@ if st.checkbox("Debug: Inspect Parquet (Both Files)"):
 st.subheader("t4dataset summary and data parse")
 
 try:
-    # Basic summary as before
-    query_base = f"""
-    WITH base AS (
+    if single_mode:
+        query_base = f"""
         SELECT COUNT(DISTINCT t4dataset_id) AS id_num, '{os.path.basename(target_file)}' AS series
         FROM view_eval_flat
-    ),
-    comp AS (
-        SELECT COUNT(DISTINCT t4dataset_id) AS id_num, '{os.path.basename(compared_target_file)}' AS series
+        """
+        df_summary = con.execute(query_base).df()
+        query_status = """
+        SELECT label, status, COUNT(*) AS num
+        FROM view_eval_flat
+        GROUP BY label, status
+        ORDER BY label, status
+        """
+        df_status = con.execute(query_status).df()
+    else:
+        query_base = f"""
+        WITH base AS (
+            SELECT COUNT(DISTINCT t4dataset_id) AS id_num, '{os.path.basename(target_file)}' AS series
+            FROM view_eval_flat
+        ),
+        comp AS (
+            SELECT COUNT(DISTINCT t4dataset_id) AS id_num, '{os.path.basename(compared_target_file)}' AS series
+            FROM view_eval_flat_comp
+        )
+        SELECT * FROM base
+        UNION ALL
+        SELECT * FROM comp
+        """
+        df_summary = con.execute(query_base).df()
+        query_status = """
+        SELECT 'Target' AS dataset, label, status, COUNT(*) AS num
+        FROM view_eval_flat
+        GROUP BY label, status
+        UNION ALL
+        SELECT 'Compared' AS dataset, label, status, COUNT(*) AS num
         FROM view_eval_flat_comp
-    )
-    SELECT * FROM base
-    UNION ALL
-    SELECT * FROM comp
-    """
-    df_summary = con.execute(query_base).df()
-
-    # Get status counts grouped by dataset, label, status
-    query_status = f"""
-    SELECT 
-        'Target' AS dataset,
-        label,
-        status,
-        COUNT(*) AS num
-    FROM view_eval_flat
-    GROUP BY label, status
-    UNION ALL
-    SELECT 
-        'Compared' AS dataset,
-        label,
-        status,
-        COUNT(*) AS num
-    FROM view_eval_flat_comp
-    GROUP BY label, status
-    ORDER BY dataset, label, status
-    """
-    df_status = con.execute(query_status).df()
+        GROUP BY label, status
+        ORDER BY dataset, label, status
+        """
+        df_status = con.execute(query_status).df()
 
     st.write("**t4dataset Count Summary**")
     if not df_summary.empty:
@@ -468,54 +563,59 @@ try:
     else:
         st.info("No data available")
 
-    # ---- Enhanced Table View: Status × label, wide format for better visibility ----
-    st.write("**Status Count Table (rows=label, cols=Target/Compared × Status)**")
-    st.markdown("""
-    Status count for both datasets. Columns are in the form "Target TP", "Target FP", etc., to allow easy comparison.
-    """)
-
-    if not df_status.empty:
-        # Pivot table for wide display: index=label, columns=[dataset, status], values=num
-        df_status_wide = df_status.pivot_table(index='label', columns=['dataset', 'status'], values='num', fill_value=0)
-
-        # Flatten columns to e.g. "Target TP"
-        df_status_wide.columns = [f"{col[0]} {col[1]}" for col in df_status_wide.columns]
-        df_status_wide = df_status_wide.reset_index()
-
-        st.dataframe(df_status_wide)
-
-        # Also: stacked bar plot for label × status for each dataset
-        fig2 = px.bar(
-            df_status,
-            x="label",
-            y="num",
-            color="status",
-            barmode="stack",
-            facet_col="dataset",
-            title="Status Distribution per Label (by File)",
-            category_orders={"dataset": ["Target", "Compared"]},
-            labels={"num": "Count", "label": "Label", "status": "Status"}
-        )
-        st.plotly_chart(fig2, width="stretch")
-
+    if single_mode:
+        st.write("**Status Count Table (label × status)**")
+        if not df_status.empty:
+            df_status_wide = df_status.pivot_table(index='label', columns='status', values='num', fill_value=0).reset_index()
+            st.dataframe(df_status_wide)
+            fig2 = px.bar(
+                df_status,
+                x="label",
+                y="num",
+                color="status",
+                barmode="stack",
+                title="Status Distribution per Label",
+                labels={"num": "Count", "label": "Label", "status": "Status"}
+            )
+            st.plotly_chart(fig2, width="stretch")
+        else:
+            st.info("No status count data available")
     else:
-        st.info("No status count data available")
+        st.write("**Status Count Table (rows=label, cols=Target/Compared × Status)**")
+        st.markdown("""
+        Status count for both datasets. Columns are in the form "Target TP", "Target FP", etc., to allow easy comparison.
+        """)
+        if not df_status.empty:
+            df_status_wide = df_status.pivot_table(index='label', columns=['dataset', 'status'], values='num', fill_value=0)
+            df_status_wide.columns = [f"{col[0]} {col[1]}" for col in df_status_wide.columns]
+            df_status_wide = df_status_wide.reset_index()
+            st.dataframe(df_status_wide)
+            fig2 = px.bar(
+                df_status,
+                x="label",
+                y="num",
+                color="status",
+                barmode="stack",
+                facet_col="dataset",
+                title="Status Distribution per Label (by File)",
+                category_orders={"dataset": ["Target", "Compared"]},
+                labels={"num": "Count", "label": "Label", "status": "Status"}
+            )
+            st.plotly_chart(fig2, width="stretch")
+        else:
+            st.info("No status count data available")
 
 except Exception as e:
     st.error(f"Error in summary: {e}")
 
 # =============================
-# Panel 2: TP Rate Comparison
+# Panel 2: TP Rate (single) / TP Rate Comparison (compare)
 # =============================
-st.subheader("TP Rate Comparison")
+st.subheader("TP Rate" + (" Comparison" if not single_mode else ""))
 
-col1, col2 = st.columns(2)
-
-with col1:
-    st.markdown("**Target Data**")
+if single_mode:
     try:
         filter_clause = build_filter_clause(filters_base)
-
         query = f"""
         SELECT
             label,
@@ -536,7 +636,7 @@ with col1:
                 df_tpr_base,
                 x='label',
                 y='tpr',
-                title=f"Total TP rate within {max_eval_range} [m] with target data",
+                title=f"Total TP rate within {max_eval_range} [m]",
                 labels={'tpr': 'TP Rate', 'label': 'Label'}
             )
             fig.update_layout(yaxis_range=[0, 1.2])
@@ -545,123 +645,171 @@ with col1:
             st.info("No data available")
     except Exception as e:
         st.error(f"Error: {e}")
-
-with col2:
-    st.markdown("**Compared Data**")
-    try:
-        filter_clause = build_filter_clause(filters_comp)
-        query = f"""
-        SELECT
-            label,
-            CASE 
-                WHEN COUNT(*) FILTER (WHERE source='GT' AND status IN ('TP','FN')) > 0 
-                THEN CAST(COUNT(*) FILTER (WHERE source='GT' AND status='TP') AS DOUBLE) 
-                     / COUNT(*) FILTER (WHERE source='GT' AND status IN ('TP','FN'))
-                ELSE 0
-            END AS tpr
-        FROM view_eval_flat_comp
-        WHERE {filter_clause}
-        GROUP BY label
-        ORDER BY label
-        """
-        df_tpr_comp = con.execute(query).df()
-        
-        if not df_tpr_comp.empty:
-            fig = px.bar(
-                df_tpr_comp,
-                x='label',
-                y='tpr',
-                title=f"Total TP rate within {max_eval_range} [m] with compared data",
-                labels={'tpr': 'TP Rate', 'label': 'Label'}
-            )
-            fig.update_layout(yaxis_range=[0, 1.2])
-            st.plotly_chart(fig, width="stretch")
-        else:
-            st.info("No data available")
-    except Exception as e:
-        st.error(f"Error: {e}")
+else:
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**Target Data**")
+        try:
+            filter_clause = build_filter_clause(filters_base)
+            query = f"""
+            SELECT
+                label,
+                CASE 
+                    WHEN COUNT(*) FILTER (WHERE source='GT' AND status IN ('TP','FN')) > 0 
+                    THEN CAST(COUNT(*) FILTER (WHERE source='GT' AND status='TP') AS DOUBLE) 
+                         / COUNT(*) FILTER (WHERE source='GT' AND status IN ('TP','FN'))
+                    ELSE 0
+                END AS tpr
+            FROM view_eval_flat
+            WHERE {filter_clause}
+            GROUP BY label
+            ORDER BY label
+            """
+            df_tpr_base = con.execute(query).df()
+            if not df_tpr_base.empty:
+                fig = px.bar(
+                    df_tpr_base,
+                    x='label',
+                    y='tpr',
+                    title=f"Total TP rate within {max_eval_range} [m] with target data",
+                    labels={'tpr': 'TP Rate', 'label': 'Label'}
+                )
+                fig.update_layout(yaxis_range=[0, 1.2])
+                st.plotly_chart(fig, width="stretch")
+            else:
+                st.info("No data available")
+        except Exception as e:
+            st.error(f"Error: {e}")
+    with col2:
+        st.markdown("**Compared Data**")
+        try:
+            filter_clause = build_filter_clause(filters_comp)
+            query = f"""
+            SELECT
+                label,
+                CASE 
+                    WHEN COUNT(*) FILTER (WHERE source='GT' AND status IN ('TP','FN')) > 0 
+                    THEN CAST(COUNT(*) FILTER (WHERE source='GT' AND status='TP') AS DOUBLE) 
+                         / COUNT(*) FILTER (WHERE source='GT' AND status IN ('TP','FN'))
+                    ELSE 0
+                END AS tpr
+            FROM view_eval_flat_comp
+            WHERE {filter_clause}
+            GROUP BY label
+            ORDER BY label
+            """
+            df_tpr_comp = con.execute(query).df()
+            if not df_tpr_comp.empty:
+                fig = px.bar(
+                    df_tpr_comp,
+                    x='label',
+                    y='tpr',
+                    title=f"Total TP rate within {max_eval_range} [m] with compared data",
+                    labels={'tpr': 'TP Rate', 'label': 'Label'}
+                )
+                fig.update_layout(yaxis_range=[0, 1.2])
+                st.plotly_chart(fig, width="stretch")
+            else:
+                st.info("No data available")
+        except Exception as e:
+            st.error(f"Error: {e}")
 
 # =============================
 # Panel 3: TP Rate by Distance Bin
 # =============================
-st.subheader("TP Rate Comparison by Distance Bin")
+st.subheader("TP Rate by Distance Bin" + (" (Comparison)" if not single_mode else ""))
 
 try:
     filter_clause_base = build_filter_clause(filters_base, enable_dist_h=False)
-    filter_clause_comp = build_filter_clause(filters_comp, enable_dist_h=False)
-    
-    query = f"""
-    WITH base AS (
+    if single_mode:
+        query = f"""
         SELECT
             distance_bin,
-            CASE 
-                WHEN SUM(gt_total) > 0 THEN CAST(SUM(tp_gt) AS DOUBLE) / SUM(gt_total)
-                ELSE 0
-            END AS tpr,
-            CASE 
-                WHEN SUM(est_total) > 0 THEN CAST(SUM(fp_est) AS DOUBLE) / SUM(est_total)
-                ELSE 0
-            END AS fpr
+            CASE WHEN SUM(gt_total) > 0 THEN CAST(SUM(tp_gt) AS DOUBLE) / SUM(gt_total) ELSE 0 END AS tpr
         FROM view_tpr_fpr_by_class_dist_topic
         WHERE {filter_clause_base}
         GROUP BY distance_bin
-    ),
-    comp AS (
-        SELECT
-            distance_bin,
-            CASE 
-                WHEN SUM(gt_total) > 0 THEN CAST(SUM(tp_gt) AS DOUBLE) / SUM(gt_total)
-                ELSE 0
-            END AS tpr_comp,
-            CASE 
-                WHEN SUM(est_total) > 0 THEN CAST(SUM(fp_est) AS DOUBLE) / SUM(est_total)
-                ELSE 0
-            END AS fpr_comp
-        FROM view_tpr_fpr_by_class_dist_topic_c
-        WHERE {filter_clause_comp}
-        GROUP BY distance_bin
-    )
-    SELECT
-        b.distance_bin,
-        b.tpr AS tp_rate_before,
-        c.tpr_comp AS tp_rate_after,
-        (c.tpr_comp - b.tpr) AS tp_rate_diff
-    FROM base b
-    JOIN comp c USING (distance_bin)
-    ORDER BY CAST(REPLACE(SPLIT_PART(b.distance_bin, ',', 1), '[', ' ') AS INTEGER)
-    """
-    df_tpr_dist = con.execute(query).df()
-    
-    if not df_tpr_dist.empty:
-        fig = go.Figure()
-        fig.add_trace(go.Bar(
-            x=df_tpr_dist['distance_bin'],
-            y=df_tpr_dist['tp_rate_before'],
-            name='TP Rate Before',
-            marker_color='lightblue'
-        ))
-        fig.add_trace(go.Bar(
-            x=df_tpr_dist['distance_bin'],
-            y=df_tpr_dist['tp_rate_after'],
-            name='TP Rate After',
-            marker_color='lightcoral'
-        ))
-        fig.add_trace(go.Bar(
-            x=df_tpr_dist['distance_bin'],
-            y=df_tpr_dist['tp_rate_diff'],
-            name='TP Rate Diff',
-            marker_color='lightgreen'
-        ))
-        fig.update_layout(
-            title="TP Rate Comparison by Distance Bin",
-            xaxis_title="Distance Bin",
-            yaxis_title="TP Rate",
-            barmode='group',
-            yaxis_range=[0, 1]
-        )
-        st.plotly_chart(fig, width="stretch")
+        ORDER BY CAST(REPLACE(SPLIT_PART(distance_bin, ',', 1), '[', ' ') AS INTEGER)
+        """
+        df_tpr_dist = con.execute(query).df()
+        if not df_tpr_dist.empty:
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=df_tpr_dist['distance_bin'],
+                y=df_tpr_dist['tpr'],
+                name='TP Rate',
+                marker_color='lightblue'
+            ))
+            fig.update_layout(
+                title="TP Rate by Distance Bin",
+                xaxis_title="Distance Bin",
+                yaxis_title="TP Rate",
+                yaxis_range=[0, 1]
+            )
+            st.plotly_chart(fig, width="stretch")
+        else:
+            st.info("No data available")
     else:
-        st.info("No data available")
+        filter_clause_comp = build_filter_clause(filters_comp, enable_dist_h=False)
+        query = f"""
+        WITH base AS (
+            SELECT
+                distance_bin,
+                CASE WHEN SUM(gt_total) > 0 THEN CAST(SUM(tp_gt) AS DOUBLE) / SUM(gt_total) ELSE 0 END AS tpr,
+                CASE WHEN SUM(est_total) > 0 THEN CAST(SUM(fp_est) AS DOUBLE) / SUM(est_total) ELSE 0 END AS fpr
+            FROM view_tpr_fpr_by_class_dist_topic
+            WHERE {filter_clause_base}
+            GROUP BY distance_bin
+        ),
+        comp AS (
+            SELECT
+                distance_bin,
+                CASE WHEN SUM(gt_total) > 0 THEN CAST(SUM(tp_gt) AS DOUBLE) / SUM(gt_total) ELSE 0 END AS tpr_comp,
+                CASE WHEN SUM(est_total) > 0 THEN CAST(SUM(fp_est) AS DOUBLE) / SUM(est_total) ELSE 0 END AS fpr_comp
+            FROM view_tpr_fpr_by_class_dist_topic_c
+            WHERE {filter_clause_comp}
+            GROUP BY distance_bin
+        )
+        SELECT
+            b.distance_bin,
+            b.tpr AS tp_rate_before,
+            c.tpr_comp AS tp_rate_after,
+            (c.tpr_comp - b.tpr) AS tp_rate_diff
+        FROM base b
+        JOIN comp c USING (distance_bin)
+        ORDER BY CAST(REPLACE(SPLIT_PART(b.distance_bin, ',', 1), '[', ' ') AS INTEGER)
+        """
+        df_tpr_dist = con.execute(query).df()
+        if not df_tpr_dist.empty:
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=df_tpr_dist['distance_bin'],
+                y=df_tpr_dist['tp_rate_before'],
+                name='TP Rate Before',
+                marker_color='lightblue'
+            ))
+            fig.add_trace(go.Bar(
+                x=df_tpr_dist['distance_bin'],
+                y=df_tpr_dist['tp_rate_after'],
+                name='TP Rate After',
+                marker_color='lightcoral'
+            ))
+            fig.add_trace(go.Bar(
+                x=df_tpr_dist['distance_bin'],
+                y=df_tpr_dist['tp_rate_diff'],
+                name='TP Rate Diff',
+                marker_color='lightgreen'
+            ))
+            fig.update_layout(
+                title="TP Rate Comparison by Distance Bin",
+                xaxis_title="Distance Bin",
+                yaxis_title="TP Rate",
+                barmode='group',
+                yaxis_range=[0, 1]
+            )
+            st.plotly_chart(fig, width="stretch")
+        else:
+            st.info("No data available")
 except Exception as e:
     st.error(f"Error: {e}")
 
@@ -671,157 +819,175 @@ except Exception as e:
 st.subheader("FP Rate by Distance Bin")
 
 try:
-    query = f"""
-    WITH base AS (
+    if single_mode:
+        query = f"""
         SELECT
             distance_bin,
-            CASE 
-                WHEN SUM(est_total) > 0 THEN CAST(SUM(fp_est) AS DOUBLE) / SUM(est_total)
-                ELSE 0
-            END AS fpr
+            CASE WHEN SUM(est_total) > 0 THEN CAST(SUM(fp_est) AS DOUBLE) / SUM(est_total) ELSE 0 END AS fpr
         FROM view_tpr_fpr_by_class_dist_topic
         WHERE {filter_clause_base}
         GROUP BY distance_bin
-    ),
-    comp AS (
-        SELECT
-            distance_bin,
-            CASE 
-                WHEN SUM(est_total) > 0 THEN CAST(SUM(fp_est) AS DOUBLE) / SUM(est_total)
-                ELSE 0
-            END AS fpr_comp
-        FROM view_tpr_fpr_by_class_dist_topic_c
-        WHERE {filter_clause_comp}
-        GROUP BY distance_bin
-    )
-    SELECT
-        b.distance_bin,
-        b.fpr AS fp_rate_before,
-        c.fpr_comp AS fp_rate_after,
-        (c.fpr_comp - b.fpr) AS fp_rate_diff
-    FROM base b
-    JOIN comp c USING (distance_bin)
-    ORDER BY CAST(REPLACE(SPLIT_PART(b.distance_bin, ',', 1), '[', ' ') AS INTEGER)
-    """
-    df_fpr_dist = con.execute(query).df()
-    
-    if not df_fpr_dist.empty:
-        fig = go.Figure()
-        fig.add_trace(go.Bar(
-            x=df_fpr_dist['distance_bin'],
-            y=df_fpr_dist['fp_rate_before'],
-            name='FP Rate Before',
-            marker_color='lightblue'
-        ))
-        fig.add_trace(go.Bar(
-            x=df_fpr_dist['distance_bin'],
-            y=df_fpr_dist['fp_rate_after'],
-            name='FP Rate After',
-            marker_color='lightcoral'
-        ))
-        fig.add_trace(go.Bar(
-            x=df_fpr_dist['distance_bin'],
-            y=df_fpr_dist['fp_rate_diff'],
-            name='FP Rate Diff',
-            marker_color='lightgreen'
-        ))
-        fig.update_layout(
-            title="FP Rate Comparison by Distance Bin",
-            xaxis_title="Distance Bin",
-            yaxis_title="FP Rate",
-            barmode='group',
-            yaxis_range=[0, 1]
+        ORDER BY CAST(REPLACE(SPLIT_PART(distance_bin, ',', 1), '[', ' ') AS INTEGER)
+        """
+        df_fpr_dist = con.execute(query).df()
+        if not df_fpr_dist.empty:
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=df_fpr_dist['distance_bin'],
+                y=df_fpr_dist['fpr'],
+                name='FP Rate',
+                marker_color='lightcoral'
+            ))
+            fig.update_layout(
+                title="FP Rate by Distance Bin",
+                xaxis_title="Distance Bin",
+                yaxis_title="FP Rate",
+                yaxis_range=[0, 1]
+            )
+            st.plotly_chart(fig, width="stretch")
+        else:
+            st.info("No data available")
+    else:
+        filter_clause_comp = build_filter_clause(filters_comp, enable_dist_h=False)
+        query = f"""
+        WITH base AS (
+            SELECT
+                distance_bin,
+                CASE WHEN SUM(est_total) > 0 THEN CAST(SUM(fp_est) AS DOUBLE) / SUM(est_total) ELSE 0 END AS fpr
+            FROM view_tpr_fpr_by_class_dist_topic
+            WHERE {filter_clause_base}
+            GROUP BY distance_bin
+        ),
+        comp AS (
+            SELECT
+                distance_bin,
+                CASE WHEN SUM(est_total) > 0 THEN CAST(SUM(fp_est) AS DOUBLE) / SUM(est_total) ELSE 0 END AS fpr_comp
+            FROM view_tpr_fpr_by_class_dist_topic_c
+            WHERE {filter_clause_comp}
+            GROUP BY distance_bin
         )
-        st.plotly_chart(fig, width="stretch")
-    else:
-        st.info("No data available")
+        SELECT
+            b.distance_bin,
+            b.fpr AS fp_rate_before,
+            c.fpr_comp AS fp_rate_after,
+            (c.fpr_comp - b.fpr) AS fp_rate_diff
+        FROM base b
+        JOIN comp c USING (distance_bin)
+        ORDER BY CAST(REPLACE(SPLIT_PART(b.distance_bin, ',', 1), '[', ' ') AS INTEGER)
+        """
+        df_fpr_dist = con.execute(query).df()
+        if not df_fpr_dist.empty:
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=df_fpr_dist['distance_bin'],
+                y=df_fpr_dist['fp_rate_before'],
+                name='FP Rate Before',
+                marker_color='lightblue'
+            ))
+            fig.add_trace(go.Bar(
+                x=df_fpr_dist['distance_bin'],
+                y=df_fpr_dist['fp_rate_after'],
+                name='FP Rate After',
+                marker_color='lightcoral'
+            ))
+            fig.add_trace(go.Bar(
+                x=df_fpr_dist['distance_bin'],
+                y=df_fpr_dist['fp_rate_diff'],
+                name='FP Rate Diff',
+                marker_color='lightgreen'
+            ))
+            fig.update_layout(
+                title="FP Rate Comparison by Distance Bin",
+                xaxis_title="Distance Bin",
+                yaxis_title="FP Rate",
+                barmode='group',
+                yaxis_range=[0, 1]
+            )
+            st.plotly_chart(fig, width="stretch")
+        else:
+            st.info("No data available")
 except Exception as e:
     st.error(f"Error: {e}")
 
 # =============================
-# Panel 5: Improved and Degraded Count
+# Panel 5: Improved and Degraded Count (compare mode only)
 # =============================
-st.subheader("Improved and Degraded count by objects")
-
-try:
-    query = f"""
-    WITH base_gt AS (
+if not single_mode:
+    st.subheader("Improved and Degraded count by objects")
+    try:
+        filter_clause_comp_p5 = build_filter_clause(filters_comp, enable_dist_h=False)
+        query = f"""
+        WITH base_gt AS (
+            SELECT
+                t4dataset_id,
+                frame_index,
+                uuid AS gt_uuid,
+                COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_base
+            FROM view_eval_flat
+            WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL 
+                AND {filter_clause_base}
+            GROUP BY 1,2,3
+        ),
+        comp_gt AS (
+            SELECT
+                t4dataset_id,
+                frame_index,
+                uuid AS gt_uuid,
+                COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_comp
+            FROM view_eval_flat_comp
+            WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL 
+                AND {filter_clause_comp_p5}
+            GROUP BY 1,2,3
+        ),
+        joined AS (
+            SELECT
+                COALESCE(CAST(b.t4dataset_id AS VARCHAR), CAST(c.t4dataset_id AS VARCHAR)) AS t4dataset_id,
+                COALESCE(CAST(b.frame_index AS VARCHAR), CAST(c.frame_index AS VARCHAR)) AS frame_index,
+                COALESCE(b.gt_uuid, c.gt_uuid) AS gt_uuid,
+                COALESCE(b.tp_base, FALSE) AS tp_base,
+                COALESCE(c.tp_comp, FALSE) AS tp_comp
+            FROM base_gt b
+            FULL OUTER JOIN comp_gt c
+                ON b.t4dataset_id = c.t4dataset_id
+               AND b.frame_index = c.frame_index
+               AND b.gt_uuid = c.gt_uuid
+        )
         SELECT
             t4dataset_id,
-            frame_index,
-            uuid AS gt_uuid,
-            COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_base
-        FROM view_eval_flat
-        WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL 
-            AND {filter_clause_base}
-        GROUP BY 1,2,3
-    ),
-    comp_gt AS (
-        SELECT
-            t4dataset_id,
-            frame_index,
-            uuid AS gt_uuid,
-            COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_comp
-        FROM view_eval_flat_comp
-        WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL 
-            AND {filter_clause_comp}
-        GROUP BY 1,2,3
-    ),
-    joined AS (
-        SELECT
-            -- Explicit casts to avoid binder errors in COALESCE
-            COALESCE(CAST(b.t4dataset_id AS VARCHAR), CAST(c.t4dataset_id AS VARCHAR)) AS t4dataset_id,
-            COALESCE(CAST(b.frame_index AS VARCHAR), CAST(c.frame_index AS VARCHAR)) AS frame_index,
-            COALESCE(b.gt_uuid, c.gt_uuid) AS gt_uuid,
-            COALESCE(b.tp_base, FALSE) AS tp_base,
-            COALESCE(c.tp_comp, FALSE) AS tp_comp
-        FROM base_gt b
-        FULL OUTER JOIN comp_gt c
-            ON b.t4dataset_id = c.t4dataset_id
-           AND b.frame_index = c.frame_index
-           AND b.gt_uuid = c.gt_uuid
-    )
-    SELECT
-        t4dataset_id,
-        CAST(COUNT(*) FILTER (WHERE TRUE) AS DOUBLE) AS total_gt,
-        CAST(COUNT(*) FILTER (WHERE NOT tp_base AND tp_comp) AS DOUBLE) AS improved_cnt,
-        CAST(COUNT(*) FILTER (WHERE tp_base AND NOT tp_comp) AS DOUBLE) AS degraded_cnt,
-        CAST(COUNT(*) FILTER (WHERE tp_base AND tp_comp) AS DOUBLE) AS both_tp_cnt,
-        CAST(COUNT(*) FILTER (WHERE NOT tp_base AND NOT tp_comp) AS DOUBLE) AS both_fn_cnt,
-        CAST(SUM((CASE WHEN tp_comp THEN 1 ELSE 0 END) - (CASE WHEN tp_base THEN 1 ELSE 0 END)) AS DOUBLE) AS net_tp_delta
-    FROM joined
-    GROUP BY 1
-    ORDER BY net_tp_delta DESC
-    """
-    df_improved = con.execute(query).df()
-    
-    if not df_improved.empty:
-        st.dataframe(df_improved, width="stretch")
-    else:
-        st.info("No data available")
-except Exception as e:
-    st.error(f"Error: {e}")
+            CAST(COUNT(*) FILTER (WHERE TRUE) AS DOUBLE) AS total_gt,
+            CAST(COUNT(*) FILTER (WHERE NOT tp_base AND tp_comp) AS DOUBLE) AS improved_cnt,
+            CAST(COUNT(*) FILTER (WHERE tp_base AND NOT tp_comp) AS DOUBLE) AS degraded_cnt,
+            CAST(COUNT(*) FILTER (WHERE tp_base AND tp_comp) AS DOUBLE) AS both_tp_cnt,
+            CAST(COUNT(*) FILTER (WHERE NOT tp_base AND NOT tp_comp) AS DOUBLE) AS both_fn_cnt,
+            CAST(SUM((CASE WHEN tp_comp THEN 1 ELSE 0 END) - (CASE WHEN tp_base THEN 1 ELSE 0 END)) AS DOUBLE) AS net_tp_delta
+        FROM joined
+        GROUP BY 1
+        ORDER BY net_tp_delta DESC
+        """
+        df_improved = con.execute(query).df()
+        if not df_improved.empty:
+            st.dataframe(df_improved, width="stretch")
+        else:
+            st.info("No data available")
+    except Exception as e:
+        st.error(f"Error: {e}")
 
 # =============================
-# Panel 6: Mean Error Comparison
+# Panel 6: Mean Error (single) / Mean Error Comparison (compare)
 # =============================
-st.subheader("Mean Error Comparison")
+st.subheader("Mean Error" + (" Comparison" if not single_mode else ""))
 
-# Check if error columns exist
 try:
     sample_query = "SELECT * FROM view_eval_flat LIMIT 1"
     sample_df = con.execute(sample_query).df()
     has_error_cols = all(col in sample_df.columns for col in ['x_error', 'y_error', 'yaw_error'])
-except:
+except Exception:
     has_error_cols = False
 
 if not has_error_cols:
     st.info("Error columns (x_error, y_error, yaw_error) not found in data. Skipping error analysis.")
 else:
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.markdown("**Target File Mean Error**")
+    if single_mode:
         try:
             query = f"""
             SELECT
@@ -840,9 +1006,7 @@ else:
             GROUP BY label
             ORDER BY label
             """
-
             df_error_base = con.execute(query).df()
-            print(df_error_base)
             if not df_error_base.empty:
                 fig = go.Figure()
                 fig.add_trace(go.Bar(
@@ -864,7 +1028,7 @@ else:
                     marker_color='lightgreen'
                 ))
                 fig.update_layout(
-                    title=f"TargetFile Mean Error within {max_eval_range} [m]",
+                    title=f"Mean Error within {max_eval_range} [m]",
                     xaxis_title="Label",
                     yaxis_title="Error [m] or [rad]",
                     barmode='group'
@@ -874,47 +1038,168 @@ else:
                 st.info("No data available")
         except Exception as e:
             st.error(f"Error: {e}")
+    else:
+        filter_clause_comp_err = build_filter_clause(filters_comp)
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Target File Mean Error**")
+            try:
+                query = f"""
+                SELECT
+                    label,
+                    AVG(ABS(CAST(x_error AS DOUBLE))) FILTER (
+                        WHERE status = 'TP' AND x_error IS NOT NULL
+                    ) AS mean_abs_x_error,
+                    AVG(ABS(CAST(y_error AS DOUBLE))) FILTER (
+                        WHERE status = 'TP' AND y_error IS NOT NULL
+                    ) AS mean_abs_y_error,
+                    AVG(ABS(CAST(yaw_error AS DOUBLE))) FILTER (
+                        WHERE status = 'TP' AND yaw_error IS NOT NULL
+                    ) AS mean_abs_yaw_error
+                FROM view_eval_flat
+                WHERE {filter_clause_base}
+                GROUP BY label
+                ORDER BY label
+                """
+                df_error_base = con.execute(query).df()
+                if not df_error_base.empty:
+                    fig = go.Figure()
+                    fig.add_trace(go.Bar(
+                        x=df_error_base['label'],
+                        y=df_error_base['mean_abs_x_error'],
+                        name='X Error',
+                        marker_color='lightblue'
+                    ))
+                    fig.add_trace(go.Bar(
+                        x=df_error_base['label'],
+                        y=df_error_base['mean_abs_y_error'],
+                        name='Y Error',
+                        marker_color='lightcoral'
+                    ))
+                    fig.add_trace(go.Bar(
+                        x=df_error_base['label'],
+                        y=df_error_base['mean_abs_yaw_error'],
+                        name='Yaw Error',
+                        marker_color='lightgreen'
+                    ))
+                    fig.update_layout(
+                        title=f"TargetFile Mean Error within {max_eval_range} [m]",
+                        xaxis_title="Label",
+                        yaxis_title="Error [m] or [rad]",
+                        barmode='group'
+                    )
+                    st.plotly_chart(fig, width="stretch")
+                else:
+                    st.info("No data available")
+            except Exception as e:
+                st.error(f"Error: {e}")
+        with col2:
+            st.markdown("**Compared File Mean Error**")
+            try:
+                query = f"""
+                SELECT
+                    label,
+                    AVG(ABS(CAST(x_error AS DOUBLE))) FILTER (WHERE status = 'TP') AS mean_abs_x_error,
+                    AVG(ABS(CAST(y_error AS DOUBLE))) FILTER (WHERE status = 'TP') AS mean_abs_y_error,
+                    AVG(ABS(CAST(yaw_error AS DOUBLE))) FILTER (WHERE status = 'TP') AS mean_abs_yaw_error
+                FROM view_eval_flat_comp
+                WHERE {filter_clause_comp_err}
+                GROUP BY label
+                ORDER BY label
+                """
+                df_error_comp = con.execute(query).df()
+                if not df_error_comp.empty:
+                    fig = go.Figure()
+                    fig.add_trace(go.Bar(
+                        x=df_error_comp['label'],
+                        y=df_error_comp['mean_abs_x_error'],
+                        name='X Error',
+                        marker_color='lightblue'
+                    ))
+                    fig.add_trace(go.Bar(
+                        x=df_error_comp['label'],
+                        y=df_error_comp['mean_abs_y_error'],
+                        name='Y Error',
+                        marker_color='lightcoral'
+                    ))
+                    fig.add_trace(go.Bar(
+                        x=df_error_comp['label'],
+                        y=df_error_comp['mean_abs_yaw_error'],
+                        name='Yaw Error',
+                        marker_color='lightgreen'
+                    ))
+                    fig.update_layout(
+                        title=f"ComparedFile Mean Error within {max_eval_range} [m]",
+                        xaxis_title="Label",
+                        yaxis_title="Error [m] or [rad]",
+                        barmode='group'
+                    )
+                    st.plotly_chart(fig, width="stretch")
+                else:
+                    st.info("No data available")
+            except Exception as e:
+                st.error(f"Error: {e}")
 
-    with col2:
-        st.markdown("**Compared File Mean Error**")
+        # =============================
+        # Panel 7: Error Difference (compare mode only)
+        # =============================
+        st.subheader("Difference of mean absolute error (comp - target)")
         try:
             query = f"""
+            WITH topic_a AS (
+                SELECT
+                    label,
+                    AVG(ABS(x_error)) FILTER (WHERE status = 'TP') AS x_a,
+                    AVG(ABS(y_error)) FILTER (WHERE status = 'TP') AS y_a,
+                    AVG(ABS(yaw_error)) FILTER (WHERE status = 'TP') AS yaw_a
+                FROM view_eval_flat
+                WHERE {filter_clause_base}
+                GROUP BY label
+            ),
+            topic_b AS (
+                SELECT
+                    label,
+                    AVG(ABS(x_error)) FILTER (WHERE status = 'TP') AS x_b,
+                    AVG(ABS(y_error)) FILTER (WHERE status = 'TP') AS y_b,
+                    AVG(ABS(yaw_error)) FILTER (WHERE status = 'TP') AS yaw_b
+                FROM view_eval_flat_comp
+                WHERE {filter_clause_comp_err}
+                GROUP BY label
+            )
             SELECT
-                label,
-                AVG(ABS(CAST(x_error AS DOUBLE))) FILTER (WHERE status = 'TP') AS mean_abs_x_error,
-                AVG(ABS(CAST(y_error AS DOUBLE))) FILTER (WHERE status = 'TP') AS mean_abs_y_error,
-                AVG(ABS(CAST(yaw_error AS DOUBLE))) FILTER (WHERE status = 'TP') AS mean_abs_yaw_error
-            FROM view_eval_flat_comp
-            WHERE {filter_clause_comp}
-            GROUP BY label
+                a.label,
+                (x_b - x_a) AS x_diff,
+                (y_b - y_a) AS y_diff,
+                (yaw_b - yaw_a) AS yaw_diff
+            FROM topic_a a
+            JOIN topic_b b USING (label)
             ORDER BY label
             """
-            df_error_comp = con.execute(query).df()
-            
-            if not df_error_comp.empty:
+            df_error_diff = con.execute(query).df()
+            if not df_error_diff.empty:
                 fig = go.Figure()
                 fig.add_trace(go.Bar(
-                    x=df_error_comp['label'],
-                    y=df_error_comp['mean_abs_x_error'],
-                    name='X Error',
+                    x=df_error_diff['label'],
+                    y=df_error_diff['x_diff'],
+                    name='X Diff',
                     marker_color='lightblue'
                 ))
                 fig.add_trace(go.Bar(
-                    x=df_error_comp['label'],
-                    y=df_error_comp['mean_abs_y_error'],
-                    name='Y Error',
+                    x=df_error_diff['label'],
+                    y=df_error_diff['y_diff'],
+                    name='Y Diff',
                     marker_color='lightcoral'
                 ))
                 fig.add_trace(go.Bar(
-                    x=df_error_comp['label'],
-                    y=df_error_comp['mean_abs_yaw_error'],
-                    name='Yaw Error',
+                    x=df_error_diff['label'],
+                    y=df_error_diff['yaw_diff'],
+                    name='Yaw Diff',
                     marker_color='lightgreen'
                 ))
                 fig.update_layout(
-                    title=f"ComparedFile Mean Error within {max_eval_range} [m]",
+                    title=f"Difference of mean absolute error within {max_eval_range} [m] (comp - target)",
                     xaxis_title="Label",
-                    yaxis_title="Error [m] or [rad]",
+                    yaxis_title="Error Difference [m] or [rad]",
                     barmode='group'
                 )
                 st.plotly_chart(fig, width="stretch")
@@ -922,76 +1207,6 @@ else:
                 st.info("No data available")
         except Exception as e:
             st.error(f"Error: {e}")
-
-    # =============================
-    # Panel 7: Error Difference
-    # =============================
-    st.subheader("Difference of mean absolute error (comp - target)")
-
-    try:
-        query = f"""
-        WITH topic_a AS (
-            SELECT
-                label,
-                AVG(ABS(x_error)) FILTER (WHERE status = 'TP') AS x_a,
-                AVG(ABS(y_error)) FILTER (WHERE status = 'TP') AS y_a,
-                AVG(ABS(yaw_error)) FILTER (WHERE status = 'TP') AS yaw_a
-            FROM view_eval_flat
-            WHERE {filter_clause_base}
-            GROUP BY label
-        ),
-        topic_b AS (
-            SELECT
-                label,
-                AVG(ABS(x_error)) FILTER (WHERE status = 'TP') AS x_b,
-                AVG(ABS(y_error)) FILTER (WHERE status = 'TP') AS y_b,
-                AVG(ABS(yaw_error)) FILTER (WHERE status = 'TP') AS yaw_b
-            FROM view_eval_flat_comp
-            WHERE {filter_clause_comp}
-            GROUP BY label
-        )
-        SELECT
-            a.label,
-            (x_b - x_a) AS x_diff,
-            (y_b - y_a) AS y_diff,
-            (yaw_b - yaw_a) AS yaw_diff
-        FROM topic_a a
-        JOIN topic_b b USING (label)
-        ORDER BY label
-        """
-        df_error_diff = con.execute(query).df()
-        
-        if not df_error_diff.empty:
-            fig = go.Figure()
-            fig.add_trace(go.Bar(
-                x=df_error_diff['label'],
-                y=df_error_diff['x_diff'],
-                name='X Diff',
-                marker_color='lightblue'
-            ))
-            fig.add_trace(go.Bar(
-                x=df_error_diff['label'],
-                y=df_error_diff['y_diff'],
-                name='Y Diff',
-                marker_color='lightcoral'
-            ))
-            fig.add_trace(go.Bar(
-                x=df_error_diff['label'],
-                y=df_error_diff['yaw_diff'],
-                name='Yaw Diff',
-                marker_color='lightgreen'
-            ))
-            fig.update_layout(
-                title=f"Difference of mean absolute error within {max_eval_range} [m] (comp - target)",
-                xaxis_title="Label",
-                yaxis_title="Error Difference [m] or [rad]",
-                barmode='group'
-            )
-            st.plotly_chart(fig, width="stretch")
-        else:
-            st.info("No data available")
-    except Exception as e:
-        st.error(f"Error: {e}")
 
 # =============================
 # Panel 8: Object Count with Distance
