@@ -1562,6 +1562,8 @@ with tab4:
                             parquet_path = pkl_archive_to_parquet(
                                 pkl_dir,
                                 on_skip=on_skip,
+                                project_id=project_id or None,
+                                job_id=st.session_state.job_id or None,
                             )
                         st.success(f"Saved: `{parquet_path}`")
                         if skip_log:

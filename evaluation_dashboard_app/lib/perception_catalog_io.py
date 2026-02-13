@@ -11,7 +11,22 @@ import glob
 import os
 import pickle
 from pathlib import Path
-from typing import Any, Callable, Iterable, List
+from types import SimpleNamespace
+from typing import Any, Callable, Iterable, List, Tuple
+
+# Topic key used in pkl.z (WebAutoEvaluatorScenarioResult.frame_results); use same when wrapping plain .pkl list
+PKLZ_FRAME_RESULTS_TOPIC = "perception.object_recognition.tracking.objects"
+
+# Default t4dataset_id when not present in pkl/pkl.z (e.g. plain scene_result.pkl); UUID format
+DEFAULT_T4DATASET_ID = "00000000-0000-0000-0000-000000000000"
+# Default t4dataset_name when not present; UUID format
+DEFAULT_T4DATASET_NAME = "00000000-0000-0000-0000-000000000001"
+
+# Attributes we try to read from scenario result or from first frame when normalizing plain .pkl
+_SCENARIO_METADATA_ATTRS = (
+    "suite_name", "scenario_name", "t4dataset_id", "t4dataset_name",
+    "job_id", "project_id", "suite_report_id", "spec_report_id", "test_case_report_id",
+)
 
 try:
     import joblib
@@ -92,7 +107,7 @@ def _scenarios_to_df_local(
             if frame_list:
                 if debug:
                     print(f"[scenarios_to_df] treating as flat list of frames, len = {len(frame_list)}, first type = {type(frame_list[0]).__name__}")
-                frame_results_dict = {"default_topic": frame_list}
+                frame_results_dict = {PKLZ_FRAME_RESULTS_TOPIC: frame_list}
             else:
                 if debug:
                     print("[scenarios_to_df] skip: no frame_results and not a list of frames")
@@ -135,6 +150,78 @@ def _scenarios_to_df_local(
     if debug:
         print("[scenarios_to_df] output.current shape =", getattr(output.current, "shape", None), " output.future =", output.future is not None)
     return output
+
+
+def _infer_scenario_and_suite_from_pkl_path(pkl_file: str | Path) -> Tuple[str, str]:
+    """
+    Infer scenario_name and suite_name from pkl file path.
+    e.g. .../SuiteName_uuid/ScenarioName_uuid/scene_result.pkl -> (ScenarioName_uuid, SuiteName_uuid)
+    e.g. .../ScenarioName_uuid/scene_result.pkl -> (ScenarioName_uuid, "")
+    """
+    path = Path(pkl_file).resolve()
+    parent = path.parent
+    scenario_name = parent.name if parent.name else ""
+    suite_name = ""
+    grandparent = parent.parent
+    if grandparent and grandparent.name:
+        parts = grandparent.name.rsplit("_", 1)
+        if len(parts) == 2 and len(parts[1]) == 36 and parts[1].count("-") == 4:
+            suite_name = grandparent.name
+    return (scenario_name, suite_name)
+
+
+def _get_metadata_from_frame(frame: Any) -> dict:
+    """Extract scenario-like metadata from a frame if present (e.g. PerceptionFrameResult with t4dataset_id)."""
+    out = {}
+    for attr in _SCENARIO_METADATA_ATTRS:
+        val = getattr(frame, attr, None)
+        if val is not None and val != "":
+            out[attr] = val
+    return out
+
+
+def _normalize_loaded_pkl(
+    data: Any,
+    *,
+    pkl_file: str | Path | None = None,
+    project_id: str | None = None,
+    job_id: str | None = None,
+) -> Any:
+    """
+    Normalize loaded pkl data so plain .pkl (list of PerceptionFrameResult) has the same
+    shape as .pkl.z (WebAutoEvaluatorScenarioResult with frame_results dict).
+    Tries to fill suite_name, scenario_name, t4dataset_id, etc. from:
+    - pkl_file path (scenario_name = parent dir, suite_name = grandparent when SuiteName_uuid)
+    - first frame attributes (t4dataset_id, t4dataset_name, job_id, project_id, ...)
+    - explicit project_id, job_id when provided (e.g. from Download page).
+    """
+    if hasattr(data, "frame_results"):
+        fr = getattr(data, "frame_results", None)
+        if isinstance(fr, dict) and len(fr) > 0:
+            return data
+    if isinstance(data, list) and len(data) > 0:
+        first = data[0]
+        if hasattr(first, "pass_fail_result"):
+            meta = _get_metadata_from_frame(first)
+            scenario_name = meta.get("scenario_name") or ""
+            suite_name = meta.get("suite_name") or ""
+            if pkl_file:
+                path_scenario, path_suite = _infer_scenario_and_suite_from_pkl_path(pkl_file)
+                scenario_name = scenario_name or path_scenario
+                suite_name = suite_name or path_suite
+            return SimpleNamespace(
+                suite_name=suite_name,
+                scenario_name=scenario_name,
+                t4dataset_id=meta.get("t4dataset_id") or DEFAULT_T4DATASET_ID,
+                t4dataset_name=meta.get("t4dataset_name") or DEFAULT_T4DATASET_NAME,
+                job_id=job_id if job_id is not None else meta.get("job_id"),
+                project_id=project_id if project_id is not None else meta.get("project_id"),
+                suite_report_id=meta.get("suite_report_id"),
+                spec_report_id=meta.get("spec_report_id"),
+                test_case_report_id=meta.get("test_case_report_id"),
+                frame_results={PKLZ_FRAME_RESULTS_TOPIC: data},
+            )
+    return data
 
 
 def _require_analyzer() -> None:
@@ -188,6 +275,8 @@ def build_scene_dataframe_from_pkl_dir(
     skip_empty: bool = True,
     skip_bad_dtype: bool = True,
     on_skip: Callable[[str, str], None] | None = None,
+    project_id: str | None = None,
+    job_id: str | None = None,
 ) -> SceneDataFrame:
     """
     Build a SceneDataFrame from all *.pkl and *.pkl.z files in a directory.
@@ -198,6 +287,8 @@ def build_scene_dataframe_from_pkl_dir(
         skip_empty: If True, skip files that yield an empty dataframe.
         skip_bad_dtype: If True, skip files where df.current["x_error"].dtype != "float64".
         on_skip: Optional callback (file_path, reason) when a file is skipped.
+        project_id: Optional project ID (e.g. from Download page) to fill when normalizing plain .pkl.
+        job_id: Optional job ID (e.g. from Download page) to fill when normalizing plain .pkl.
 
     Returns:
         SceneDataFrame concatenated from all valid pkl/pkl.z files.
@@ -212,8 +303,20 @@ def build_scene_dataframe_from_pkl_dir(
 
     df = SceneDataFrame(current=pd.DataFrame())
     for pkl_file in pkl_files:
-        with open(pkl_file, "rb") as f:
-            data = pickle.load(f)
+        if str(pkl_file).lower().endswith(".pkl.z"):
+            try:
+                data = joblib.load(pkl_file)
+            except NameError:
+                raise ImportError("joblib is required for .pkl.z: pip install joblib")
+        else:
+            with open(pkl_file, "rb") as f:
+                data = pickle.load(f)
+        data = _normalize_loaded_pkl(
+            data,
+            pkl_file=pkl_file,
+            project_id=project_id,
+            job_id=job_id,
+        )
         df_ = _scenarios_to_df_local(data, scenario_parser_function=scene2df, debug=False)
         del data
         if df_.empty():
@@ -240,6 +343,8 @@ def pkl_archive_to_parquet(
     skip_empty: bool = True,
     skip_bad_dtype: bool = True,
     on_skip: Callable[[str, str], None] | None = None,
+    project_id: str | None = None,
+    job_id: str | None = None,
 ) -> str:
     """
     Generate a single parquet file from all *.pkl and *.pkl.z files in a directory.
@@ -251,6 +356,8 @@ def pkl_archive_to_parquet(
         skip_empty: Skip files that yield empty dataframe.
         skip_bad_dtype: Skip files where x_error is not float64.
         on_skip: Optional callback (file_path, reason) when a file is skipped.
+        project_id: Optional project ID to fill when normalizing plain .pkl (e.g. from Download page).
+        job_id: Optional job ID to fill when normalizing plain .pkl (e.g. from Download page).
 
     Returns:
         Path to the written parquet file.
@@ -263,6 +370,8 @@ def pkl_archive_to_parquet(
         skip_empty=skip_empty,
         skip_bad_dtype=skip_bad_dtype,
         on_skip=on_skip,
+        project_id=project_id,
+        job_id=job_id,
     )
     df.to_parquet(pkl_dir)
     parquet_file = pkl_dir / "current.parquet"
