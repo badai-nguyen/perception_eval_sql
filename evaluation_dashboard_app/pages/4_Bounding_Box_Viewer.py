@@ -3,12 +3,47 @@ import streamlit as st
 import plotly.graph_objects as go
 import numpy as np
 import pandas as pd
-import glob
 import os
-from typing import Tuple
+from pathlib import Path
+from typing import Tuple, List
+
+from lib.path_utils import path_display
 
 st.set_page_config(layout="wide")
 st.title("Bounding Box Viewer")
+
+# =============================
+# Session state from Overview (run path)
+# =============================
+if "runA" not in st.session_state:
+    st.warning("Please load data from the **Overview** page first (select mode and run(s)).")
+    st.stop()
+
+runA = st.session_state["runA"]
+
+
+def list_parquets_in_run(run_path) -> List[str]:
+    """Return sorted list of absolute paths to .parquet files in the run directory."""
+    p = Path(run_path)
+    if not p.is_dir():
+        return []
+    return sorted([str(f.resolve()) for f in p.glob("*.parquet")])
+
+
+# Parquet files from the run designated on Overview
+parquet_list_a = list_parquets_in_run(runA["path"])
+if not parquet_list_a:
+    st.error(
+        f"No parquet files found in run directory: {path_display(runA['path'])}. "
+        "Add a .parquet file or generate one from the Download page."
+    )
+    st.stop()
+
+# ----------------------------
+# Loaded Runs (from Overview)
+# ----------------------------
+st.subheader("Loaded Runs")
+st.markdown(f"**Baseline (A):** `{path_display(runA['path'])}`")
 
 # ----------------------------
 # Sidebar (Filters)
@@ -16,12 +51,16 @@ st.title("Bounding Box Viewer")
 with st.sidebar:
     st.header("Filters")
 
-    # Parquet files
-    parquet_files = sorted(glob.glob("data/*.parquet"))
-    if not parquet_files:
-        st.error("No Parquet files under data/*.parquet")
-        st.stop()
-    selected_file = st.selectbox("Parquet file", parquet_files)
+    # Parquet file selection (from run directory)
+    if len(parquet_list_a) == 1:
+        selected_file = parquet_list_a[0]
+    else:
+        selected_file = st.selectbox(
+            "Target File (Baseline A)",
+            parquet_list_a,
+            format_func=os.path.basename,
+            key="bbox_viewer_target_file",
+        )
 
 # DuckDB connection (no cache = 安定優先)
 con = duckdb.connect()
