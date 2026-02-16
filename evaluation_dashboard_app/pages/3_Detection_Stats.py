@@ -83,7 +83,7 @@ def create_view_eval_flat(con, target_file: str, view_name: str = "view_eval_fla
     WITH src AS (
         SELECT * FROM parquet_scan('{target_file}')
         UNION BY NAME
-        SELECT CAST(NULL AS VARCHAR) AS visibility
+        SELECT CAST(NULL AS VARCHAR) AS visibility, CAST(NULL AS VARCHAR) AS suite_name
         WHERE FALSE
     ),
     base AS (
@@ -139,6 +139,7 @@ def create_view_tpr_fpr(con, view_name: str = "view_tpr_fpr_by_class_dist_topic"
             distance_bin,
             bin_idx,
             coalesce(try(CAST(visibility AS VARCHAR)), 'not available') AS visibility,
+            coalesce(try(CAST(suite_name AS VARCHAR)), '') AS suite_name,
             COUNT(*) FILTER (WHERE source='GT' AND status IN ('TP','FN')) AS gt_total,
             COUNT(*) FILTER (WHERE source='GT' AND status='TP') AS tp_gt,
             COUNT(*) FILTER (WHERE source='EST' AND status IN ('TP','FP')) AS est_total,
@@ -146,7 +147,8 @@ def create_view_tpr_fpr(con, view_name: str = "view_tpr_fpr_by_class_dist_topic"
         FROM view_eval_flat
         GROUP BY
             t4dataset_id, topic_name, label, distance_bin, bin_idx,
-            coalesce(try(CAST(visibility AS VARCHAR)), 'not available')
+            coalesce(try(CAST(visibility AS VARCHAR)), 'not available'),
+            coalesce(try(CAST(suite_name AS VARCHAR)), '')
     )
     SELECT
         *,
@@ -179,15 +181,14 @@ def build_filter_clause(filters: dict,*, enable_dist_h: bool = True) -> str:
             label_escaped = str(filters['label']).replace("'", "''")
             conditions.append(f"label = '{label_escaped}'")
     
-    if filters.get('t4dataset_id'):
-        if isinstance(filters['t4dataset_id'], list) and len(filters['t4dataset_id']) > 0:
-            # Escape single quotes in IDs
-            ids_escaped = [str(id).replace("'", "''") for id in filters['t4dataset_id']]
-            ids_str = "', '".join(ids_escaped)
-            conditions.append(f"t4dataset_id IN ('{ids_str}')")
-        elif not isinstance(filters['t4dataset_id'], list) and filters['t4dataset_id'] != '__all__':
-            id_escaped = str(filters['t4dataset_id']).replace("'", "''")
-            conditions.append(f"t4dataset_id = '{id_escaped}'")
+    if filters.get('suites'):
+        if isinstance(filters['suites'], list) and len(filters['suites']) > 0:
+            suite_escaped = [str(s).replace("'", "''") for s in filters['suites']]
+            suite_str = "', '".join(suite_escaped)
+            conditions.append(f"COALESCE(CAST(suite_name AS VARCHAR), '') IN ('{suite_str}')")
+        elif not isinstance(filters['suites'], list) and filters['suites'] != '__all__':
+            s_escaped = str(filters['suites']).replace("'", "''")
+            conditions.append(f"COALESCE(CAST(suite_name AS VARCHAR), '') = '{s_escaped}'")
     
     if filters.get('visibility'):
         if isinstance(filters['visibility'], list) and len(filters['visibility']) > 0:
@@ -291,6 +292,7 @@ with st.sidebar:
                         distance_bin,
                         bin_idx,
                         coalesce(try(CAST(visibility AS VARCHAR)), 'not available') AS visibility,
+                        coalesce(try(CAST(suite_name AS VARCHAR)), '') AS suite_name,
                         COUNT(*) FILTER (WHERE source='GT' AND status IN ('TP','FN')) AS gt_total,
                         COUNT(*) FILTER (WHERE source='GT' AND status='TP') AS tp_gt,
                         COUNT(*) FILTER (WHERE source='EST' AND status IN ('TP','FP')) AS est_total,
@@ -298,7 +300,8 @@ with st.sidebar:
                     FROM view_eval_flat_comp
                     GROUP BY
                         t4dataset_id, topic_name, label, distance_bin, bin_idx,
-                        coalesce(try(CAST(visibility AS VARCHAR)), 'not available')
+                        coalesce(try(CAST(visibility AS VARCHAR)), 'not available'),
+                        coalesce(try(CAST(suite_name AS VARCHAR)), '')
                 )
                 SELECT
                     *,
@@ -346,17 +349,21 @@ with st.sidebar:
     else:
         selected_labels = []
     
-    # t4dataset_id selection
-    t4_ids = list_values(con, target_file, "t4dataset_id")
-    if t4_ids:
-        selected_t4_ids = st.multiselect(
-            "t4dataset_id(s)",
-            t4_ids,
-            default=t4_ids[:10] if len(t4_ids) > 10 else t4_ids,
-            key="t4dataset_ids"
+    # Suites selection (default: include all)
+    try:
+        suite_options = list_values(con, target_file, "COALESCE(CAST(suite_name AS VARCHAR), '')")
+    except Exception:
+        suite_options = []
+    if suite_options:
+        selected_suites = st.multiselect(
+            "Suites",
+            suite_options,
+            default=suite_options,
+            key="suites",
+            help="Filter by suite(s). Default: all included."
         )
     else:
-        selected_t4_ids = []
+        selected_suites = []
     
     # Visibility selection
     vis_options = list_values(con, target_file, "COALESCE(CAST(visibility AS VARCHAR), 'not available') AS visibility")
@@ -384,7 +391,7 @@ with st.sidebar:
 filters_base = {
     'topic_name': topic_name,
     'label': selected_labels,
-    't4dataset_id': selected_t4_ids,
+    'suites': selected_suites,
     'visibility': selected_visibility,
     'max_eval_range': max_eval_range
 }
@@ -392,7 +399,7 @@ filters_base = {
 filters_comp = {
     'topic_name': compared_topic_name,
     'label': selected_labels,
-    't4dataset_id': selected_t4_ids,
+    'suites': selected_suites,
     'visibility': selected_visibility,
     'max_eval_range': max_eval_range
 }
@@ -550,18 +557,6 @@ try:
         """
         df_status = con.execute(query_status).df()
 
-    st.write("**t4dataset Count Summary**")
-    if not df_summary.empty:
-        fig = px.bar(
-            df_summary,
-            x='series',
-            y='id_num',
-            title="t4dataset Count",
-            labels={'id_num': 'Count', 'series': 'File'}
-        )
-        st.plotly_chart(fig, width="stretch")
-    else:
-        st.info("No data available")
 
     if single_mode:
         st.write("**Status Count Table (label × status)**")
