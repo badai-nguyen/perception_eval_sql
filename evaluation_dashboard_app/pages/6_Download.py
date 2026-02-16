@@ -1525,22 +1525,30 @@ with tab4:
         except Exception:
             pass
 
-    btn_col1, btn_col2 = st.columns(2)
+    btn_col1, btn_col2, btn_col3 = st.columns(3)
     with btn_col1:
         run_eval_clicked = st.button(
-            "Run eval_result for all directories" if not only_generate_summary else "Generate Summary and Score CSV only",
+            "Run eval_result" if not only_generate_summary else "Generate Summary and Score CSV only",
             type="primary",
             key="run_eval_result"
         )
     with btn_col2:
         generate_parquet_clicked = st.button(
-            "Generate parquet from pkl",
+            "Generate parquet",
             key="generate_parquet_btn",
+            type="primary",
             disabled=not CATALOG_IO_AVAILABLE,
             help="Build scene_result.parquet from .pkl files in the evaluate path above (same as Run eval)." if CATALOG_IO_AVAILABLE else "Install perception_catalog_analyzer to enable.",
         )
-
-    if generate_parquet_clicked and CATALOG_IO_AVAILABLE:
+    with btn_col3:
+        generate_both_clicked = st.button(
+            "Generate both",
+            key="generate_both_btn",
+            type="primary",
+            disabled=not CATALOG_IO_AVAILABLE,
+            help="Generate both parquet and Summary.csv/Score.csv.",
+        )
+    if generate_parquet_clicked or generate_both_clicked and CATALOG_IO_AVAILABLE:
         resolved, err = resolve_under_data_root(eval_root, allow_missing=True)
         if err:
             st.error(f"Path is invalid: {err}. Use a path under the server data root.")
@@ -1558,23 +1566,58 @@ with tab4:
                         skip_log = []
                         def on_skip(path: str, reason: str):
                             skip_log.append((path, reason))
-                        with st.spinner("Building parquet from pkl (recursively)..."):
-                            parquet_path = pkl_archive_to_parquet(
-                                pkl_dir,
-                                on_skip=on_skip,
-                                project_id=project_id or None,
-                                job_id=st.session_state.job_id or None,
-                            )
+
+                        st.write(f"Processing {pkl_count} pkl files…")
+                        progress = st.progress(0)
+                        status_placeholder = st.empty()
+                        start_time = time.time()
+
+                        def _format_eta(sec: float) -> str:
+                            if sec is None or sec < 0 or not float("inf") > sec:
+                                return "—"
+                            m, s = divmod(int(round(sec)), 60)
+                            h, m = divmod(m, 60)
+                            if h > 0:
+                                return f"{h}h {m}m {s}s"
+                            if m > 0:
+                                return f"{m}m {s}s"
+                            return f"{s}s"
+
+                        def _update_parquet_progress(done: int, total: int):
+                            progress.progress(done / total if total else 1.0)
+                            elapsed = time.time() - start_time
+                            if done > 0 and done < total and elapsed > 0:
+                                rate = done / elapsed
+                                remaining_sec = (total - done) / rate
+                                eta_finish = datetime.now() + timedelta(seconds=remaining_sec)
+                                status_placeholder.caption(
+                                    f"**{done}/{total}** files · Elapsed: {_format_eta(elapsed)} · "
+                                    f"Est. remaining: {_format_eta(remaining_sec)} · Est. finish: **{eta_finish.strftime('%H:%M:%S')}**"
+                                )
+                            elif done >= total:
+                                status_placeholder.caption(f"**{total}/{total}** done in {_format_eta(elapsed)}.")
+                            else:
+                                status_placeholder.caption(f"**{done}/{total}** files · Elapsed: {_format_eta(elapsed)}")
+
+                        parquet_path = pkl_archive_to_parquet(
+                            pkl_dir,
+                            on_skip=on_skip,
+                            on_progress=_update_parquet_progress,
+                            project_id=project_id or None,
+                            job_id=st.session_state.job_id or None,
+                        )
+                        progress.progress(1.0)
+                        _update_parquet_progress(pkl_count, pkl_count)
                         st.success(f"Saved: `{parquet_path}`")
                         if skip_log:
                             with st.expander("Skipped pkl files"):
                                 for path, reason in skip_log:
-                                    st.text(f"{os.path.basename(path)}: {reason}")
+                                    st.text(f"{os.fspath(path)}: {reason}")
                     except Exception as e:
                         st.error(f"Parquet generation failed: {e}")
                         st.exception(e)
 
-    if run_eval_clicked:
+    if run_eval_clicked or generate_both_clicked:
         import pandas as pd
         resolved_eval_root, eval_path_err = resolve_under_data_root(eval_root, allow_missing=True)
         if eval_path_err:

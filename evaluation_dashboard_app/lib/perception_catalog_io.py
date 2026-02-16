@@ -275,6 +275,7 @@ def build_scene_dataframe_from_pkl_dir(
     skip_empty: bool = True,
     skip_bad_dtype: bool = True,
     on_skip: Callable[[str, str], None] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
     project_id: str | None = None,
     job_id: str | None = None,
 ) -> SceneDataFrame:
@@ -287,6 +288,7 @@ def build_scene_dataframe_from_pkl_dir(
         skip_empty: If True, skip files that yield an empty dataframe.
         skip_bad_dtype: If True, skip files where df.current["x_error"].dtype != "float64".
         on_skip: Optional callback (file_path, reason) when a file is skipped.
+        on_progress: Optional callback (done_count, total_count) after each file is processed.
         project_id: Optional project ID (e.g. from Download page) to fill when normalizing plain .pkl.
         job_id: Optional job ID (e.g. from Download page) to fill when normalizing plain .pkl.
 
@@ -301,8 +303,9 @@ def build_scene_dataframe_from_pkl_dir(
     if max_files is not None:
         pkl_files = pkl_files[:max_files]
 
+    total = len(pkl_files)
     df = SceneDataFrame(current=pd.DataFrame())
-    for pkl_file in pkl_files:
+    for i, pkl_file in enumerate(pkl_files):
         if str(pkl_file).lower().endswith(".pkl.z"):
             try:
                 data = joblib.load(pkl_file)
@@ -332,6 +335,8 @@ def build_scene_dataframe_from_pkl_dir(
         df = df.concatenate(df_)
         del df_
         gc.collect()
+        if on_progress:
+            on_progress(i + 1, total)
     return df
 
 
@@ -343,6 +348,7 @@ def pkl_archive_to_parquet(
     skip_empty: bool = True,
     skip_bad_dtype: bool = True,
     on_skip: Callable[[str, str], None] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
     project_id: str | None = None,
     job_id: str | None = None,
 ) -> str:
@@ -356,6 +362,7 @@ def pkl_archive_to_parquet(
         skip_empty: Skip files that yield empty dataframe.
         skip_bad_dtype: Skip files where x_error is not float64.
         on_skip: Optional callback (file_path, reason) when a file is skipped.
+        on_progress: Optional callback (done_count, total_count) after each file is processed.
         project_id: Optional project ID to fill when normalizing plain .pkl (e.g. from Download page).
         job_id: Optional job ID to fill when normalizing plain .pkl (e.g. from Download page).
 
@@ -370,6 +377,7 @@ def pkl_archive_to_parquet(
         skip_empty=skip_empty,
         skip_bad_dtype=skip_bad_dtype,
         on_skip=on_skip,
+        on_progress=on_progress,
         project_id=project_id,
         job_id=job_id,
     )
