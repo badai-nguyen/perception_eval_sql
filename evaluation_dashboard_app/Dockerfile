@@ -24,6 +24,7 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel packagi
  && pipx ensurepath
 ENV PATH="/root/.local/bin:${PATH}"
 
+RUN git config --global url."ssh://git@github.com/".insteadOf "https://github.com/"
 # Install private deps using SSH secret, combine to minimize layers, avoid repetition
 RUN --mount=type=secret,id=ssh,dst=/tmp/ssh_key \
     mkdir -p /root/.ssh \
