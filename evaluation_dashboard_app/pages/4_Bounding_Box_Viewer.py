@@ -120,25 +120,13 @@ if selected_scenario is not None:
 if scene_where == "1=1":
     scene_params = [selected_file]
 
-# --- t4dataset_id (with suite/scenario filter)
-t4_ids = con.execute(
-    f"SELECT DISTINCT t4dataset_id AS v FROM parquet_scan(?) WHERE {scene_where} ORDER BY v",
-    scene_params
-).df()["v"].dropna().tolist()
-if not t4_ids:
-    st.error("No t4dataset_id in file for the selected suite/scenario filters.")
-    st.stop()
-
-with st.sidebar:
-    selected_t4 = st.selectbox("t4dataset_id", t4_ids)
-
 # --- topic_name（単一選択）
 topic_names = con.execute(
-    f"SELECT DISTINCT topic_name AS v FROM parquet_scan(?) WHERE {scene_where} AND t4dataset_id=? ORDER BY v",
-    scene_params + [selected_t4]
+    f"SELECT DISTINCT topic_name AS v FROM parquet_scan(?) WHERE {scene_where} ORDER BY v",
+    scene_params
 ).df()["v"].dropna().tolist()
 if not topic_names:
-    st.warning("No topic_name for selected t4dataset_id")
+    st.warning("No topic_name for selected scene.")
     st.stop()
 
 with st.sidebar:
@@ -146,11 +134,11 @@ with st.sidebar:
 
 # --- label（複数選択）
 labels = con.execute(
-    f"SELECT DISTINCT label AS v FROM parquet_scan(?) WHERE {scene_where} AND t4dataset_id=? ORDER BY v",
-    scene_params + [selected_t4]
+    f"SELECT DISTINCT label AS v FROM parquet_scan(?) WHERE {scene_where} AND topic_name=? ORDER BY v",
+    scene_params + [selected_topic]
 ).df()["v"].dropna().tolist()
 if not labels:
-    st.warning("No label for selected t4dataset_id")
+    st.warning("No label for selected topic.")
     st.stop()
 
 with st.sidebar:
@@ -160,8 +148,8 @@ with st.sidebar:
 selected_visibility = None
 if has_visibility:
     vis_list = con.execute(
-        f"SELECT DISTINCT COALESCE(visibility,'UNKNOWN') AS v FROM parquet_scan(?) WHERE {scene_where} AND t4dataset_id=? ORDER BY v",
-        scene_params + [selected_t4]
+        f"SELECT DISTINCT COALESCE(visibility,'UNKNOWN') AS v FROM parquet_scan(?) WHERE {scene_where} AND topic_name=? ORDER BY v",
+        scene_params + [selected_topic]
     ).df()["v"].tolist()
     with st.sidebar:
         if vis_list:
@@ -185,8 +173,8 @@ with st.sidebar:
 # ----------------------------
 # Build query safely & load data
 # ----------------------------
-where = [scene_where, "t4dataset_id = ?", "topic_name = ?"]  # topic_name は単一選択
-params = scene_params + [selected_t4, selected_topic]
+where = [scene_where, "topic_name = ?"]  # topic_name は単一選択
+params = scene_params + [selected_topic]
 
 # label IN (...)
 where.append(f"label IN ({','.join(['?']*len(selected_labels))})")
@@ -379,9 +367,10 @@ fig.add_trace(go.Scatter(
 ))
 
 fig.update_layout(
-    title=f"{os.path.basename(selected_file)} | t4dataset_id={selected_t4} | "
-          f"topic={selected_topic} | Frame {frame} "
-          f"| This frame: Total {total_records:,}, Valid {valid_records:,}",
+    title=(
+        f"{selected_scenario} <br>"
+        f"Frame {frame} | Total {total_records:,}, Valid {valid_records:,}"
+    ),
     xaxis=dict(scaleanchor="y", scaleratio=1, title="X [m]"),
     yaxis=dict(scaleanchor="x", scaleratio=1, title="Y [m]"),
     legend=dict(groupclick="togglegroup", title="Source / Status"),
