@@ -3,12 +3,47 @@ import streamlit as st
 import plotly.graph_objects as go
 import numpy as np
 import pandas as pd
-import glob
 import os
-from typing import Tuple
+from pathlib import Path
+from typing import Tuple, List
+
+from lib.path_utils import path_display
 
 st.set_page_config(layout="wide")
 st.title("Bounding Box Viewer")
+
+# =============================
+# Session state from Overview (run path)
+# =============================
+if "runA" not in st.session_state:
+    st.warning("Please load data from the **Overview** page first (select mode and run(s)).")
+    st.stop()
+
+runA = st.session_state["runA"]
+
+
+def list_parquets_in_run(run_path) -> List[str]:
+    """Return sorted list of absolute paths to .parquet files in the run directory."""
+    p = Path(run_path)
+    if not p.is_dir():
+        return []
+    return sorted([str(f.resolve()) for f in p.glob("*.parquet")])
+
+
+# Parquet files from the run designated on Overview
+parquet_list_a = list_parquets_in_run(runA["path"])
+if not parquet_list_a:
+    st.error(
+        f"No parquet files found in run directory: {path_display(runA['path'])}. "
+        "Add a .parquet file or generate one from the Download page."
+    )
+    st.stop()
+
+# ----------------------------
+# Loaded Runs (from Overview)
+# ----------------------------
+st.subheader("Loaded Runs")
+st.markdown(f"**Baseline (A):** `{path_display(runA['path'])}`")
 
 # ----------------------------
 # Sidebar (Filters)
@@ -16,12 +51,16 @@ st.title("Bounding Box Viewer")
 with st.sidebar:
     st.header("Filters")
 
-    # Parquet files
-    parquet_files = sorted(glob.glob("data/*.parquet"))
-    if not parquet_files:
-        st.error("No Parquet files under data/*.parquet")
-        st.stop()
-    selected_file = st.selectbox("Parquet file", parquet_files)
+    # Parquet file selection (from run directory)
+    if len(parquet_list_a) == 1:
+        selected_file = parquet_list_a[0]
+    else:
+        selected_file = st.selectbox(
+            "Target File (Baseline A)",
+            parquet_list_a,
+            format_func=os.path.basename,
+            key="bbox_viewer_target_file",
+        )
 
 # DuckDB connection (no cache = 安定優先)
 con = duckdb.connect()
@@ -29,26 +68,65 @@ con = duckdb.connect()
 # --- Columns (for visibility existence check)
 cols = con.execute("DESCRIBE SELECT * FROM parquet_scan(?)", [selected_file]).df()["column_name"].tolist()
 has_visibility = "visibility" in cols
+has_suite_name = "suite_name" in cols
+has_scenario_name = "scenario_name" in cols
 
-# --- t4dataset_id
-t4_ids = con.execute(
-    "SELECT DISTINCT t4dataset_id AS v FROM parquet_scan(?) ORDER BY v",
-    [selected_file]
-).df()["v"].dropna().tolist()
-if not t4_ids:
-    st.error("No t4dataset_id in file")
-    st.stop()
+# --- Scene selection: one suite + one scenario (when columns exist)
+scene_where = "1=1"
+scene_params: List[str] = [selected_file]
+
+if has_suite_name:
+    suite_list = con.execute(
+        "SELECT DISTINCT suite_name AS v FROM parquet_scan(?) WHERE suite_name IS NOT NULL ORDER BY v",
+        [selected_file]
+    ).df()["v"].dropna().astype(str).tolist()
+else:
+    suite_list = []
 
 with st.sidebar:
-    selected_t4 = st.selectbox("t4dataset_id", t4_ids)
+    selected_suite = None
+    selected_scenario = None
+    if suite_list:
+        selected_suite = st.selectbox(
+            "Suite name",
+            suite_list,
+            key="bbox_viewer_suite",
+        )
+    if has_scenario_name:
+        if selected_suite is not None:
+            scenario_list = con.execute(
+                "SELECT DISTINCT scenario_name AS v FROM parquet_scan(?) WHERE suite_name = ? AND scenario_name IS NOT NULL ORDER BY v",
+                [selected_file, selected_suite]
+            ).df()["v"].dropna().astype(str).tolist()
+        else:
+            scenario_list = con.execute(
+                "SELECT DISTINCT scenario_name AS v FROM parquet_scan(?) WHERE scenario_name IS NOT NULL ORDER BY v",
+                [selected_file]
+            ).df()["v"].dropna().astype(str).tolist()
+        if scenario_list:
+            selected_scenario = st.selectbox(
+                "Scenario name",
+                scenario_list,
+                key="bbox_viewer_scenario",
+            )
+
+# Build scene filter for queries (one scene = one suite + one scenario)
+if selected_suite is not None:
+    scene_where = "suite_name = ?"
+    scene_params = [selected_file, selected_suite]
+if selected_scenario is not None:
+    scene_where = scene_where + " AND scenario_name = ?" if scene_where != "1=1" else "scenario_name = ?"
+    scene_params = scene_params + [selected_scenario]
+if scene_where == "1=1":
+    scene_params = [selected_file]
 
 # --- topic_name（単一選択）
 topic_names = con.execute(
-    "SELECT DISTINCT topic_name AS v FROM parquet_scan(?) WHERE t4dataset_id=? ORDER BY v",
-    [selected_file, selected_t4]
+    f"SELECT DISTINCT topic_name AS v FROM parquet_scan(?) WHERE {scene_where} ORDER BY v",
+    scene_params
 ).df()["v"].dropna().tolist()
 if not topic_names:
-    st.warning("No topic_name for selected t4dataset_id")
+    st.warning("No topic_name for selected scene.")
     st.stop()
 
 with st.sidebar:
@@ -56,11 +134,11 @@ with st.sidebar:
 
 # --- label（複数選択）
 labels = con.execute(
-    "SELECT DISTINCT label AS v FROM parquet_scan(?) WHERE t4dataset_id=? ORDER BY v",
-    [selected_file, selected_t4]
+    f"SELECT DISTINCT label AS v FROM parquet_scan(?) WHERE {scene_where} AND topic_name=? ORDER BY v",
+    scene_params + [selected_topic]
 ).df()["v"].dropna().tolist()
 if not labels:
-    st.warning("No label for selected t4dataset_id")
+    st.warning("No label for selected topic.")
     st.stop()
 
 with st.sidebar:
@@ -70,8 +148,8 @@ with st.sidebar:
 selected_visibility = None
 if has_visibility:
     vis_list = con.execute(
-        "SELECT DISTINCT COALESCE(visibility,'UNKNOWN') AS v FROM parquet_scan(?) WHERE t4dataset_id=? ORDER BY v",
-        [selected_file, selected_t4]
+        f"SELECT DISTINCT COALESCE(visibility,'UNKNOWN') AS v FROM parquet_scan(?) WHERE {scene_where} AND topic_name=? ORDER BY v",
+        scene_params + [selected_topic]
     ).df()["v"].tolist()
     with st.sidebar:
         if vis_list:
@@ -95,8 +173,8 @@ with st.sidebar:
 # ----------------------------
 # Build query safely & load data
 # ----------------------------
-where = ["t4dataset_id = ?", "topic_name = ?"]  # topic_name は単一選択
-params = [selected_file, selected_t4, selected_topic]
+where = [scene_where, "topic_name = ?"]  # topic_name は単一選択
+params = scene_params + [selected_topic]
 
 # label IN (...)
 where.append(f"label IN ({','.join(['?']*len(selected_labels))})")
@@ -137,9 +215,14 @@ color_map = {
 def get_color(source, status): return color_map.get((source, status), "#999999")
 
 # ----------------------------
-# Frame slider + stats
+# Frame slider
 # ----------------------------
-frame = st.slider("Frame index", int(df.frame_index.min()), int(df.frame_index.max()), step=1)
+frame = st.slider(
+    "Frame index",
+    int(df.frame_index.min()),
+    int(df.frame_index.max()),
+    step=1,
+)
 df_frame = df[df.frame_index == frame]
 
 total_records = len(df_frame)
@@ -284,9 +367,10 @@ fig.add_trace(go.Scatter(
 ))
 
 fig.update_layout(
-    title=f"{os.path.basename(selected_file)} | t4dataset_id={selected_t4} | "
-          f"topic={selected_topic} | Frame {frame} "
-          f"| This frame: Total {total_records:,}, Valid {valid_records:,}",
+    title=(
+        f"{selected_scenario} <br>"
+        f"Frame {frame} | Total {total_records:,}, Valid {valid_records:,}"
+    ),
     xaxis=dict(scaleanchor="y", scaleratio=1, title="X [m]"),
     yaxis=dict(scaleanchor="x", scaleratio=1, title="Y [m]"),
     legend=dict(groupclick="togglegroup", title="Source / Status"),
@@ -305,10 +389,7 @@ frame_stats = (
       .unstack(fill_value=0)
       .reset_index()
 )
-# --- DEBUG: Show intermediate frame_stats table ---
-# Check intermediate table for missing columns or frame gaps
-st.write("### [Debug] frame_stats table")
-st.dataframe(frame_stats)
+
 
 
 # 比率 (TP率 = TP / (TP+FN))

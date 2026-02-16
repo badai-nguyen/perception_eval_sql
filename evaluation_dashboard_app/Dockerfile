@@ -34,6 +34,7 @@ RUN --mount=type=secret,id=ssh,dst=/tmp/ssh_key \
  && python3 -m pip install --no-cache-dir "git+ssh://git@github.com/tier4/webauto-auth-py.git" \
  && pipx install "git+ssh://git@github.com/tier4/v_and_v_util.git" \
  && python3 -m pip install --no-cache-dir "git+ssh://git@github.com/tier4/autoware_perception_evaluation.git" \
+ && python3 -m pip install --no-cache-dir "git+ssh://git@github.com/tier4/perception_catalog_analyzer.git" \
  && rm -rf /root/.ssh # Clean up private key ASAP for security
 
 # Install public dependencies (after SSH deps so SSH failures surface fast)
