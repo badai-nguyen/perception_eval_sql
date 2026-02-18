@@ -70,11 +70,23 @@ else:
     default_high = min(tp_max_val, 100.0)
     default_range = (default_low, default_high) if default_low <= default_high else (tp_min_val, tp_max_val)
 
+# Handle case where min and max are equal (e.g., all TP values are the same)
+if tp_min_val == tp_max_val:
+    # Add a small epsilon so slider is not degenerate
+    epsilon = 0.01 if tp_min_val != 0 else 1.0
+    slider_min = tp_min_val - epsilon
+    slider_max = tp_max_val + epsilon
+    slider_default = (tp_min_val, tp_max_val)
+else:
+    slider_min = tp_min_val
+    slider_max = tp_max_val
+    slider_default = default_range
+
 tp_min, tp_max = st.sidebar.slider(
     "TP delta range (%)" if use_delta else "TP range (%)",
-    tp_min_val,
-    tp_max_val,
-    default_range,
+    min_value=slider_min,
+    max_value=slider_max,
+    value=slider_default,
 )
 clip_vel = st.sidebar.checkbox("Clip velocity outliers", value=True)
 
