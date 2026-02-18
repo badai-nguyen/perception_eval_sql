@@ -1282,7 +1282,7 @@ with tab1:
             
             # Suggest next step if download succeeded
             if download_successful:
-                st.info("🎉 Download complete! To generate the final summary CSV files, go to the **'Eval Results (per directory)'** tab and run the evaluation.")
+                st.info("🎉 Download complete! To generate the final summary CSV files, go to the **'Eval Results'** tab and run the evaluation.")
                         
         except Exception as e:
             st.error(f"❌ Error: {str(e)}")
@@ -1439,14 +1439,59 @@ with tab3:
 
 
 with tab4:
-    st.header("Eval Results (per directory)")
+    st.header("Eval Results")
 
     eval_root = st.text_input(
         "Root directory to evaluate",
         value=get_config_value("eval_root", output_path),
-        help="Directory containing downloaded scenario results (must be under the server data root)",
+        help="Directory containing downloaded scenario results (must be under the server data root). Uploaded files are also saved here.",
     )
     set_config_value("eval_root", eval_root)
+
+    # --- Upload local file (Summary CSV / Score CSV / Parquet) into the root directory above ---
+    with st.expander("📤 Upload local file (Summary.csv, Score.csv, or parquet)", expanded=False):
+        st.caption(
+            "Upload Summary CSV, Score CSV, or parquet file(s). They will be saved into the **Root directory to evaluate** above so the dashboard can use them (Overview, Detection Stats, Bounding Box Viewer)."
+        )
+        uploaded_files = st.file_uploader(
+            "Choose file(s)",
+            type=["csv", "parquet"],
+            accept_multiple_files=True,
+            key="tab4_upload_local",
+            help="Files are saved into the root directory to evaluate (above).",
+        )
+        if st.button("Save uploaded file(s) to root directory", key="tab4_upload_btn"):
+            if not uploaded_files:
+                st.warning("Please select at least one file to upload.")
+            elif not eval_root or not str(eval_root).strip():
+                st.warning("Please enter Root directory to evaluate above.")
+            else:
+                resolved, err = resolve_under_data_root(eval_root.strip(), allow_create=True)
+                if err:
+                    st.error(f"Cannot use that path: {err}. Use a path under the server data root.")
+                else:
+                    try:
+                        target_dir = Path(resolved)
+                        target_dir.mkdir(parents=True, exist_ok=True)
+                        saved = []
+                        for up in uploaded_files:
+                            name_lower = (up.name or "").lower()
+                            if name_lower == "summary.csv" or ("summary" in name_lower and name_lower.endswith(".csv")):
+                                out_name = "Summary.csv"
+                            elif name_lower == "score.csv" or ("score" in name_lower and name_lower.endswith(".csv")):
+                                out_name = "Score.csv"
+                            elif name_lower.endswith(".parquet"):
+                                out_name = up.name
+                            else:
+                                out_name = up.name
+                            out_path = target_dir / out_name
+                            with open(out_path, "wb") as f:
+                                f.write(up.getvalue())
+                            saved.append(out_name)
+                        st.success(f"Saved {len(saved)} file(s) to **{target_dir}**: {', '.join(saved)}. You can use this run in Overview and other pages.")
+                    except Exception as e:
+                        st.error(f"Failed to save: {e}")
+                        st.exception(e)
 
     col1, col2, col3 = st.columns(3)
     with col1:
