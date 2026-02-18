@@ -263,8 +263,8 @@ if len(files_to_load) == 1:
 if "frame_index" in df.columns and not np.issubdtype(df["frame_index"].dtype, np.integer):
     df["frame_index"] = df["frame_index"].astype("Int64").fillna(0).astype(int)
 
-# For downstream stats (TP/FN, TPR, FN rate), use single run when both are shown to avoid mixing
-df_stats = df[df["run"] == "A"] if len(files_to_load) > 1 else df
+# Use full df for stats; when both runs are shown, stats are computed per run and displayed side by side
+df_stats = df
 
 # ----------------------------
 # Color map
@@ -442,10 +442,11 @@ else:
 # === Frame別 TP/FN カウントと比率 ===
 st.markdown("## 📈 Detection Stability over Frames")
 
-# TP/FN集計 (single run when viewing both, to avoid mixing)
+# TP/FN per frame (per run when both A and B are loaded)
+groupby_cols = ["frame_index", "run", "status"] if len(files_to_load) > 1 else ["frame_index", "status"]
 frame_stats = (
     df_stats.query("source == 'GT' and status in ['TP', 'FN']")
-      .groupby(["frame_index", "status"])
+      .groupby(groupby_cols)
       .size()
       .unstack(fill_value=0)
       .reset_index()
@@ -466,15 +467,30 @@ frame_stats["TPR"] = np.where(
 
 # Plotlyで折れ線プロット
 import plotly.express as px
-# --- 時系列グラフ ---
-fig_tpr = px.line(
-    frame_stats,
-    x="frame_index",
-    y=["TP", "FN"],
-    title="TP / FN Counts per Frame",
-    labels={"value": "Count", "frame_index": "Frame Index", "variable": "Status"},
-)
-fig_tpr.update_layout(height=400, legend_title="Status")
+# --- 時系列グラフ (melt so we can color by run when both A and B) ---
+id_vars = ["frame_index", "run"] if "run" in frame_stats.columns else ["frame_index"]
+value_vars = [c for c in ["TP", "FN"] if c in frame_stats.columns]
+frame_stats_melt = frame_stats.melt(id_vars=id_vars, value_vars=value_vars, var_name="Status", value_name="Count")
+if "run" in frame_stats_melt.columns:
+    fig_tpr = px.line(
+        frame_stats_melt,
+        x="frame_index",
+        y="Count",
+        color="run",
+        line_dash="Status",
+        title="TP / FN Counts per Frame (A vs B)",
+        labels={"Count": "Count", "frame_index": "Frame Index"},
+    )
+else:
+    fig_tpr = px.line(
+        frame_stats_melt,
+        x="frame_index",
+        y="Count",
+        color="Status",
+        title="TP / FN Counts per Frame",
+        labels={"Count": "Count", "frame_index": "Frame Index", "variable": "Status"},
+    )
+fig_tpr.update_layout(height=400, legend_title="Run / Status" if "run" in frame_stats_melt.columns else "Status")
 
 # --- 現在Frameに縦破線を追加 ---
 fig_tpr.add_vline(
@@ -486,14 +502,24 @@ fig_tpr.add_vline(
 
 st.plotly_chart(fig_tpr, width="stretch")
 
-# TPR比率の推移を別グラフで
-fig_ratio = px.line(
-    frame_stats,
-    x="frame_index",
-    y="TPR",
-    title="True Positive Rate (TPR) per Frame",
-    labels={"TPR": "True Positive Rate", "frame_index": "Frame Index"},
-)
+# TPR比率の推移を別グラフで (side by side when both runs)
+if "run" in frame_stats.columns:
+    fig_ratio = px.line(
+        frame_stats,
+        x="frame_index",
+        y="TPR",
+        color="run",
+        title="True Positive Rate (TPR) per Frame (A vs B)",
+        labels={"TPR": "True Positive Rate", "frame_index": "Frame Index"},
+    )
+else:
+    fig_ratio = px.line(
+        frame_stats,
+        x="frame_index",
+        y="TPR",
+        title="True Positive Rate (TPR) per Frame",
+        labels={"TPR": "True Positive Rate", "frame_index": "Frame Index"},
+    )
 fig_ratio.update_yaxes(range=[0, 1])
 fig_ratio.add_vline(
     x=frame,
@@ -506,10 +532,11 @@ st.plotly_chart(fig_ratio, width="stretch")
 # === Worst-performing objects by FN rate ===
 st.markdown("## 🚨 Objects with High FN Rate (GT-based)")
 
-# uuid + label ごとにTP/FNをカウント
+# uuid + label (and run when both) ごとにTP/FNをカウント
+groupby_uuid = ["uuid", "label", "run"] if len(files_to_load) > 1 else ["uuid", "label"]
 uuid_perf = (
     df_stats.query("source == 'GT' and status in ['TP','FN']")
-      .groupby(["uuid", "label"])["status"]
+      .groupby(groupby_uuid)["status"]
       .value_counts()
       .unstack(fill_value=0)
       .reset_index()
@@ -529,20 +556,41 @@ uuid_perf = uuid_perf[uuid_perf["total"] > 0]
 # FN率でソート
 uuid_perf_sorted = uuid_perf.sort_values("FN_rate", ascending=False)
 
-# 表示
+# 表示 (side by side when both runs)
 if not uuid_perf_sorted.empty:
-    st.dataframe(
-        uuid_perf_sorted[["uuid", "label", "TP", "FN", "total", "FN_rate"]]
-            .head(30)
-            .style.format({"FN_rate": "{:.2%}"})
-    )
+    display_cols = ["uuid", "label", "TP", "FN", "total", "FN_rate"]
+    if "run" not in uuid_perf_sorted.columns:
+        display_cols = [c for c in display_cols if c != "run"]
+    if len(files_to_load) > 1 and "run" in uuid_perf_sorted.columns:
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.markdown("**Run A**")
+            df_a = uuid_perf_sorted[uuid_perf_sorted["run"] == "A"].head(30)
+            if not df_a.empty:
+                st.dataframe(df_a[display_cols].style.format({"FN_rate": "{:.2%}"}))
+            else:
+                st.info("No data for run A.")
+        with col_b:
+            st.markdown("**Run B**")
+            df_b = uuid_perf_sorted[uuid_perf_sorted["run"] == "B"].head(30)
+            if not df_b.empty:
+                st.dataframe(df_b[display_cols].style.format({"FN_rate": "{:.2%}"}))
+            else:
+                st.info("No data for run B.")
+    else:
+        st.dataframe(
+            uuid_perf_sorted[display_cols]
+                .head(30)
+                .style.format({"FN_rate": "{:.2%}"})
+        )
 else:
     st.info("No GT objects with TP or FN were found.")
 
 st.markdown("### 🔍 Inspect a Specific GT Object")
 
 if not uuid_perf_sorted.empty:
-    bad_uuid = st.selectbox("Select UUID to visualize", uuid_perf_sorted["uuid"].head(50))
+    uuid_options = uuid_perf_sorted["uuid"].drop_duplicates().head(50).tolist()
+    bad_uuid = st.selectbox("Select UUID to visualize", uuid_options)
 else:
     bad_uuid = None
 
@@ -554,23 +602,19 @@ if bad_uuid is not None:
 else:
     uuid_traj = pd.DataFrame()
 
-if not uuid_traj.empty:
-    # --- marker symbol by status ---
-    symbol_map = {"TP": "circle", "FN": "x", "FP": "triangle-up"}
-    uuid_traj["marker_symbol"] = uuid_traj["status"].map(symbol_map).fillna("circle")
-
+def _draw_trajectory_figure(traj: pd.DataFrame, title: str) -> go.Figure:
+    """Build trajectory figure for one run's data."""
     fig_traj = go.Figure()
-
-    # --- 全点を線で繋ぐ ---
+    symbol_map = {"TP": "circle", "FN": "x", "FP": "triangle-up"}
+    traj = traj.copy()
+    traj["marker_symbol"] = traj["status"].map(symbol_map).fillna("circle")
     fig_traj.add_trace(go.Scatter(
-        x=uuid_traj["x"], y=uuid_traj["y"],
+        x=traj["x"], y=traj["y"],
         mode="lines",
         line=dict(color="gray", width=1),
-        name=f"Trajectory ({uuid_traj['label'].iloc[0]})"
+        name=f"Trajectory ({traj['label'].iloc[0]})"
     ))
-
-    # --- 各点（TP/FN別symbol） ---
-    for status, group in uuid_traj.groupby("status"):
+    for status, group in traj.groupby("status"):
         fig_traj.add_trace(go.Scatter(
             x=group["x"], y=group["y"],
             mode="markers",
@@ -582,14 +626,33 @@ if not uuid_traj.empty:
             ),
             name=f"{status} points"
         ))
-
     fig_traj.update_layout(
-        title=f"Trajectory of UUID {bad_uuid} ({uuid_traj['label'].iloc[0]})",
+        title=title,
         xaxis=dict(title="X [m]", scaleanchor="y", scaleratio=1),
         yaxis=dict(title="Y [m]", scaleanchor="x", scaleratio=1),
         height=600,
         legend=dict(title="Status")
     )
-    st.plotly_chart(fig_traj, width="stretch")
+    return fig_traj
+
+if not uuid_traj.empty:
+    show_both_runs = len(files_to_load) > 1 and "run" in uuid_traj.columns
+    if show_both_runs:
+        col_ta, col_tb = st.columns(2)
+        label_str = uuid_traj["label"].iloc[0]
+        with col_ta:
+            traj_a = uuid_traj[uuid_traj["run"] == "A"]
+            if not traj_a.empty:
+                st.plotly_chart(_draw_trajectory_figure(traj_a, f"Run A: UUID {bad_uuid} ({label_str})"), use_container_width=True)
+            else:
+                st.info("No trajectory for this UUID in run A.")
+        with col_tb:
+            traj_b = uuid_traj[uuid_traj["run"] == "B"]
+            if not traj_b.empty:
+                st.plotly_chart(_draw_trajectory_figure(traj_b, f"Run B: UUID {bad_uuid} ({label_str})"), use_container_width=True)
+            else:
+                st.info("No trajectory for this UUID in run B.")
+    else:
+        st.plotly_chart(_draw_trajectory_figure(uuid_traj, f"Trajectory of UUID {bad_uuid} ({uuid_traj['label'].iloc[0]})"), width="stretch")
 else:
     st.info("No GT trajectory data for the selected UUID.")

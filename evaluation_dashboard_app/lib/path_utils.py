@@ -99,7 +99,7 @@ def list_run_directories() -> List[Path]:
 
 
 def get_run_info(run_path: Path) -> dict:
-    """Return dict with name, path, size_bytes, mtime, has_summary, has_score."""
+    """Return dict with name, path, size_bytes, mtime, has_summary, has_score, has_parquet."""
     size_bytes = 0
     try:
         for entry in run_path.rglob("*"):
@@ -116,6 +116,7 @@ def get_run_info(run_path: Path) -> dict:
         mtime = 0
     has_summary = (run_path / "Summary.csv").exists()
     has_score = (run_path / "Score.csv").exists()
+    has_parquet = any(run_path.glob("*.parquet"))
     return {
         "name": run_path.name,
         "path": run_path,
@@ -123,6 +124,7 @@ def get_run_info(run_path: Path) -> dict:
         "mtime": mtime,
         "has_summary": has_summary,
         "has_score": has_score,
+        "has_parquet": has_parquet,
     }
 
 

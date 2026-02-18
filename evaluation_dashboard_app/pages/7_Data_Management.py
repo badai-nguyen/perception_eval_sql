@@ -43,6 +43,7 @@ for run_path in run_dirs:
         "Modified": datetime.fromtimestamp(info["mtime"]).strftime("%Y-%m-%d %H:%M") if info["mtime"] else "—",
         "Summary.csv": "✓" if info["has_summary"] else "—",
         "Score.csv": "✓" if info["has_score"] else "—",
+        "Parquet": "✓" if info["has_parquet"] else "—",
     })
 
 st.subheader("Runs")
