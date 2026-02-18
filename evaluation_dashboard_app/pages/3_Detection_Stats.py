@@ -244,7 +244,7 @@ with st.sidebar:
         target_file = parquet_list_a[0]
     else:
         target_file = st.selectbox(
-            "Target File (Baseline A)",
+            "Baseline (A) File",
             parquet_list_a,
             format_func=lambda p: os.path.basename(p),
             key="target_file"
@@ -255,7 +255,7 @@ with st.sidebar:
             compared_target_file = parquet_list_b[0]
         else:
             compared_target_file = st.selectbox(
-                "Compared File (Candidate B)",
+                "Candidate (B) File",
                 parquet_list_b,
                 format_func=lambda p: os.path.basename(p),
                 index=min(1, len(parquet_list_b) - 1),
@@ -267,12 +267,12 @@ with st.sidebar:
     # Validate parquet files are readable before creating views
     ok, msg = validate_parquet_file(con, target_file)
     if not ok:
-        st.error(f"**Target file** cannot be read: {msg}")
+        st.error(f"**Baseline (A) file** cannot be read: {msg}")
         st.stop()
     if not single_mode:
         ok_comp, msg_comp = validate_parquet_file(con, compared_target_file)
         if not ok_comp:
-            st.error(f"**Compared file** cannot be read: {msg_comp}")
+            st.error(f"**Candidate (B) file** cannot be read: {msg_comp}")
             st.stop()
     
     # Create views
@@ -328,7 +328,7 @@ with st.sidebar:
         compared_topics = list_values(con, compared_target_file, "topic_name")
         if compared_topics:
             compared_topic_name = st.selectbox(
-                "Compared Topic Name",
+                "Candidate (B) Topic Name",
                 ["__all__"] + compared_topics,
                 key="compared_topic_name"
             )
@@ -412,13 +412,13 @@ if st.checkbox("Debug: Inspect Parquet (Both Files)" if not single_mode else "De
     if single_mode:
         col_left, _ = st.columns([1, 1])
         cols_used = [col_left]
-        file_labels = [("Target File", target_file)]
+        file_labels = [("Baseline (A) File", target_file)]
     else:
         col_left, col_right = st.columns(2)
         cols_used = [col_left, col_right]
         file_labels = [
-            ("Target File", target_file),
-            ("Compared File", compared_target_file)
+            ("Baseline (A) File", target_file),
+            ("Candidate (B) File", compared_target_file)
         ]
     schema_results = []
     for col, (label, file_path) in zip(cols_used, file_labels):
@@ -546,11 +546,11 @@ try:
         """
         df_summary = con.execute(query_base).df()
         query_status = """
-        SELECT 'Target' AS dataset, label, status, COUNT(*) AS num
+        SELECT 'Baseline (A)' AS dataset, label, status, COUNT(*) AS num
         FROM view_eval_flat
         GROUP BY label, status
         UNION ALL
-        SELECT 'Compared' AS dataset, label, status, COUNT(*) AS num
+        SELECT 'Candidate (B)' AS dataset, label, status, COUNT(*) AS num
         FROM view_eval_flat_comp
         GROUP BY label, status
         ORDER BY dataset, label, status
@@ -576,9 +576,9 @@ try:
         else:
             st.info("No status count data available")
     else:
-        st.write("**Status Count Table (rows=label, cols=Target/Compared × Status)**")
+        st.write("**Status Count Table (rows=label, cols=Baseline (A) / Candidate (B) × Status)**")
         st.markdown("""
-        Status count for both datasets. Columns are in the form "Target TP", "Target FP", etc., to allow easy comparison.
+        Status count for both datasets. Columns are in the form "Baseline (A) TP", "Baseline (A) FP", etc., to allow easy comparison.
         """)
         if not df_status.empty:
             df_status_wide = df_status.pivot_table(index='label', columns=['dataset', 'status'], values='num', fill_value=0)
@@ -593,7 +593,7 @@ try:
                 barmode="stack",
                 facet_col="dataset",
                 title="Status Distribution per Label (by File)",
-                category_orders={"dataset": ["Target", "Compared"]},
+                category_orders={"dataset": ["Baseline (A)", "Candidate (B)"]},
                 labels={"num": "Count", "label": "Label", "status": "Status"}
             )
             st.plotly_chart(fig2, width="stretch")
@@ -643,7 +643,7 @@ if single_mode:
 else:
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown("**Target Data**")
+        st.markdown("**Baseline (A) Data**")
         try:
             filter_clause = build_filter_clause(filters_base)
             query = f"""
@@ -666,7 +666,7 @@ else:
                     df_tpr_base,
                     x='label',
                     y='tpr',
-                    title=f"Total TP rate within {max_eval_range} [m] with target data",
+                    title=f"Total TP rate within {max_eval_range} [m] with Baseline (A) data",
                     labels={'tpr': 'TP Rate', 'label': 'Label'}
                 )
                 fig.update_layout(yaxis_range=[0, 1.2])
@@ -676,7 +676,7 @@ else:
         except Exception as e:
             st.error(f"Error: {e}")
     with col2:
-        st.markdown("**Compared Data**")
+        st.markdown("**Candidate (B) Data**")
         try:
             filter_clause = build_filter_clause(filters_comp)
             query = f"""
@@ -699,7 +699,7 @@ else:
                     df_tpr_comp,
                     x='label',
                     y='tpr',
-                    title=f"Total TP rate within {max_eval_range} [m] with compared data",
+                    title=f"Total TP rate within {max_eval_range} [m] with Candidate (B) data",
                     labels={'tpr': 'TP Rate', 'label': 'Label'}
                 )
                 fig.update_layout(yaxis_range=[0, 1.2])
@@ -780,13 +780,13 @@ try:
             fig.add_trace(go.Bar(
                 x=df_tpr_dist['distance_bin'],
                 y=df_tpr_dist['tp_rate_before'],
-                name='TP Rate Before',
+                name='TP Rate Baseline (A)',
                 marker_color='lightblue'
             ))
             fig.add_trace(go.Bar(
                 x=df_tpr_dist['distance_bin'],
                 y=df_tpr_dist['tp_rate_after'],
-                name='TP Rate After',
+                name='TP Rate Candidate (B)',
                 marker_color='lightcoral'
             ))
             fig.add_trace(go.Bar(
@@ -876,13 +876,13 @@ try:
             fig.add_trace(go.Bar(
                 x=df_fpr_dist['distance_bin'],
                 y=df_fpr_dist['fp_rate_before'],
-                name='FP Rate Before',
+                name='FP Rate Baseline (A)',
                 marker_color='lightblue'
             ))
             fig.add_trace(go.Bar(
                 x=df_fpr_dist['distance_bin'],
                 y=df_fpr_dist['fp_rate_after'],
-                name='FP Rate After',
+                name='FP Rate Candidate (B)',
                 marker_color='lightcoral'
             ))
             fig.add_trace(go.Bar(
@@ -1037,7 +1037,7 @@ else:
         filter_clause_comp_err = build_filter_clause(filters_comp)
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("**Target File Mean Error**")
+            st.markdown("**Baseline (A) Mean Error**")
             try:
                 query = f"""
                 SELECT
@@ -1078,7 +1078,7 @@ else:
                         marker_color='lightgreen'
                     ))
                     fig.update_layout(
-                        title=f"TargetFile Mean Error within {max_eval_range} [m]",
+                        title=f"Baseline (A) Mean Error within {max_eval_range} [m]",
                         xaxis_title="Label",
                         yaxis_title="Error [m] or [rad]",
                         barmode='group'
@@ -1089,7 +1089,7 @@ else:
             except Exception as e:
                 st.error(f"Error: {e}")
         with col2:
-            st.markdown("**Compared File Mean Error**")
+            st.markdown("**Candidate (B) Mean Error**")
             try:
                 query = f"""
                 SELECT
@@ -1124,7 +1124,7 @@ else:
                         marker_color='lightgreen'
                     ))
                     fig.update_layout(
-                        title=f"ComparedFile Mean Error within {max_eval_range} [m]",
+                        title=f"Candidate (B) Mean Error within {max_eval_range} [m]",
                         xaxis_title="Label",
                         yaxis_title="Error [m] or [rad]",
                         barmode='group'
@@ -1138,7 +1138,7 @@ else:
         # =============================
         # Panel 7: Error Difference (compare mode only)
         # =============================
-        st.subheader("Difference of mean absolute error (comp - target)")
+        st.subheader("Difference of mean absolute error (Candidate (B) − Baseline (A))")
         try:
             query = f"""
             WITH topic_a AS (
@@ -1192,7 +1192,7 @@ else:
                     marker_color='lightgreen'
                 ))
                 fig.update_layout(
-                    title=f"Difference of mean absolute error within {max_eval_range} [m] (comp - target)",
+                    title=f"Difference of mean absolute error within {max_eval_range} [m] (Candidate (B) − Baseline (A))",
                     xaxis_title="Label",
                     yaxis_title="Error Difference [m] or [rad]",
                     barmode='group'
