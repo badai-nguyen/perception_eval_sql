@@ -1,17 +1,24 @@
 """
-Parquet Debug page: inspect format and contents of parquet and PKL files.
+Parquet Debug page: inspect format and contents of parquet, PKL, and result.json files.
 """
 import duckdb
+import json
 import pickle
+import re
 import streamlit as st
 import pandas as pd
-import glob
 import os
 import pathlib
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    import plotly.graph_objects as go
+    HAS_PLOTLY = True
+except ImportError:
+    HAS_PLOTLY = False
 
 st.set_page_config(layout="wide", page_title="Parquet & PKL Debug")
-st.title("Parquet & PKL File Inspector")
+st.title("Parquet & PKL & result.json File Inspector")
 
 # =============================
 # DuckDB
@@ -185,12 +192,176 @@ def load_pkl_file(path: str) -> Any:
     with open(path, "rb") as f:
         return pickle.load(f)
 
+
+# =============================
+# result.json (TLR / JSONL) helpers
+# =============================
+def debug_result_json_lines(file_path: str, first_n: int = 5, last_n: int = 5) -> dict:
+    """
+    Debug a result.json file (JSONL: one JSON object per line).
+    Returns dict with: total_lines, first_lines_detail, last_lines_finalscore, errors.
+    """
+    out = {
+        "total_lines": 0,
+        "first_lines_detail": [],
+        "last_lines_finalscore": [],
+        "errors": [],
+    }
+    if not os.path.exists(file_path):
+        out["errors"].append(f"File not found: {file_path}")
+        return out
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            lines = [line for line in f.readlines() if line.strip()]
+    except Exception as e:
+        out["errors"].append(str(e))
+        return out
+    out["total_lines"] = len(lines)
+    # First N lines: keys, Frame, criteria*, criteria6/PassFail/Info, Result/Summary
+    for i, line in enumerate(lines[:first_n]):
+        detail = {"line_index": i + 1, "keys": [], "frame_keys": [], "criteria_keys": [], "criteria6": None, "result_summary_preview": None}
+        try:
+            data = json.loads(line.strip())
+            detail["keys"] = list(data.keys())
+            if "Frame" in data:
+                frame_keys = list(data["Frame"].keys())
+                detail["frame_keys"] = frame_keys
+                detail["criteria_keys"] = [k for k in frame_keys if k.startswith("criteria")]
+                if "criteria6" in data["Frame"]:
+                    criteria6 = data["Frame"]["criteria6"]
+                    detail["criteria6"] = criteria6
+                    if isinstance(criteria6, dict) and "PassFail" in criteria6:
+                        detail["pass_fail"] = criteria6["PassFail"]
+                        if "Info" in criteria6["PassFail"]:
+                            detail["pass_fail_info"] = criteria6["PassFail"]["Info"]
+            if "Result" in data:
+                result = data["Result"]
+                detail["result_keys"] = list(result.keys())
+                if "Summary" in result:
+                    s = result["Summary"]
+                    detail["result_summary_preview"] = (s[:200] + "...") if isinstance(s, str) and len(s) > 200 else s
+        except json.JSONDecodeError as e:
+            detail["decode_error"] = str(e)
+        out["first_lines_detail"].append(detail)
+    # Last N lines: look for FinalScore
+    for i, line in enumerate(lines[-last_n:]):
+        idx = len(lines) - last_n + i + 1
+        try:
+            data = json.loads(line.strip())
+            if "Frame" in data and "FinalScore" in data["Frame"]:
+                final_score = data["Frame"]["FinalScore"]
+                out["last_lines_finalscore"].append({
+                    "line_index": idx,
+                    "FinalScore_keys": list(final_score.keys()) if isinstance(final_score, dict) else [],
+                    "FinalScore": final_score,
+                })
+                if isinstance(final_score, dict) and "Score" in final_score:
+                    score = final_score["Score"]
+                    out["last_lines_finalscore"][-1]["Score_keys"] = list(score.keys()) if isinstance(score, dict) else []
+                    if isinstance(score, dict) and "TP" in score:
+                        out["last_lines_finalscore"][-1]["TP_keys"] = list(score["TP"].keys()) if isinstance(score["TP"], dict) else []
+        except json.JSONDecodeError:
+            pass
+    return out
+
+
+def _criteria_status(val: Any) -> str:
+    """Classify Frame.criteria_N value: NoGTNoObj | Success | Fail."""
+    if not isinstance(val, dict):
+        return "—"
+    if "NoGTNoObj" in val:
+        return "NoGTNoObj"
+    if "PassFail" in val:
+        pf = val["PassFail"]
+        if isinstance(pf, dict) and "Result" in pf:
+            res = pf["Result"]
+            if isinstance(res, dict):
+                frame_res = res.get("Frame", res.get("Total", ""))
+                if frame_res == "Success":
+                    return "Success"
+        return "Fail"
+    return "—"
+
+
+def parse_result_json_for_viz(
+    file_path: str,
+    max_frames: Optional[int] = 2000,
+) -> Dict[str, Any]:
+    """
+    Parse full result.json (JSONL) for visualization.
+    Returns: condition (list of criterion dicts), frames (list of frame records),
+             final_score (dict or None), total_lines, errors.
+    """
+    out = {
+        "condition": [],
+        "condition_criterion": [],
+        "frames": [],
+        "final_score": None,
+        "total_lines": 0,
+        "errors": [],
+    }
+    if not os.path.exists(file_path):
+        out["errors"].append(f"File not found: {file_path}")
+        return out
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            lines = [line for line in f.readlines() if line.strip()]
+    except Exception as e:
+        out["errors"].append(str(e))
+        return out
+    out["total_lines"] = len(lines)
+    # First line: Condition
+    if lines:
+        try:
+            first = json.loads(lines[0].strip())
+            if "Condition" in first and "Criterion" in first["Condition"]:
+                out["condition"] = first["Condition"]
+                out["condition_criterion"] = first["Condition"]["Criterion"]
+        except json.JSONDecodeError:
+            pass
+    # Frame lines (Result + Frame with criteria_*)
+    for i, line in enumerate(lines[1:], start=2):  # 1-based line index
+        if max_frames and len(out["frames"]) >= max_frames:
+            break
+        try:
+            data = json.loads(line.strip())
+            rec = {
+                "line_index": i,
+                "success": None,
+                "summary": "",
+                "frame_name": "",
+                "criteria_status": {},
+            }
+            if "Result" in data:
+                r = data["Result"]
+                rec["success"] = r.get("Success")
+                rec["summary"] = r.get("Summary") or ""
+            if "Frame" in data and data["Frame"]:
+                frame = data["Frame"]
+                rec["frame_name"] = frame.get("FrameName", "")
+                for k, v in frame.items():
+                    if k.startswith("criteria_") and isinstance(v, dict):
+                        rec["criteria_status"][k] = _criteria_status(v)
+            out["frames"].append(rec)
+        except json.JSONDecodeError:
+            pass
+    # Last line: FinalScore
+    if len(lines) >= 2:
+        try:
+            last = json.loads(lines[-1].strip())
+            if "Frame" in last and "FinalScore" in last["Frame"]:
+                out["final_score"] = last["Frame"]["FinalScore"]
+        except json.JSONDecodeError:
+            pass
+    return out
+
+
 # =============================
 # Sidebar – file type and selection
 # =============================
 with st.sidebar:
     st.header("File selection")
-    file_type = st.radio("File type", ["Parquet", "PKL"], key="debug_file_type")
+    file_type = st.radio("File type", ["Parquet", "PKL", "result.json"], key="debug_file_type")
     use_custom = st.checkbox("Use custom file path", value=False, key="pq_debug_custom")
 
     if file_type == "Parquet":
@@ -211,7 +382,7 @@ with st.sidebar:
                 st.error("No parquet files found in data/")
                 st.stop()
             target_file = st.selectbox("Parquet file", parquet_files, key="pq_debug_file")
-    else:
+    elif file_type == "PKL":
         pkl_files = sorted(str(p) for p in pathlib.Path("data").rglob("*.pkl"))
         pklz_files = sorted(str(p) for p in pathlib.Path("data").rglob("*.pkl.z"))
         all_pkl = pkl_files + [p for p in pklz_files if p not in pkl_files]
@@ -231,6 +402,33 @@ with st.sidebar:
                 st.error("No .pkl or .pkl.z files found in data/")
                 st.stop()
             target_file = st.selectbox("PKL file", all_pkl, key="pkl_debug_file")
+    else:
+        # result.json: scan current tree or custom path
+        result_json_files = sorted(str(p) for p in pathlib.Path(".").rglob("result.json"))
+        if use_custom:
+            target_file = st.text_input(
+                "result.json file path",
+                value="data/result/scenario_01/result.json",
+                key="result_json_path",
+                help="Path to a result.json file (JSONL format)",
+            )
+            if not target_file or not target_file.strip():
+                st.warning("Enter a file path")
+                st.stop()
+            target_file = target_file.strip()
+        else:
+            if not result_json_files:
+                st.info("No result.json found. Use custom path or add files under current tree.")
+                target_file = st.text_input(
+                    "result.json path",
+                    value="data/result/scenario_01/result.json",
+                    key="result_json_path_fallback",
+                )
+                if not target_file or not target_file.strip():
+                    st.stop()
+                target_file = target_file.strip()
+            else:
+                target_file = st.selectbox("result.json file", result_json_files, key="result_json_file")
 
     if not os.path.isfile(target_file):
         st.error(f"File not found: {target_file}")
@@ -249,9 +447,190 @@ def get_file_info(path: str) -> dict:
 file_info = get_file_info(target_file)
 
 # =============================
+# result.json VIEW (TLR / JSONL debug)
+# =============================
+if file_type == "result.json":
+    st.subheader("File info")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Path", target_file)
+    with col2:
+        if file_info["size_bytes"] is not None:
+            size_kb = file_info["size_bytes"] / 1024
+            st.metric("Size", f"{size_kb:.2f} KB" if size_kb >= 1 else f"{file_info['size_bytes']} B")
+        else:
+            st.metric("Size", "—")
+
+    first_n = st.slider("First N lines to inspect", 1, 20, 5, key="result_json_first_n")
+    last_n = st.slider("Last N lines to scan for FinalScore", 1, 20, 5, key="result_json_last_n")
+    debug_info = debug_result_json_lines(target_file, first_n=first_n, last_n=last_n)
+
+    if debug_info["errors"]:
+        for err in debug_info["errors"]:
+            st.error(err)
+        st.stop()
+
+    st.metric("Total lines (non-empty)", debug_info["total_lines"])
+
+    # ---------- Visualization ----------
+    st.subheader("Visualization")
+    max_frames_viz = st.slider("Max frames to load for charts", 100, 5000, 500, key="result_json_max_frames")
+    viz = parse_result_json_for_viz(target_file, max_frames=max_frames_viz)
+    if viz["errors"]:
+        st.caption("Parse for viz: " + "; ".join(viz["errors"]))
+    else:
+        # Condition table (criteria definition from first line)
+        if viz["condition_criterion"]:
+            st.markdown("**Condition — criteria definition**")
+            rows = []
+            for idx, c in enumerate(viz["condition_criterion"]):
+                if not isinstance(c, dict):
+                    continue
+                dist = c.get("Filter", {}) or {}
+                dist_arr = dist.get("Distance")
+                if isinstance(dist_arr, (list, tuple)) and len(dist_arr) >= 2:
+                    lo, hi = dist_arr[0], dist_arr[1]
+                    dist_str = f"{lo:.0f}+m" if hi > 1e100 else f"{lo:.0f}–{hi:.0f}m"
+                else:
+                    dist_str = str(dist_arr) if dist_arr is not None else "—"
+                rows.append({
+                    "index": idx,
+                    "criteria": f"criteria_{idx}",
+                    "Distance (m)": dist_str,
+                    "Level": c.get("CriteriaLevel", ""),
+                    "PassRate %": c.get("PassRate"),
+                    "Method": c.get("CriteriaMethod", ""),
+                })
+            if rows:
+                cond_df = pd.DataFrame(rows)
+                st.dataframe(cond_df, use_container_width=True, hide_index=True)
+
+        # Overview metrics
+        frames_list = viz["frames"]
+        if frames_list:
+            n_frames = len(frames_list)
+            success_count = sum(1 for f in frames_list if f.get("success") is True)
+            no_data_count = sum(1 for f in frames_list if (f.get("summary") or "").strip() == "NoData")
+            st.markdown("**Overview**")
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.metric("Frames loaded", n_frames)
+            with c2:
+                st.metric("Success", success_count)
+            with c3:
+                pct = (100.0 * success_count / n_frames) if n_frames else 0
+                st.metric("Success %", f"{pct:.1f}%")
+            with c4:
+                st.metric("NoData lines", no_data_count)
+
+            # Success over time (timeline)
+            if HAS_PLOTLY and n_frames > 0:
+                line_indices = [f["line_index"] for f in frames_list]
+                success_vals = [1 if f.get("success") is True else (0 if f.get("success") is False else 0.5) for f in frames_list]
+                fig_timeline = go.Figure()
+                fig_timeline.add_trace(
+                    go.Scatter(
+                        x=line_indices,
+                        y=success_vals,
+                        mode="markers",
+                        marker=dict(size=4, color=success_vals, colorscale=[[0, "#e74c3c"], [0.5, "#95a5a6"], [1, "#27ae60"]], showscale=True, colorbar=dict(tickvals=[0, 0.5, 1], ticktext=["Fail", "—", "Success"])),
+                        name="Result",
+                    )
+                )
+                fig_timeline.update_layout(
+                    title="Result.Success over line index",
+                    xaxis_title="Line index",
+                    yaxis_title="Success",
+                    yaxis=dict(tickvals=[0, 0.5, 1], ticktext=["Fail", "N/A", "Success"], range=[-0.1, 1.1]),
+                    height=220,
+                    margin=dict(t=40, b=40, l=50, r=30),
+                )
+                st.plotly_chart(fig_timeline, use_container_width=True)
+
+            # Criteria heatmap: rows = frames (optionally downsampled), cols = criteria_0..N
+            frame_recs_with_criteria = [f for f in frames_list if f.get("criteria_status")]
+            if frame_recs_with_criteria and HAS_PLOTLY:
+                # Collect all criteria_* keys and sort
+                all_criteria = sorted(set().union(*(r["criteria_status"].keys() for r in frame_recs_with_criteria)), key=lambda x: (int(re.search(r"\d+", x).group()) if re.search(r"\d+", x) else 0))
+                if all_criteria:
+                    # Downsample rows if too many for readable heatmap
+                    max_heatmap_rows = 150
+                    if len(frame_recs_with_criteria) > max_heatmap_rows:
+                        step = len(frame_recs_with_criteria) // max_heatmap_rows
+                        subset = frame_recs_with_criteria[:: max(1, step)][:max_heatmap_rows]
+                    else:
+                        subset = frame_recs_with_criteria
+                    status_to_num = {"NoGTNoObj": 0, "Fail": 0.3, "Success": 1, "—": 0.5}
+                    z = []
+                    customtext = []
+                    for r in subset:
+                        row_num = [status_to_num.get(r["criteria_status"].get(c, "—"), 0.5) for c in all_criteria]
+                        row_txt = [r["criteria_status"].get(c, "—") for c in all_criteria]
+                        z.append(row_num)
+                        customtext.append(row_txt)
+                    fig_heat = go.Figure(
+                        data=go.Heatmap(
+                            z=z,
+                            x=all_criteria,
+                            y=[r.get("frame_name") or str(r["line_index"]) for r in subset],
+                            text=customtext,
+                            hovertemplate="Frame: %{y}<br>Criteria: %{x}<br>Status: %{text}<extra></extra>",
+                            colorscale=[[0, "#bdc3c7"], [0.3, "#e74c3c"], [0.5, "#95a5a6"], [1, "#27ae60"]],
+                            colorbar=dict(tickvals=[0, 0.3, 0.5, 1], ticktext=["NoGTNoObj", "Fail", "—", "Success"]),
+                        )
+                    )
+                    fig_heat.update_layout(
+                        title="Criteria status by frame (NoGTNoObj / Fail / Success)",
+                        xaxis_title="Criteria",
+                        yaxis_title="Frame",
+                        height=min(500, 80 + len(subset) * 12),
+                        margin=dict(t=40, b=40, l=80, r=100),
+                    )
+                    st.plotly_chart(fig_heat, use_container_width=True)
+
+        if viz["final_score"]:
+            with st.expander("FinalScore (from last line)"):
+                st.json(viz["final_score"])
+
+    st.subheader("First lines — structure (keys, Frame, criteria, Result)")
+    for detail in debug_info["first_lines_detail"]:
+        with st.expander(f"Line {detail['line_index']}", expanded=(detail["line_index"] <= 2)):
+            st.write("**Top-level keys:**", detail.get("keys", []))
+            if detail.get("frame_keys"):
+                st.write("**Frame keys:**", detail["frame_keys"])
+            if detail.get("criteria_keys"):
+                st.write("**Criteria keys:**", detail["criteria_keys"])
+            if detail.get("criteria6") is not None:
+                st.write("**criteria6:**")
+                st.json(detail["criteria6"])
+                if "pass_fail" in detail:
+                    st.write("**PassFail:**", detail["pass_fail"])
+                if "pass_fail_info" in detail:
+                    st.write("**PassFail Info:**", detail["pass_fail_info"])
+            if detail.get("result_summary_preview") is not None:
+                st.write("**Result.Summary (preview):**", detail["result_summary_preview"])
+            if detail.get("result_keys") is not None:
+                st.write("**Result keys:**", detail["result_keys"])
+            if "decode_error" in detail:
+                st.error("JSON decode error: " + detail["decode_error"])
+
+    st.subheader("Last lines — FinalScore")
+    if not debug_info["last_lines_finalscore"]:
+        st.caption("No line with Frame.FinalScore found in the last N lines.")
+    else:
+        for item in debug_info["last_lines_finalscore"]:
+            with st.expander(f"Line {item['line_index']} — FinalScore"):
+                st.write("**FinalScore keys:**", item.get("FinalScore_keys", []))
+                if item.get("Score_keys"):
+                    st.write("**Score keys:**", item["Score_keys"])
+                if item.get("TP_keys"):
+                    st.write("**TP keys:**", item["TP_keys"])
+                st.json(item["FinalScore"])
+
+# =============================
 # PARQUET VIEW
 # =============================
-if file_type == "Parquet":
+elif file_type == "Parquet":
     # Optional: PyArrow metadata (row groups, schema from file)
     def get_pyarrow_metadata(path: str) -> Optional[dict]:
         try:
@@ -412,7 +791,7 @@ if file_type == "Parquet":
 # =============================
 # PKL VIEW
 # =============================
-else:
+else:  # PKL
     st.subheader("File info")
     col1, col2 = st.columns(2)
     with col1:
