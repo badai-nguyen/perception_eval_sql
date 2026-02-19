@@ -12,7 +12,11 @@ params = st.query_params
 
 url_mode = params.get("mode")    # "single" / "compare" / None
 url_run_a = params.get("run_a")  # str / None
-url_run_b = params.get("run_b")  # str / None
+# Candidates B, C, D, ... from URL (e.g. run_b=...&run_c=...)
+url_compare_runs = [
+    params.get(k) for k in ["run_b", "run_c", "run_d", "run_e"]
+    if params.get(k)
+]
 
 # ====== CONFIG AND CONSTANTS ======
 st.set_page_config(page_title="Overview", layout="wide", initial_sidebar_state="expanded")
@@ -175,6 +179,56 @@ def show_grouped_metrics_plot(df, group_col, label_map=None, mode="single", df_b
                               height=400, margin=dict(t=40, b=0))
             st.plotly_chart(fig, width="stretch")
 
+def show_grouped_metrics_plot_multi(df_list, run_labels, group_col, label_map=None):
+    """Grouped metrics by label for N runs. df_list and run_labels same length."""
+    if not df_list or not run_labels or group_col not in df_list[0].columns:
+        st.info("No data for group breakdown.")
+        return
+    st.markdown(f"#### Metrics by {group_col.replace('_', ' ').title()}")
+    metrics = ["TP", "xstd", "ystd", "xrms", "yrms"]
+    col_map = label_map or {}
+    for m in metrics:
+        if m not in df_list[0].columns:
+            continue
+        st.markdown(f"##### {m.upper()} by {group_col.replace('_', ' ').title()}")
+        all_plot_labels = set()
+        run_means = []
+        for df in df_list:
+            xdf = df[df[group_col].notna() & (df[group_col].astype(str).str.strip() != "")].copy()
+            if xdf.empty or group_col not in xdf.columns:
+                run_means.append(pd.Series(dtype=float))
+                continue
+            xdf["__label_jp"] = xdf[group_col].map(col_map) if col_map else xdf[group_col]
+            s = xdf.groupby("__label_jp")[m].mean()
+            run_means.append(s)
+            all_plot_labels.update(s.index)
+        if not all_plot_labels:
+            st.info("No data for group breakdown.")
+            continue
+        plot_labels = sorted(all_plot_labels)
+        plot_df = pd.DataFrame({"__label_jp": plot_labels})
+        for i, lbl in enumerate(run_labels):
+            if i < len(run_means):
+                plot_df[lbl] = plot_df["__label_jp"].map(run_means[i]).fillna(0)
+            else:
+                plot_df[lbl] = 0
+        var_cols = list(run_labels)
+        if run_labels[0] == "A" and len(run_labels) > 1:
+            for i in range(1, len(run_labels)):
+                plot_df[f"Δ({run_labels[i]}-A)"] = plot_df[run_labels[i]] - plot_df["A"]
+            var_cols = run_labels + [f"Δ({run_labels[i]}-A)" for i in range(1, len(run_labels))]
+        melted = plot_df.melt(id_vars="__label_jp", value_vars=var_cols, var_name="Run", value_name="Mean")
+        color_map = {lbl: COMPARE_COLORS[i % len(COMPARE_COLORS)] for i, lbl in enumerate(run_labels)}
+        for i in range(1, len(run_labels)):
+            color_map[f"Δ({run_labels[i]}-A)"] = COMPARE_COLORS[i % len(COMPARE_COLORS)]
+        fig = px.bar(melted, x="__label_jp", y="Mean", color="Run", text_auto=".2f",
+                     category_orders={"Run": var_cols, "__label_jp": plot_labels},
+                     barmode="group", color_discrete_map=color_map,
+                     labels={"__label_jp": group_col, "Mean": f"{m} mean"})
+        fig.update_layout(xaxis_title=None, yaxis_title=f"{m} Mean", legend_title="Run",
+                          height=400, margin=dict(t=40, b=0))
+        st.plotly_chart(fig, width="stretch")
+
 # ====== SIDEBAR UI ======
 user_config = UserConfig(warning_fn=st.warning)
 saved_mode = user_config.get("overview_mode", "Single Mode")
@@ -188,6 +242,8 @@ st.sidebar.header("Mode")
 mode_options = ["Single Mode", "Compare Mode"]
 mode_index = mode_options.index(saved_mode) if saved_mode in mode_options else 0
 mode = st.sidebar.radio("Mode", mode_options, index=mode_index)
+if st.session_state.get("mode") != mode and "overview_compare_run_names" in st.session_state:
+    del st.session_state["overview_compare_run_names"]
 st.session_state["mode"] = mode
 user_config.set("overview_mode", mode)
 st.title("Overview")
@@ -217,40 +273,107 @@ if url_run_a in run_names:
 run_a_index = run_names.index(saved_run_a) if saved_run_a in run_names else 0
 run_a_dir = st.sidebar.selectbox("Baseline (A)", run_dirs, index=run_a_index, format_func=lambda p: p.name)
 user_config.set("overview_run_a", run_a_dir.name)
-run_b_dir = None
+
+compare_run_names = []  # list of run names for candidates B, C, D, ...
 if mode == "Compare Mode":
-    saved_run_b = user_config.get("overview_run_b", "")
-    # URL override (only if valid)
-    if url_run_b in run_names:
-        saved_run_b = url_run_b
-    if saved_run_b in run_names:
-        run_b_index = run_names.index(saved_run_b)
-    else:
-        run_b_index = 1 if len(run_dirs) > 1 else 0
-    run_b_dir = st.sidebar.selectbox("Candidate (B)", run_dirs, index=run_b_index, format_func=lambda p: p.name)
-    user_config.set("overview_run_b", run_b_dir.name)
+    # Use session_state so "Add run" / "Remove" work without relying on config file read-back
+    if "overview_compare_run_names" not in st.session_state:
+        saved_compare = user_config.get("overview_compare_runs", None)
+        if saved_compare is None:
+            saved_run_b = user_config.get("overview_run_b", "")
+            saved_compare = [saved_run_b] if saved_run_b in run_names else []
+        if not saved_compare and run_names:
+            saved_compare = [run_names[1]] if len(run_names) > 1 else [run_names[0]]
+        if url_compare_runs:
+            valid_url = [r for r in url_compare_runs if r in run_names]
+            if valid_url:
+                saved_compare = valid_url
+        st.session_state["overview_compare_run_names"] = list(saved_compare)
+    compare_run_names = list(st.session_state["overview_compare_run_names"])
+
+    st.sidebar.caption("Compare runs")
+    new_compare_run_names = []
+    for i, run_name in enumerate(compare_run_names):
+        letter = chr(66 + i)  # B, C, D, ...
+        col_sel, col_rm = st.sidebar.columns([4, 1])
+        with col_sel:
+            idx = run_names.index(run_name) if run_name in run_names else 0
+            selected = st.selectbox(
+                f"Candidate ({letter})",
+                run_dirs,
+                index=idx,
+                format_func=lambda p: p.name,
+                key=f"compare_run_select_{i}",
+            )
+            new_compare_run_names.append(selected.name)
+        with col_rm:
+            if len(compare_run_names) > 1:
+                if st.button("✕", key=f"compare_remove_{i}", help="Remove this run"):
+                    removed_list = compare_run_names[:i] + compare_run_names[i + 1:]
+                    st.session_state["overview_compare_run_names"] = removed_list
+                    user_config.set("overview_compare_runs", removed_list)
+                    st.rerun()
+            else:
+                st.write("")  # placeholder so layout is stable
+    compare_run_names = new_compare_run_names
+    st.session_state["overview_compare_run_names"] = compare_run_names
+
+    if st.sidebar.button("➕ Add run", help="Add another run to compare"):
+        used = {run_a_dir.name} | set(compare_run_names)
+        next_name = next((n for n in run_names if n not in used), run_names[0])
+        new_list = compare_run_names + [next_name]
+        st.session_state["overview_compare_run_names"] = new_list
+        user_config.set("overview_compare_runs", new_list)
+        st.rerun()
+
+    user_config.set("overview_compare_runs", compare_run_names)
+    if compare_run_names:
+        user_config.set("overview_run_b", compare_run_names[0])
+
+compare_run_dirs = []
+if mode == "Compare Mode" and compare_run_names:
+    name_to_dir = {p.name: p for p in run_dirs}
+    compare_run_dirs = [name_to_dir[n] for n in compare_run_names if n in name_to_dir]
+
 # ====== SYNC URL (NON-DESTRUCTIVE) ======
 query = {
     "mode": "compare" if mode == "Compare Mode" else "single",
     "run_a": run_a_dir.name,
 }
-
-if mode == "Compare Mode" and run_b_dir:
-    query["run_b"] = run_b_dir.name
+for j, name in enumerate(compare_run_names):
+    query[f"run_{chr(98 + j)}"] = name  # run_b, run_c, ...
 st.query_params.update(query)
 # ====== LOAD DATA ======
 def safe_load_run(path, label='Run'):
     try:
         return load_run(path)
     except Exception as e:
-        st.error(f"Failed to load {label}: {e}"); st.stop()
+        st.error(f"Failed to load {label}: {e}")
+        st.stop()
 
-if mode == "Compare Mode":
-    runA, runB = safe_load_run(run_a_dir, 'Run A'), safe_load_run(run_b_dir, 'Run B')
-    filters = create_filter_widgets([runA, runB])
-    runA, runB = apply_filters(runA, filters), apply_filters(runB, filters)
-    st.session_state.update({"runA": runA, "runB": runB,
-                            "df_cmp": build_summary_delta(runA["summary"], runB["summary"])})
+if mode == "Compare Mode" and compare_run_dirs:
+    all_run_dirs = [run_a_dir] + compare_run_dirs
+    run_labels = ["A"] + [chr(66 + i) for i in range(len(compare_run_dirs))]
+    all_runs = [
+        safe_load_run(d, f"Run {run_labels[i]}") for i, d in enumerate(all_run_dirs)
+    ]
+    filters = create_filter_widgets(all_runs)
+    all_runs = [apply_filters(r, filters) for r in all_runs]
+    runA = all_runs[0]
+    st.session_state.update({
+        "runA": runA,
+        "all_runs": all_runs,
+        "run_labels": run_labels,
+        "df_cmp": build_summary_delta(all_runs[0]["summary"], all_runs[1]["summary"]) if len(all_runs) >= 2 else None,
+    })
+    # For backward compat, runB = second run when present
+    if len(all_runs) >= 2:
+        st.session_state["runB"] = all_runs[1]
+    else:
+        st.session_state["runB"] = None
+elif mode == "Compare Mode":
+    st.warning("Add at least one candidate run to compare.")
+    st.stop()
 else:
     runA = safe_load_run(run_a_dir, 'Run A')
     filters = create_filter_widgets([runA])
@@ -260,12 +383,16 @@ else:
 # ====== MAIN PAGE METRICS & CHARTS ======
 st.subheader("Loaded Runs")
 st.markdown(f"**Baseline (A):** `{path_display(runA['path'])}`")
-if mode == "Compare Mode":
-    st.markdown(f"**Candidate (B):** `{path_display(runB['path'])}`")
+if mode == "Compare Mode" and compare_run_dirs:
+    all_runs = st.session_state["all_runs"]
+    run_labels = st.session_state["run_labels"]
+    for i in range(1, len(all_runs)):
+        st.markdown(f"**Candidate ({run_labels[i]}):** `{path_display(all_runs[i]['path'])}`")
 # Shareable link (for multi-user: share this view with others)
 share_q = f"mode={'compare' if mode == 'Compare Mode' else 'single'}&run_a={run_a_dir.name}"
-if mode == "Compare Mode" and run_b_dir:
-    share_q += f"&run_b={run_b_dir.name}"
+if mode == "Compare Mode" and compare_run_names:
+    for j, name in enumerate(compare_run_names):
+        share_q += f"&run_{chr(98 + j)}={name}"
 st.caption(f"Share this view: append `?{share_q}` to your server URL (e.g. from Data Management page).")
 
 st.subheader("Summary")
@@ -291,48 +418,83 @@ def show_tp_mean_by_label(df, label_col, label_jp_map=None, run_name=None):
                       yaxis_title="TP mean", height=400, margin=dict(t=40, b=0))
     st.plotly_chart(fig, width="stretch")
 
-def show_tp_mean_by_label_compare(df_a, df_b, label_col, label_jp_map=None):
-    if label_col not in df_a.columns or label_col not in df_b.columns:
+# Colors for up to 6 runs (A, B, C, D, E, F)
+COMPARE_COLORS = ["#31356E", "#008E9B", "#E86A33", "#6B8E23", "#9B59B6", "#1ABC9C"]
+
+def show_tp_mean_by_label_compare(df_list, run_labels, label_col, label_jp_map=None):
+    """Grouped TP mean by label for N runs. df_list and run_labels same length."""
+    if not df_list or not run_labels or label_col not in df_list[0].columns:
         return
-    # drop rows with missing or blank for both
-    xdf_a = df_a[df_a[label_col].notna() & (df_a[label_col].astype(str).str.strip() != "")]
-    xdf_b = df_b[df_b[label_col].notna() & (df_b[label_col].astype(str).str.strip() != "")]
-    if xdf_a.empty and xdf_b.empty:
+    all_labels = set()
+    groups = []
+    for df in df_list:
+        if label_col not in df.columns:
+            return
+        xdf = df[df[label_col].notna() & (df[label_col].astype(str).str.strip() != "")]
+        g = xdf.groupby(label_col)["TP"].mean()
+        groups.append(g)
+        all_labels.update(g.index)
+    if not all_labels:
         st.info(f"No data for {label_col.replace('_', ' ')} breakdown.")
         return
-    group_a = xdf_a.groupby(label_col)["TP"].mean()
-    group_b = xdf_b.groupby(label_col)["TP"].mean()
-    all_labels = sorted(set(group_a.index).union(group_b.index))
-    a_vals = [group_a.get(l, float('nan')) for l in all_labels]
-    b_vals = [group_b.get(l, float('nan')) for l in all_labels]
-    deltas = [b-a if pd.notna(a) and pd.notna(b) else float('nan') for a, b in zip(a_vals, b_vals)]
+    all_labels = sorted(all_labels)
     labels_disp = [label_jp_map.get(l, l) for l in all_labels] if label_jp_map else all_labels
-    st.markdown(f"**TP mean by {label_col.replace('_', ' ').title()} (A vs B)**")
-    fig = go.Figure([
-        go.Bar(name="A", x=labels_disp, y=a_vals, marker=dict(color="#31356E"),
-               text=[f"{x:.2f}" if pd.notna(x) else "N/A" for x in a_vals], textposition="auto"),
-        go.Bar(name="B", x=labels_disp, y=b_vals, marker=dict(color="#008E9B"),
-               text=[f"{x:.2f}" if pd.notna(x) else "N/A" for x in b_vals], textposition="auto"),
-        go.Bar(name="Δ(B-A)", x=labels_disp, y=deltas, marker=dict(color="#E86A33"),
-               text=[f"{x:+.2f}" if pd.notna(x) else "N/A" for x in deltas], textposition="auto"),
-    ])
+    st.markdown(f"**TP mean by {label_col.replace('_', ' ').title()} ({' vs '.join(run_labels)})**")
+    traces = []
+    for i, (g, lbl) in enumerate(zip(groups, run_labels)):
+        vals = [g.get(l, float('nan')) for l in all_labels]
+        color = COMPARE_COLORS[i % len(COMPARE_COLORS)]
+        traces.append(
+            go.Bar(name=lbl, x=labels_disp, y=vals, marker=dict(color=color),
+                   text=[f"{x:.2f}" if pd.notna(x) else "N/A" for x in vals], textposition="auto")
+        )
+    # Deltas vs A (baseline) for non-A runs
+    if len(df_list) >= 2 and run_labels[0] == "A":
+        base_vals = [groups[0].get(l, float('nan')) for l in all_labels]
+        for i in range(1, len(groups)):
+            vals = [groups[i].get(l, float('nan')) for l in all_labels]
+            deltas = [v - b if pd.notna(v) and pd.notna(b) else float('nan') for v, b in zip(vals, base_vals)]
+            traces.append(
+                go.Bar(name=f"Δ({run_labels[i]}-A)", x=labels_disp, y=deltas,
+                       marker=dict(color=COMPARE_COLORS[i % len(COMPARE_COLORS)], line=dict(width=1, color="gray")),
+                       text=[f"{x:+.2f}" if pd.notna(x) else "N/A" for x in deltas], textposition="auto")
+            )
+    fig = go.Figure(traces)
     fig.update_layout(barmode="group", xaxis_title=label_col.replace('_', ' ').title(),
                       yaxis_title="TP mean", height=400, margin=dict(t=40, b=0), legend_title="Run")
     st.plotly_chart(fig, width="stretch")
 
-if mode == "Compare Mode":
-    df_a, df_b = runA["summary"], runB["summary"]
-    tp_mean_a, tp_mean_b = df_a["TP"].mean(), df_b["TP"].mean()
-    st.metric("TP mean", f"{tp_mean_b:.2f}", delta=f"{tp_mean_b - tp_mean_a:+.2f}")
+if mode == "Compare Mode" and compare_run_dirs:
+    all_runs = st.session_state["all_runs"]
+    run_labels = st.session_state["run_labels"]
+    summaries = [r["summary"] for r in all_runs]
+    df_a = summaries[0]
+    # TP mean: show baseline and each candidate with delta vs A
+    n_runs = len(summaries)
+    tp_means = [s["TP"].mean() for s in summaries]
+    st.metric("TP mean (baseline A)", f"{tp_means[0]:.2f}")
+    if n_runs > 1:
+        comp_cols = st.columns(min(n_runs - 1, 5))
+        for i, c in enumerate(comp_cols):
+            if i + 1 < n_runs:
+                with c:
+                    st.metric(f"TP mean ({run_labels[i + 1]})", f"{tp_means[i + 1]:.2f}",
+                              delta=f"{tp_means[i + 1] - tp_means[0]:+.2f}")
     cols = st.columns(4)
     metrics = [("XRMS", "xrms"), ("YRMS", "yrms"), ("XSTD", "xstd"), ("YSTD", "ystd")]
     for c, (n, col) in zip(cols, metrics):
-        with c: display_metric_with_stats(n, df_a[col], df_b[col])
-    show_tp_mean_by_label_compare(df_a, df_b, "perception_label")
-    show_tp_mean_by_label_compare(df_a, df_b, "product_label", PRODUCT_LABEL_JA)
+        with c:
+            if n_runs == 2:
+                display_metric_with_stats(n, df_a[col], summaries[1][col])
+            else:
+                st.markdown(f"**{n}**")
+                for i, (s, lbl) in enumerate(zip(summaries, run_labels)):
+                    st.caption(f"{lbl}: mean {s[col].mean():.4f}" + (f" (Δ vs A: {s[col].mean() - df_a[col].mean():+.4f})" if i > 0 else ""))
+    show_tp_mean_by_label_compare(summaries, run_labels, "perception_label")
+    show_tp_mean_by_label_compare(summaries, run_labels, "product_label", PRODUCT_LABEL_JA)
     with st.expander("Show metric breakdowns by label", expanded=False):
-        show_grouped_metrics_plot(df_a, group_col="perception_label", mode="compare", df_b=df_b)
-        show_grouped_metrics_plot(df_a, group_col="product_label", label_map=PRODUCT_LABEL_JA, mode="compare", df_b=df_b)
+        show_grouped_metrics_plot_multi(summaries, run_labels, group_col="perception_label")
+        show_grouped_metrics_plot_multi(summaries, run_labels, group_col="product_label", label_map=PRODUCT_LABEL_JA)
 else:
     df_summary = runA["summary"]
     st.metric("TP mean", f"{df_summary['TP'].mean():.2f}")
