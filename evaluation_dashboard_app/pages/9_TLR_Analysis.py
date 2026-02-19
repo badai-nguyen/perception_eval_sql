@@ -2,6 +2,7 @@
 TLR (Traffic Light Recognition) Evaluation Analysis page.
 Visualizes criteria matrices, vehicle status vs traffic light type, and critical/priority zones.
 Supports Single (one dataset) or Compare (two datasets: Baseline A vs Compare B).
+Supports shareable URLs via query params: mode, path_a, path_b.
 """
 
 import streamlit as st
@@ -9,23 +10,42 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
+from urllib.parse import quote
+
 from lib.tlr_eval_analyzer import TLREvaluationAnalyzer
 from lib.path_utils import get_data_root, path_display, list_tlr_result_directories
 
 st.set_page_config(page_title="TLR Analysis", layout="wide")
+
+# ====== URL QUERY PARAMS (for shareable links) ======
+params = st.query_params
+url_mode = params.get("mode")       # "single" / "compare" / None
+url_path_a = params.get("path_a")  # relative path under data root
+url_path_b = params.get("path_b")  # for compare mode
+
 st.title("TLR (Traffic Light Recognition) Evaluation Analysis")
 
 # ----- Helpers -----
 data_root = get_data_root()
 
+
+def path_to_tlr_key(path: Path) -> str:
+    """Stable key for URL: path relative to data root, or '.' for root."""
+    try:
+        rel = path.resolve().relative_to(data_root.resolve())
+        return str(rel).replace("\\", "/") if str(rel) != "." else "."
+    except ValueError:
+        return path.name or "."
+
+
 def format_tlr_option(item):
-    path, count = item
+    path, _count = item
     try:
         rel = path.relative_to(data_root)
         label = str(rel).replace("\\", "/") if str(rel) != "." else data_root.name or "."
     except ValueError:
         label = path.name or str(path)
-    return f"{label} ({count} scenario(s))"
+    return label
 
 def get_or_load_analyzer(resolved_path: str):
     """Load analyzer for path; cache in session_state by path."""
@@ -126,8 +146,23 @@ def _render_compare_tabs(analyzer_a, analyzer_b, label_a, label_b, tab_criteria,
         fig.add_trace(go.Scatter(x=compare_criteria["criteria_num"], y=compare_criteria["TP rate B"], name=label_b, mode="lines+markers"))
         fig.update_layout(title="TP rate by criteria: A vs B", xaxis_title="Criteria number", yaxis_title="TP rate", yaxis_range=[0, 1.1])
         st.plotly_chart(fig, use_container_width=True)
-        fig_delta = px.bar(compare_criteria, x="criteria_num", y="Δ (B − A)", title="TP rate delta (B − A) by criteria")
-        fig_delta.update_layout(xaxis_title="Criteria number")
+        delta_vals = compare_criteria["Δ (B − A)"].values
+        bar_colors = ["#2ecc71" if v >= 0 else "#e74c3c" for v in delta_vals]
+        fig_delta = go.Figure(
+            data=go.Bar(
+                x=compare_criteria["criteria_num"],
+                y=delta_vals,
+                marker_color=bar_colors,
+                text=[f"{v:+.3f}" for v in delta_vals],
+                textposition="outside",
+            )
+        )
+        fig_delta.update_layout(
+            title="TP rate delta (B − A) by criteria",
+            xaxis_title="Criteria number",
+            yaxis_title="Δ (B − A)",
+            showlegend=False,
+        )
         fig_delta.add_hline(y=0, line_dash="dash", line_color="gray")
         st.plotly_chart(fig_delta, use_container_width=True)
 
@@ -144,7 +179,9 @@ def _render_compare_tabs(analyzer_a, analyzer_b, label_a, label_b, tab_criteria,
                 z=delta_df[tlr_cols].values,
                 x=tlr_cols,
                 y=delta_df["Vehicle Status"].tolist(),
-                colorscale="RdBu",
+                colorscale=[[0, "#c0392b"], [0.25, "#e74c3c"], [0.5, "#f5f5f5"], [0.75, "#27ae60"], [1, "#1e8449"]],
+                zmin=-1,
+                zmax=1,
                 zmid=0,
                 text=[[f"{v:+.3f}" for v in row] for row in delta_df[tlr_cols].values],
                 texttemplate="%{text}", textfont={"size": 8}, hoverongaps=False,
@@ -172,7 +209,10 @@ def _render_compare_tabs(analyzer_a, analyzer_b, label_a, label_b, tab_criteria,
         fig_cp = go.Figure(
             data=go.Heatmap(
                 z=delta_cp[tlr_cols_cp].values, x=tlr_cols_cp, y=delta_cp["Vehicle Status"].tolist(),
-                colorscale="RdBu", zmid=0,
+                colorscale=[[0, "#c0392b"], [0.25, "#e74c3c"], [0.5, "#f5f5f5"], [0.75, "#27ae60"], [1, "#1e8449"]],
+                zmin=-1,
+                zmax=1,
+                zmid=0,
                 text=[[f"{v:+.3f}" for v in row] for row in delta_cp[tlr_cols_cp].values],
                 texttemplate="%{text}", textfont={"size": 7}, hoverongaps=False,
             )
@@ -203,19 +243,35 @@ st.sidebar.header("TLR data")
 st.sidebar.caption(f"Data root: `{path_display(data_root)}`")
 
 tlr_candidates = list_tlr_result_directories()
-mode = st.sidebar.radio("Mode", ["Single", "Compare"], horizontal=True, key="tlr_mode")
+# Build stable keys for URL (path relative to data root)
+tlr_keys = [path_to_tlr_key(p) for p, _ in tlr_candidates] if tlr_candidates else []
+
+# URL override for mode
+saved_mode = "Single"
+if url_mode == "compare":
+    saved_mode = "Compare"
+elif url_mode == "single":
+    saved_mode = "Single"
+mode_index = 0 if saved_mode == "Single" else 1
+mode = st.sidebar.radio("Mode", ["Single", "Compare"], index=mode_index, horizontal=True, key="tlr_mode")
 
 resolved_path_a = None
 resolved_path_b = None
+sel_a = 0
+sel_b = 0
 
 if tlr_candidates:
     options = list(range(len(tlr_candidates)))
     labels = [format_tlr_option(tlr_candidates[i]) for i in options]
 
+    # Initial index for A from URL (if valid)
+    run_a_index = tlr_keys.index(url_path_a) if url_path_a in tlr_keys else 0
+
     if mode == "Single":
         sel_a = st.sidebar.selectbox(
             "Choose TLR result directory (with result.json)",
             options=options,
+            index=run_a_index,
             format_func=lambda i: labels[i],
             key="tlr_select_a",
         )
@@ -225,24 +281,36 @@ if tlr_candidates:
         sel_a = st.sidebar.selectbox(
             "Baseline (A)",
             options=options,
+            index=run_a_index,
             format_func=lambda i: labels[i],
             key="tlr_select_a",
         )
         resolved_path_a = str(tlr_candidates[sel_a][0])
-        # B: exclude A
         other_options = [i for i in options if i != sel_a]
         if not other_options:
             st.sidebar.warning("Add another TLR result directory under the data root to compare.")
         else:
+            run_b_index_in_other = 0
+            if url_path_b in tlr_keys and url_path_b != tlr_keys[sel_a]:
+                try:
+                    run_b_index_in_other = other_options.index(tlr_keys.index(url_path_b))
+                except ValueError:
+                    pass
             sel_b = st.sidebar.selectbox(
                 "Compare (B)",
                 options=other_options,
-                index=0,
+                index=min(run_b_index_in_other, len(other_options) - 1),
                 format_func=lambda i: labels[i],
                 key="tlr_select_b",
             )
             resolved_path_b = str(tlr_candidates[sel_b][0])
             st.sidebar.success(f"A: {labels[sel_a]}  →  B: {labels[sel_b]}")
+
+    # Sync URL with current selection (shareable link)
+    query = {"mode": "single" if mode == "Single" else "compare", "path_a": tlr_keys[sel_a]}
+    if mode == "Compare" and resolved_path_b:
+        query["path_b"] = tlr_keys[sel_b]
+    st.query_params.update(query)
 else:
     st.sidebar.warning(
         "No TLR result directories found. Under the data root we look for directories that contain "
@@ -268,6 +336,8 @@ label_b = Path(resolved_path_b).name if resolved_path_b else "B"
 if mode == "Single":
     stats = analyzer_a.get_summary_stats()
     st.subheader("Overview")
+    share_q = f"mode=single&path_a={quote(tlr_keys[sel_a], safe='/')}"
+    st.caption(f"Share this view: append `?{share_q}` to the TLR Analysis page URL.")
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Scenarios", stats["num_scenarios"])
     c2.metric("Total frames", f"{stats['total_frames']:,}")
@@ -295,6 +365,8 @@ stats_a = analyzer_a.get_summary_stats()
 stats_b = analyzer_b.get_summary_stats()
 
 st.subheader("Overview: A vs B")
+share_q_compare = f"mode=compare&path_a={quote(tlr_keys[sel_a], safe='/')}&path_b={quote(tlr_keys[sel_b], safe='/')}"
+st.caption(f"Share this view: append `?{share_q_compare}` to the TLR Analysis page URL.")
 col_a, col_delta, col_b = st.columns(3)
 with col_a:
     st.markdown(f"**{label_a} (Baseline)**")

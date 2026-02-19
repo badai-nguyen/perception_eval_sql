@@ -116,31 +116,19 @@ def count_tlr_scenarios(path: Path) -> int:
 
 
 def list_tlr_result_directories() -> List[Tuple[Path, int]]:
-    """Return sorted list of (path, scenario_count) under data root that contain TLR result.json.
-    Scans data root and up to two levels deep (root, root/X, root/X/Y). Only includes paths
-    that have at least one result.json (flat or suite layout)."""
+    """Return sorted list of (path, scenario_count) for direct children of data root that contain TLR result.json.
+    Only includes one level (e.g. TLR_A), not the root itself nor nested subdirs (e.g. not TLR_A/Gen2).
+    Scenario count includes result.json in direct subdirs and in suite-style subdirs (one level under the candidate)."""
     root = get_data_root()
     if not root.exists():
         return []
     candidates: List[Tuple[Path, int]] = []
-    # depth 0
-    n = count_tlr_scenarios(root)
-    if n > 0:
-        candidates.append((root, n))
-    # depth 1
     for child in root.iterdir():
         if not child.is_dir():
             continue
         n = count_tlr_scenarios(child)
         if n > 0:
             candidates.append((child, n))
-        # depth 2
-        for grand in child.iterdir():
-            if not grand.is_dir():
-                continue
-            n = count_tlr_scenarios(grand)
-            if n > 0:
-                candidates.append((grand, n))
     return sorted(candidates, key=lambda x: str(x[0]))
 
 
