@@ -610,9 +610,9 @@ class JobResult:
             try:
                 # First get scenario metadata
                 
-                
+                output_dir = self._get_output_path_for_log(log_info)
                 # Check if already exists
-                scenario_dir = os.path.join(output_dir, f"{scenario_name}_{scenario_id}")
+                scenario_dir = os.path.join(output_dir, f"{scenario_name}")
                 yaml_file_path = os.path.join(scenario_dir, "scenario.yaml")
                 scenario_dir_exists = os.path.exists(scenario_dir)
                 yaml_exists = os.path.exists(yaml_file_path)
@@ -1355,17 +1355,18 @@ with tab2:
                 output_path=output_path
             )
             
-            # Create scenarios subdirectory
-            scenarios_dir = os.path.join(output_path, "scenarios")
             
             with st.expander("Downloading Scenarios", expanded=True):
                 downloaded = job_result.download_scenarios(
-                    output_dir=scenarios_dir,
+                    output_dir=output_path,
                     scenario_name_filter=scenario_filter,
                     overwrite=overwrite,
                     selected_ids=selected_ids
                 )
-                
+
+                # Also download result JSON files (same as tab1 "Result JSON only")
+                log_dicts = job_result.download_result_json()
+
                 # Store in session state
                 st.session_state.downloaded_scenarios = downloaded
                 
@@ -1377,6 +1378,8 @@ with tab2:
                     st.write("Successfully downloaded scenarios:")
                     for scenario in success_scenarios:
                         st.write(f"• {scenario['name']} (ID: {scenario['id']})")
+                
+                st.write(f"Result JSON files: {len(log_dicts)} downloaded.")
                 
         except Exception as e:
             st.error(f"❌ Error downloading scenarios: {str(e)}")
@@ -1443,7 +1446,7 @@ with tab4:
 
     eval_root = st.text_input(
         "Root directory to evaluate",
-        value=get_config_value("eval_root", output_path),
+        value=str(output_path),
         help="Directory containing downloaded scenario results (must be under the server data root). Uploaded files are also saved here.",
     )
     set_config_value("eval_root", eval_root)
@@ -1670,15 +1673,6 @@ with tab4:
             st.stop()
         eval_root = str(resolved_eval_root)
         set_config_value("eval_root", eval_root)
-        # Check if PerceptionAnalyzer3D (from perception_eval) is available before proceeding
-        # from lib.perception_eval_result_summarizer import PerceptionAnalyzer3D, _perception_eval_import_error
-        # if PerceptionAnalyzer3D is None:
-        #     st.error(
-        #         "perception_eval is not available (PerceptionAnalyzer3D import failed). "
-        #         "Make sure you have run `source install.sh` to set up your environment, then, run `streamlit run Overview.py` to start the dashboard.\n\n"
-        #         f"Original error: {_perception_eval_import_error}"
-        #     )
-        #     st.stop()
 
         if only_generate_summary:
             with st.spinner("Generating Summary.csv and Score.csv..."):

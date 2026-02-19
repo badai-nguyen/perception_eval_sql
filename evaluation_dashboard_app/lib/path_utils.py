@@ -98,6 +98,52 @@ def list_run_directories() -> List[Path]:
     return sorted([p for p in root.iterdir() if p.is_dir()])
 
 
+def count_tlr_scenarios(path: Path) -> int:
+    """Count TLR scenarios in path: direct subdirs with result.json or suite subdirs with testcase/result.json."""
+    if not path.exists() or not path.is_dir():
+        return 0
+    count = 0
+    for child in path.iterdir():
+        if not child.is_dir():
+            continue
+        if (child / "result.json").exists():
+            count += 1
+        else:
+            for tc in child.iterdir():
+                if tc.is_dir() and (tc / "result.json").exists():
+                    count += 1
+    return count
+
+
+def list_tlr_result_directories() -> List[Tuple[Path, int]]:
+    """Return sorted list of (path, scenario_count) under data root that contain TLR result.json.
+    Scans data root and up to two levels deep (root, root/X, root/X/Y). Only includes paths
+    that have at least one result.json (flat or suite layout)."""
+    root = get_data_root()
+    if not root.exists():
+        return []
+    candidates: List[Tuple[Path, int]] = []
+    # depth 0
+    n = count_tlr_scenarios(root)
+    if n > 0:
+        candidates.append((root, n))
+    # depth 1
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        n = count_tlr_scenarios(child)
+        if n > 0:
+            candidates.append((child, n))
+        # depth 2
+        for grand in child.iterdir():
+            if not grand.is_dir():
+                continue
+            n = count_tlr_scenarios(grand)
+            if n > 0:
+                candidates.append((grand, n))
+    return sorted(candidates, key=lambda x: str(x[0]))
+
+
 def get_run_info(run_path: Path) -> dict:
     """Return dict with name, path, size_bytes, mtime, has_summary, has_score, has_parquet."""
     size_bytes = 0
