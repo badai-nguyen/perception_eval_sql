@@ -1,6 +1,7 @@
 """
 TLR (Traffic Light Recognition) Evaluation Analysis page.
 Visualizes criteria matrices, vehicle status vs traffic light type, and critical/priority zones.
+Supports Single (one dataset) or Compare (two datasets: Baseline A vs Compare B).
 """
 
 import streamlit as st
@@ -14,180 +15,308 @@ from lib.path_utils import get_data_root, path_display, list_tlr_result_director
 st.set_page_config(page_title="TLR Analysis", layout="wide")
 st.title("TLR (Traffic Light Recognition) Evaluation Analysis")
 
-# ----- TLR result directory: choose from candidates (dirs that have result.json) -----
+# ----- Helpers -----
 data_root = get_data_root()
-st.sidebar.header("TLR result directory")
-st.sidebar.caption(f"Data root: `{path_display(data_root)}`")
 
-tlr_candidates = list_tlr_result_directories()
-resolved_path = None
-if tlr_candidates:
-    def format_tlr_option(item):
-        path, count = item
-        try:
-            rel = path.relative_to(data_root)
-            label = str(rel).replace("\\", "/") if str(rel) != "." else data_root.name or "."
-        except ValueError:
-            label = path.name or str(path)
-        return f"{label} ({count} scenario(s))"
+def format_tlr_option(item):
+    path, count = item
+    try:
+        rel = path.relative_to(data_root)
+        label = str(rel).replace("\\", "/") if str(rel) != "." else data_root.name or "."
+    except ValueError:
+        label = path.name or str(path)
+    return f"{label} ({count} scenario(s))"
 
-    selected = st.sidebar.selectbox(
-        "Choose TLR result directory (with result.json)",
-        options=range(len(tlr_candidates)),
-        format_func=lambda i: format_tlr_option(tlr_candidates[i]),
-        key="tlr_select",
-    )
-    resolved_path = str(tlr_candidates[selected][0])
-    st.sidebar.success(f"Selected: {format_tlr_option(tlr_candidates[selected])}")
-else:
-    st.sidebar.warning(
-        "No TLR result directories found. Under the data root we look for directories that contain "
-        "**result.json** (direct subfolders or suite folders whose subfolders have result.json)."
-    )
-
-# ----- Load analyzer and cache in session -----
-def ensure_analyzer():
-    if resolved_path is None:
+def get_or_load_analyzer(resolved_path: str):
+    """Load analyzer for path; cache in session_state by path."""
+    if not resolved_path:
         return None
-    key = "tlr_analyzer"
-    path_key = "tlr_analyzer_path"
-    if key not in st.session_state or st.session_state.get(path_key) != resolved_path:
-        with st.spinner("Loading TLR results..."):
+    cache_key = "tlr_analyzer_cache"
+    if cache_key not in st.session_state:
+        st.session_state[cache_key] = {}
+    cache = st.session_state[cache_key]
+    if resolved_path not in cache:
+        with st.spinner(f"Loading TLR results: {Path(resolved_path).name}..."):
             analyzer = TLREvaluationAnalyzer(resolved_path)
             analyzer.load_all_results()
             if not analyzer.scenario_results:
                 return None
             analyzer.extract_criteria_data()
             analyzer.pre_calculate_all_data()
-            st.session_state[key] = analyzer
-            st.session_state[path_key] = resolved_path
-    return st.session_state[key]
+            cache[resolved_path] = analyzer
+    return cache[resolved_path]
 
-analyzer = ensure_analyzer() if resolved_path else None
 
-if analyzer is None:
+def _render_single_tabs(analyzer, tab_criteria, tab_vehicle, tab_critical, tab_details):
+    with tab_criteria:
+        st.subheader("Criteria: TP rate and total frames")
+        criteria_df = analyzer.create_criteria_matrix()
+        st.dataframe(criteria_df, use_container_width=True, hide_index=True)
+        criteria_df = criteria_df.copy()
+        criteria_df["criteria_num"] = criteria_df["Criteria"].str.replace("criteria_", "").astype(int)
+        fig1 = px.line(criteria_df, x="criteria_num", y="TP rate", title="TP rate by criteria", markers=True)
+        fig1.update_layout(xaxis_title="Criteria number", yaxis_title="TP rate", yaxis_range=[0, 1.1])
+        st.plotly_chart(fig1, use_container_width=True)
+        fig2 = px.bar(criteria_df, x="criteria_num", y="Number of total frames", title="Total frames by criteria")
+        fig2.update_layout(xaxis_title="Criteria number")
+        st.plotly_chart(fig2, use_container_width=True)
+
+    with tab_vehicle:
+        st.subheader("Vehicle status vs traffic light type (TP rate)")
+        status_df = analyzer.create_vehicle_status_matrix()
+        tlr_cols = [c for c in status_df.columns if c != "Vehicle Status"]
+        fig = go.Figure(
+            data=go.Heatmap(
+                z=status_df[tlr_cols].values,
+                x=tlr_cols,
+                y=status_df["Vehicle Status"].tolist(),
+                colorscale="RdYlGn", zmin=0, zmax=1,
+                text=[[f"{v:.3f}" for v in row] for row in status_df[tlr_cols].values],
+                texttemplate="%{text}", textfont={"size": 9}, hoverongaps=False,
+            )
+        )
+        fig.update_layout(title="TP rate: Vehicle status vs traffic light type", height=400, xaxis={"tickangle": -45})
+        st.plotly_chart(fig, use_container_width=True)
+        st.subheader("Raw counts (TP / Total)")
+        st.dataframe(analyzer.create_vehicle_status_counts_matrix(), use_container_width=True, hide_index=True)
+
+    with tab_critical:
+        st.subheader("Critical (criteria 5–6) and priority (criteria 2–4) zones")
+        cp_df = analyzer.create_vehicle_status_critical_priority_matrix()
+        tlr_cols_cp = [c for c in cp_df.columns if c != "Vehicle Status"]
+        fig_cp = go.Figure(
+            data=go.Heatmap(
+                z=cp_df[tlr_cols_cp].values, x=tlr_cols_cp, y=cp_df["Vehicle Status"].tolist(),
+                colorscale="RdYlGn", zmin=0, zmax=1,
+                text=[[f"{v:.3f}" for v in row] for row in cp_df[tlr_cols_cp].values],
+                texttemplate="%{text}", textfont={"size": 8}, hoverongaps=False,
+            )
+        )
+        fig_cp.update_layout(
+            title="TP rate: Vehicle status vs traffic light type (critical & priority zones)",
+            height=400, xaxis={"tickangle": -45},
+        )
+        st.plotly_chart(fig_cp, use_container_width=True)
+        st.subheader("Raw counts (TP / Total)")
+        st.dataframe(analyzer.create_vehicle_status_critical_priority_counts_matrix(), use_container_width=True, hide_index=True)
+
+    with tab_details:
+        st.subheader("Per-frame vehicle status and TLR details")
+        details_df = analyzer.get_vehicle_status_details_df()
+        if details_df is not None and not details_df.empty:
+            st.caption("One row per frame. Use filters to narrow down by scenario, status, or traffic light type.")
+            st.dataframe(details_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No vehicle status details available.")
+
+
+def _render_compare_tabs(analyzer_a, analyzer_b, label_a, label_b, tab_criteria, tab_vehicle, tab_critical, tab_details):
+    with tab_criteria:
+        st.subheader("Criteria: A vs B (TP rate and delta)")
+        df_a = analyzer_a.create_criteria_matrix()
+        df_b = analyzer_b.create_criteria_matrix()
+        compare_criteria = df_a[["Criteria"]].copy()
+        compare_criteria["TP rate A"] = df_a["TP rate"].values
+        compare_criteria["TP rate B"] = df_b["TP rate"].values
+        compare_criteria["Δ (B − A)"] = compare_criteria["TP rate B"] - compare_criteria["TP rate A"]
+        st.dataframe(compare_criteria, use_container_width=True, hide_index=True)
+        compare_criteria["criteria_num"] = compare_criteria["Criteria"].str.replace("criteria_", "").astype(int)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=compare_criteria["criteria_num"], y=compare_criteria["TP rate A"], name=label_a, mode="lines+markers"))
+        fig.add_trace(go.Scatter(x=compare_criteria["criteria_num"], y=compare_criteria["TP rate B"], name=label_b, mode="lines+markers"))
+        fig.update_layout(title="TP rate by criteria: A vs B", xaxis_title="Criteria number", yaxis_title="TP rate", yaxis_range=[0, 1.1])
+        st.plotly_chart(fig, use_container_width=True)
+        fig_delta = px.bar(compare_criteria, x="criteria_num", y="Δ (B − A)", title="TP rate delta (B − A) by criteria")
+        fig_delta.update_layout(xaxis_title="Criteria number")
+        fig_delta.add_hline(y=0, line_dash="dash", line_color="gray")
+        st.plotly_chart(fig_delta, use_container_width=True)
+
+    with tab_vehicle:
+        st.subheader("Vehicle status vs TLR type: A vs B (TP rate delta)")
+        status_a = analyzer_a.create_vehicle_status_matrix()
+        status_b = analyzer_b.create_vehicle_status_matrix()
+        tlr_cols = [c for c in status_a.columns if c != "Vehicle Status"]
+        delta_df = status_a[["Vehicle Status"]].copy()
+        for c in tlr_cols:
+            delta_df[c] = status_b[c].values - status_a[c].values
+        fig = go.Figure(
+            data=go.Heatmap(
+                z=delta_df[tlr_cols].values,
+                x=tlr_cols,
+                y=delta_df["Vehicle Status"].tolist(),
+                colorscale="RdBu",
+                zmid=0,
+                text=[[f"{v:+.3f}" for v in row] for row in delta_df[tlr_cols].values],
+                texttemplate="%{text}", textfont={"size": 8}, hoverongaps=False,
+            )
+        )
+        fig.update_layout(
+            title=f"TP rate delta (B − A): Vehicle status vs traffic light type",
+            height=400, xaxis={"tickangle": -45},
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("Green = B better, Red = A better.")
+        with st.expander("Raw A"):
+            st.dataframe(analyzer_a.create_vehicle_status_counts_matrix(), use_container_width=True, hide_index=True)
+        with st.expander("Raw B"):
+            st.dataframe(analyzer_b.create_vehicle_status_counts_matrix(), use_container_width=True, hide_index=True)
+
+    with tab_critical:
+        st.subheader("Critical & priority zones: A vs B (TP rate delta)")
+        cp_a = analyzer_a.create_vehicle_status_critical_priority_matrix()
+        cp_b = analyzer_b.create_vehicle_status_critical_priority_matrix()
+        tlr_cols_cp = [c for c in cp_a.columns if c != "Vehicle Status"]
+        delta_cp = cp_a[["Vehicle Status"]].copy()
+        for c in tlr_cols_cp:
+            delta_cp[c] = cp_b[c].values - cp_a[c].values
+        fig_cp = go.Figure(
+            data=go.Heatmap(
+                z=delta_cp[tlr_cols_cp].values, x=tlr_cols_cp, y=delta_cp["Vehicle Status"].tolist(),
+                colorscale="RdBu", zmid=0,
+                text=[[f"{v:+.3f}" for v in row] for row in delta_cp[tlr_cols_cp].values],
+                texttemplate="%{text}", textfont={"size": 7}, hoverongaps=False,
+            )
+        )
+        fig_cp.update_layout(
+            title="TP rate delta (B − A): Critical & priority zones",
+            height=400, xaxis={"tickangle": -45},
+        )
+        st.plotly_chart(fig_cp, use_container_width=True)
+        with st.expander("Raw A"):
+            st.dataframe(analyzer_a.create_vehicle_status_critical_priority_counts_matrix(), use_container_width=True, hide_index=True)
+        with st.expander("Raw B"):
+            st.dataframe(analyzer_b.create_vehicle_status_critical_priority_counts_matrix(), use_container_width=True, hide_index=True)
+
+    with tab_details:
+        st.subheader("Vehicle status details")
+        view_which = st.radio("Show details for", [label_a, label_b], horizontal=True, key="tlr_details_which")
+        analyzer = analyzer_b if view_which == label_b else analyzer_a
+        details_df = analyzer.get_vehicle_status_details_df()
+        if details_df is not None and not details_df.empty:
+            st.dataframe(details_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No vehicle status details available.")
+
+
+# ----- Sidebar: mode and TLR directory selection -----
+st.sidebar.header("TLR data")
+st.sidebar.caption(f"Data root: `{path_display(data_root)}`")
+
+tlr_candidates = list_tlr_result_directories()
+mode = st.sidebar.radio("Mode", ["Single", "Compare"], horizontal=True, key="tlr_mode")
+
+resolved_path_a = None
+resolved_path_b = None
+
+if tlr_candidates:
+    options = list(range(len(tlr_candidates)))
+    labels = [format_tlr_option(tlr_candidates[i]) for i in options]
+
+    if mode == "Single":
+        sel_a = st.sidebar.selectbox(
+            "Choose TLR result directory (with result.json)",
+            options=options,
+            format_func=lambda i: labels[i],
+            key="tlr_select_a",
+        )
+        resolved_path_a = str(tlr_candidates[sel_a][0])
+        st.sidebar.success(f"Selected: {labels[sel_a]}")
+    else:
+        sel_a = st.sidebar.selectbox(
+            "Baseline (A)",
+            options=options,
+            format_func=lambda i: labels[i],
+            key="tlr_select_a",
+        )
+        resolved_path_a = str(tlr_candidates[sel_a][0])
+        # B: exclude A
+        other_options = [i for i in options if i != sel_a]
+        if not other_options:
+            st.sidebar.warning("Add another TLR result directory under the data root to compare.")
+        else:
+            sel_b = st.sidebar.selectbox(
+                "Compare (B)",
+                options=other_options,
+                index=0,
+                format_func=lambda i: labels[i],
+                key="tlr_select_b",
+            )
+            resolved_path_b = str(tlr_candidates[sel_b][0])
+            st.sidebar.success(f"A: {labels[sel_a]}  →  B: {labels[sel_b]}")
+else:
+    st.sidebar.warning(
+        "No TLR result directories found. Under the data root we look for directories that contain "
+        "**result.json** (direct subfolders or suite folders whose subfolders have result.json)."
+    )
+
+# ----- Load analyzer(s) -----
+analyzer_a = get_or_load_analyzer(resolved_path_a) if resolved_path_a else None
+analyzer_b = get_or_load_analyzer(resolved_path_b) if (mode == "Compare" and resolved_path_b) else None
+
+if analyzer_a is None:
     st.info(
-        "No TLR result directory selected. In the sidebar, choose a directory that contains **result.json** "
-        "(direct subfolders with `result.json` per scenario, or suite folders whose testcase subfolders have `result.json`). "
+        "No TLR result directory selected. In the sidebar, choose a directory that contains **result.json**. "
         "Candidates are discovered automatically under the data root."
     )
     st.stop()
 
-# ----- Summary stats -----
-stats = analyzer.get_summary_stats()
-st.subheader("Overview")
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Scenarios", stats["num_scenarios"])
-c2.metric("Total frames", f"{stats['total_frames']:,}")
-c3.metric("Total TP", f"{stats['total_tp']:,}")
-c4.metric("Overall TP rate", f"{stats['overall_tp_rate']:.2%}")
-c5.metric("Scenarios w/ criteria", stats["num_scenarios_with_criteria"])
-if stats.get("best_criteria") is not None:
-    st.caption(
-        f"Best criteria: **{stats['best_criteria']}** (TP rate {stats['best_tp_rate']:.2%}) — "
-        f"Worst: **{stats['worst_criteria']}** (TP rate {stats['worst_tp_rate']:.2%})"
-    )
+# ----- Labels for compare mode -----
+label_a = Path(resolved_path_a).name if resolved_path_a else "A"
+label_b = Path(resolved_path_b).name if resolved_path_b else "B"
 
-# ----- Tabs: Criteria | Vehicle status | Critical/Priority | Details -----
+# ========== SINGLE MODE ==========
+if mode == "Single":
+    stats = analyzer_a.get_summary_stats()
+    st.subheader("Overview")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Scenarios", stats["num_scenarios"])
+    c2.metric("Total frames", f"{stats['total_frames']:,}")
+    c3.metric("Total TP", f"{stats['total_tp']:,}")
+    c4.metric("Overall TP rate", f"{stats['overall_tp_rate']:.2%}")
+    c5.metric("Scenarios w/ criteria", stats["num_scenarios_with_criteria"])
+    if stats.get("best_criteria") is not None:
+        st.caption(
+            f"Best criteria: **{stats['best_criteria']}** (TP rate {stats['best_tp_rate']:.2%}) — "
+            f"Worst: **{stats['worst_criteria']}** (TP rate {stats['worst_tp_rate']:.2%})"
+        )
+
+    tab_criteria, tab_vehicle, tab_critical, tab_details = st.tabs([
+        "Criteria matrix", "Vehicle status vs TLR type", "Critical & priority zones", "Vehicle status details",
+    ])
+    _render_single_tabs(analyzer_a, tab_criteria, tab_vehicle, tab_critical, tab_details)
+    st.stop()
+
+# ========== COMPARE MODE ==========
+if analyzer_b is None:
+    st.info("Select a second TLR result directory (Compare B) in the sidebar to compare.")
+    st.stop()
+
+stats_a = analyzer_a.get_summary_stats()
+stats_b = analyzer_b.get_summary_stats()
+
+st.subheader("Overview: A vs B")
+col_a, col_delta, col_b = st.columns(3)
+with col_a:
+    st.markdown(f"**{label_a} (Baseline)**")
+    st.metric("Scenarios", stats_a["num_scenarios"])
+    st.metric("Total frames", f"{stats_a['total_frames']:,}")
+    st.metric("Total TP", f"{stats_a['total_tp']:,}")
+    st.metric("Overall TP rate", f"{stats_a['overall_tp_rate']:.2%}")
+with col_delta:
+    st.markdown("**Δ (B − A)**")
+    st.metric("Scenarios", stats_b["num_scenarios"] - stats_a["num_scenarios"])
+    st.metric("Total frames", f"{stats_b['total_frames'] - stats_a['total_frames']:+,}")
+    st.metric("Total TP", f"{stats_b['total_tp'] - stats_a['total_tp']:+,}")
+    delta_rate = stats_b["overall_tp_rate"] - stats_a["overall_tp_rate"]
+    st.metric("Overall TP rate", f"{delta_rate:+.2%}")
+with col_b:
+    st.markdown(f"**{label_b} (Compare)**")
+    st.metric("Scenarios", stats_b["num_scenarios"])
+    st.metric("Total frames", f"{stats_b['total_frames']:,}")
+    st.metric("Total TP", f"{stats_b['total_tp']:,}")
+    st.metric("Overall TP rate", f"{stats_b['overall_tp_rate']:.2%}")
+
 tab_criteria, tab_vehicle, tab_critical, tab_details = st.tabs([
-    "Criteria matrix",
-    "Vehicle status vs TLR type",
-    "Critical & priority zones",
-    "Vehicle status details",
+    "Criteria matrix", "Vehicle status vs TLR type", "Critical & priority zones", "Vehicle status details",
 ])
-
-with tab_criteria:
-    st.subheader("Criteria: TP rate and total frames")
-    criteria_df = analyzer.create_criteria_matrix()
-    st.dataframe(criteria_df, use_container_width=True, hide_index=True)
-    # Plot: TP rate by criteria
-    criteria_df = criteria_df.copy()
-    criteria_df["criteria_num"] = criteria_df["Criteria"].str.replace("criteria_", "").astype(int)
-    fig1 = px.line(
-        criteria_df,
-        x="criteria_num",
-        y="TP rate",
-        title="TP rate by criteria",
-        markers=True,
-    )
-    fig1.update_layout(xaxis_title="Criteria number", yaxis_title="TP rate", yaxis_range=[0, 1.1])
-    st.plotly_chart(fig1, use_container_width=True)
-    # Plot: Total frames by criteria
-    fig2 = px.bar(
-        criteria_df,
-        x="criteria_num",
-        y="Number of total frames",
-        title="Total frames by criteria",
-    )
-    fig2.update_layout(xaxis_title="Criteria number")
-    st.plotly_chart(fig2, use_container_width=True)
-
-with tab_vehicle:
-    st.subheader("Vehicle status vs traffic light type (TP rate)")
-    status_df = analyzer.create_vehicle_status_matrix()
-    tlr_cols = [c for c in status_df.columns if c != "Vehicle Status"]
-    # Heatmap with Plotly
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=status_df[tlr_cols].values,
-            x=tlr_cols,
-            y=status_df["Vehicle Status"].tolist(),
-            colorscale="RdYlGn",
-            zmin=0,
-            zmax=1,
-            text=[[f"{v:.3f}" for v in row] for row in status_df[tlr_cols].values],
-            texttemplate="%{text}",
-            textfont={"size": 9},
-            hoverongaps=False,
-        )
-    )
-    fig.update_layout(
-        title="TP rate: Vehicle status vs traffic light type",
-        xaxis_title="",
-        yaxis_title="",
-        height=400,
-        xaxis={"tickangle": -45},
-    )
-    st.plotly_chart(fig, use_container_width=True)
-    st.subheader("Raw counts (TP / Total)")
-    counts_df = analyzer.create_vehicle_status_counts_matrix()
-    st.dataframe(counts_df, use_container_width=True, hide_index=True)
-
-with tab_critical:
-    st.subheader("Critical (criteria 5–6) and priority (criteria 2–4) zones")
-    cp_df = analyzer.create_vehicle_status_critical_priority_matrix()
-    tlr_cols_cp = [c for c in cp_df.columns if c != "Vehicle Status"]
-    fig_cp = go.Figure(
-        data=go.Heatmap(
-            z=cp_df[tlr_cols_cp].values,
-            x=tlr_cols_cp,
-            y=cp_df["Vehicle Status"].tolist(),
-            colorscale="RdYlGn",
-            zmin=0,
-            zmax=1,
-            text=[[f"{v:.3f}" for v in row] for row in cp_df[tlr_cols_cp].values],
-            texttemplate="%{text}",
-            textfont={"size": 8},
-            hoverongaps=False,
-        )
-    )
-    fig_cp.update_layout(
-        title="TP rate: Vehicle status vs traffic light type (critical & priority zones)",
-        xaxis_title="",
-        yaxis_title="",
-        height=400,
-        xaxis={"tickangle": -45},
-    )
-    st.plotly_chart(fig_cp, use_container_width=True)
-    st.subheader("Raw counts (TP / Total)")
-    cp_counts_df = analyzer.create_vehicle_status_critical_priority_counts_matrix()
-    st.dataframe(cp_counts_df, use_container_width=True, hide_index=True)
-
-with tab_details:
-    st.subheader("Per-frame vehicle status and TLR details")
-    details_df = analyzer.get_vehicle_status_details_df()
-    if details_df is not None and not details_df.empty:
-        st.caption("One row per frame. Use filters to narrow down by scenario, status, or traffic light type.")
-        st.dataframe(details_df, use_container_width=True, hide_index=True)
-    else:
-        st.info("No vehicle status details available.")
+_render_compare_tabs(analyzer_a, analyzer_b, label_a, label_b, tab_criteria, tab_vehicle, tab_critical, tab_details)
