@@ -36,6 +36,10 @@ def get_config_value(key, default=None):
 def set_config_value(key, value):
     _user_config.set(key, value)
 
+# Environment for Evaluator API: only "default" is used in practice.
+# Change here to "dev" or "stg" if needed; no UI is exposed for this.
+ENVIRONMENT = "default"
+
 # Try to import the authentication module, with fallback handling
 # https://github.com/tier4/webauto-auth-py.git
 try:
@@ -935,14 +939,8 @@ def generate_summary_and_score_csv(input_path: str) -> Dict[str, Any]:
 with st.sidebar:
     st.header("Configuration")
     
-    environment = st.selectbox(
-        "Environment",
-        ["default", "dev", "stg"],
-        help="Select the environment",
-        index=["default", "dev", "stg"].index(get_config_value("environment", "default"))
-    )
-    set_config_value("environment", environment)
-    
+    environment = ENVIRONMENT  # Not exposed in UI; change ENVIRONMENT constant above if needed
+
     project_id = st.text_input(
         "Project ID",
         value=get_config_value("project_id", "x2_dev"),
