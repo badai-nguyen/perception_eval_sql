@@ -162,7 +162,7 @@ def _render_tree_expander(obj: Any, label: str, depth: int, max_depth: int, key_
     summary = _type_summary(obj)
     with st.expander(f"**{label}** — {summary}", expanded=(depth < 2)):
         if isinstance(obj, pd.DataFrame):
-            st.dataframe(obj.head(20), use_container_width=True)
+            st.dataframe(obj.head(20), width='stretch')
         elif isinstance(obj, dict):
             for k, v in list(obj.items())[:15]:
                 _render_tree_expander(v, f"[{repr(k)}]", depth + 1, max_depth, f"{key_prefix}_{repr(k)}")
@@ -503,7 +503,7 @@ if file_type == "result.json":
                 })
             if rows:
                 cond_df = pd.DataFrame(rows)
-                st.dataframe(cond_df, use_container_width=True, hide_index=True)
+                st.dataframe(cond_df, width='stretch', hide_index=True)
 
         # Overview metrics
         frames_list = viz["frames"]
@@ -545,7 +545,7 @@ if file_type == "result.json":
                     height=220,
                     margin=dict(t=40, b=40, l=50, r=30),
                 )
-                st.plotly_chart(fig_timeline, use_container_width=True)
+                st.plotly_chart(fig_timeline, width='stretch')
 
             # Criteria heatmap: rows = frames (optionally downsampled), cols = criteria_0..N
             frame_recs_with_criteria = [f for f in frames_list if f.get("criteria_status")]
@@ -586,7 +586,7 @@ if file_type == "result.json":
                         height=min(500, 80 + len(subset) * 12),
                         margin=dict(t=40, b=40, l=80, r=100),
                     )
-                    st.plotly_chart(fig_heat, use_container_width=True)
+                    st.plotly_chart(fig_heat, width='stretch')
 
         if viz["final_score"]:
             with st.expander("FinalScore (from last line)"):
@@ -686,7 +686,7 @@ elif file_type == "Parquet":
 
     st.subheader("Schema (column names and types)")
     st.caption("DuckDB interpretation of parquet column names and types.")
-    st.dataframe(schema_df, use_container_width=True)
+    st.dataframe(schema_df, width='stretch')
 
     st.subheader("Preview rows")
     preview_mode = st.radio(
@@ -712,18 +712,18 @@ elif file_type == "Parquet":
 
     if preview_mode == "First N rows":
         preview_df = run_preview(target_file, n_rows, from_end=False)
-        st.dataframe(preview_df, use_container_width=True)
+        st.dataframe(preview_df, width='stretch')
     elif preview_mode == "Last N rows":
         preview_df = run_preview(target_file, n_rows, from_end=True)
-        st.dataframe(preview_df, use_container_width=True)
+        st.dataframe(preview_df, width='stretch')
     else:
         c1, c2 = st.columns(2)
         with c1:
             st.write("**First N rows**")
-            st.dataframe(run_preview(target_file, n_rows, from_end=False), use_container_width=True)
+            st.dataframe(run_preview(target_file, n_rows, from_end=False), width='stretch')
         with c2:
             st.write("**Last N rows**")
-            st.dataframe(run_preview(target_file, n_rows, from_end=True), use_container_width=True)
+            st.dataframe(run_preview(target_file, n_rows, from_end=True), width='stretch')
 
     st.subheader("Column statistics")
     st.caption("Null counts, distinct counts, and min/max for numeric columns.")
@@ -763,7 +763,7 @@ elif file_type == "Parquet":
                 "distinct_count": distinct,
             })
         stats_df = pd.DataFrame(stats_rows)
-        st.dataframe(stats_df, use_container_width=True)
+        st.dataframe(stats_df, width='stretch')
 
     st.subheader("Sample values by column")
     col_choice = st.selectbox("Column", columns, key="pq_sample_col")
@@ -774,7 +774,7 @@ elif file_type == "Parquet":
             f"SELECT DISTINCT {safe_col} AS value FROM read_parquet(?) ORDER BY value LIMIT ?",
             [target_file, n_sample],
         ).df()
-        st.dataframe(sample_df, use_container_width=True)
+        st.dataframe(sample_df, width='stretch')
     except Exception as e:
         st.warning(f"Could not sample column: {e}")
 
@@ -784,7 +784,7 @@ elif file_type == "Parquet":
         if st.button("Run"):
             try:
                 custom_df = con.execute(custom_sql, [target_file]).df()
-                st.dataframe(custom_df, use_container_width=True)
+                st.dataframe(custom_df, width='stretch')
             except Exception as e:
                 st.error(str(e))
 
@@ -828,7 +828,7 @@ else:  # PKL
         rows = _summary_rows(pkl_data)
         if rows:
             summary_df = pd.DataFrame(rows, columns=["Attribute", "Type", "Summary"])
-            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+            st.dataframe(summary_df, width='stretch', hide_index=True)
         # If root is a list of objects, show "first item" attribute table so users see one frame's shape
         if isinstance(pkl_data, (list, tuple)) and len(pkl_data) > 0:
             first = pkl_data[0]
@@ -836,7 +836,7 @@ else:  # PKL
                 st.markdown("**First item attributes** (shape of one element)")
                 first_rows = _summary_rows(first, prefix="[0]")
                 first_df = pd.DataFrame(first_rows, columns=["Attribute", "Type", "Summary"])
-                st.dataframe(first_df, use_container_width=True, hide_index=True)
+                st.dataframe(first_df, width='stretch', hide_index=True)
                 idx = st.selectbox(
                     "Or summarize item at index",
                     options=list(range(min(10, len(pkl_data)))),
@@ -847,7 +847,7 @@ else:  # PKL
                     if hasattr(other, "__dict__"):
                         other_rows = _summary_rows(other, prefix=f"[{idx}]")
                         other_df = pd.DataFrame(other_rows, columns=["Attribute", "Type", "Summary"])
-                        st.dataframe(other_df, use_container_width=True, hide_index=True)
+                        st.dataframe(other_df, width='stretch', hide_index=True)
     elif view_mode == "Tree (expandable)":
         tree_depth = st.slider("Max expand depth", 1, 5, 2, key="pkl_tree_depth")
         _render_tree_expander(pkl_data, "root", depth=0, max_depth=tree_depth, key_prefix="pkl_tree")
@@ -859,7 +859,7 @@ else:  # PKL
     if isinstance(pkl_data, pd.DataFrame):
         st.subheader("DataFrame preview")
         n_pkl = st.slider("Rows to show", 5, 500, 50, key="pkl_n_rows")
-        st.dataframe(pkl_data.head(n_pkl), use_container_width=True)
+        st.dataframe(pkl_data.head(n_pkl), width='stretch')
     else:
         # Collect any DataFrames found in the structure for optional preview
         def find_dataframes(obj: Any, path: str = "root") -> List[Tuple[str, pd.DataFrame]]:
@@ -890,7 +890,7 @@ else:  # PKL
             path_label, df_preview = dfs_found[df_choice]
             st.caption(f"Path: `{path_label}`")
             n_pkl = st.slider("Rows to show", 5, 500, 50, key="pkl_n_rows")
-            st.dataframe(df_preview.head(n_pkl), use_container_width=True)
+            st.dataframe(df_preview.head(n_pkl), width='stretch')
 
     st.subheader("Sample values")
     st.caption("Actual content of the first few items (no object addresses).")

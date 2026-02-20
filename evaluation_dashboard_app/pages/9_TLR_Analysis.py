@@ -71,15 +71,15 @@ def _render_single_tabs(analyzer, tab_criteria, tab_vehicle, tab_critical, tab_d
     with tab_criteria:
         st.subheader("Criteria: TP rate and total frames")
         criteria_df = analyzer.create_criteria_matrix()
-        st.dataframe(criteria_df, use_container_width=True, hide_index=True)
+        st.dataframe(criteria_df, width='stretch', hide_index=True)
         criteria_df = criteria_df.copy()
         criteria_df["criteria_num"] = criteria_df["Criteria"].str.replace("criteria_", "").astype(int)
         fig1 = px.line(criteria_df, x="criteria_num", y="TP rate", title="TP rate by criteria", markers=True)
         fig1.update_layout(xaxis_title="Criteria number", yaxis_title="TP rate", yaxis_range=[0, 1.1])
-        st.plotly_chart(fig1, use_container_width=True)
+        st.plotly_chart(fig1, width='stretch')
         fig2 = px.bar(criteria_df, x="criteria_num", y="Number of total frames", title="Total frames by criteria")
         fig2.update_layout(xaxis_title="Criteria number")
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width='stretch')
 
     with tab_vehicle:
         st.subheader("Vehicle status vs traffic light type (TP rate)")
@@ -96,9 +96,9 @@ def _render_single_tabs(analyzer, tab_criteria, tab_vehicle, tab_critical, tab_d
             )
         )
         fig.update_layout(title="TP rate: Vehicle status vs traffic light type", height=400, xaxis={"tickangle": -45})
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
         st.subheader("Raw counts (TP / Total)")
-        st.dataframe(analyzer.create_vehicle_status_counts_matrix(), use_container_width=True, hide_index=True)
+        st.dataframe(analyzer.create_vehicle_status_counts_matrix(), width='stretch', hide_index=True)
 
     with tab_critical:
         st.subheader("Critical (criteria 5–6) and priority (criteria 2–4) zones")
@@ -116,16 +116,16 @@ def _render_single_tabs(analyzer, tab_criteria, tab_vehicle, tab_critical, tab_d
             title="TP rate: Vehicle status vs traffic light type (critical & priority zones)",
             height=400, xaxis={"tickangle": -45},
         )
-        st.plotly_chart(fig_cp, use_container_width=True)
+        st.plotly_chart(fig_cp, width='stretch')
         st.subheader("Raw counts (TP / Total)")
-        st.dataframe(analyzer.create_vehicle_status_critical_priority_counts_matrix(), use_container_width=True, hide_index=True)
+        st.dataframe(analyzer.create_vehicle_status_critical_priority_counts_matrix(), width='stretch', hide_index=True)
 
     with tab_details:
         st.subheader("Per-frame vehicle status and TLR details")
         details_df = analyzer.get_vehicle_status_details_df()
         if details_df is not None and not details_df.empty:
             st.caption("One row per frame. Use filters to narrow down by scenario, status, or traffic light type.")
-            st.dataframe(details_df, use_container_width=True, hide_index=True)
+            st.dataframe(details_df, width='stretch', hide_index=True)
         else:
             st.info("No vehicle status details available.")
 
@@ -139,13 +139,13 @@ def _render_compare_tabs(analyzer_a, analyzer_b, label_a, label_b, tab_criteria,
         compare_criteria["TP rate A"] = df_a["TP rate"].values
         compare_criteria["TP rate B"] = df_b["TP rate"].values
         compare_criteria["Δ (B − A)"] = compare_criteria["TP rate B"] - compare_criteria["TP rate A"]
-        st.dataframe(compare_criteria, use_container_width=True, hide_index=True)
+        st.dataframe(compare_criteria, width='stretch', hide_index=True)
         compare_criteria["criteria_num"] = compare_criteria["Criteria"].str.replace("criteria_", "").astype(int)
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=compare_criteria["criteria_num"], y=compare_criteria["TP rate A"], name=label_a, mode="lines+markers"))
         fig.add_trace(go.Scatter(x=compare_criteria["criteria_num"], y=compare_criteria["TP rate B"], name=label_b, mode="lines+markers"))
         fig.update_layout(title="TP rate by criteria: A vs B", xaxis_title="Criteria number", yaxis_title="TP rate", yaxis_range=[0, 1.1])
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
         delta_vals = compare_criteria["Δ (B − A)"].values
         bar_colors = ["#2ecc71" if v >= 0 else "#e74c3c" for v in delta_vals]
         fig_delta = go.Figure(
@@ -164,7 +164,7 @@ def _render_compare_tabs(analyzer_a, analyzer_b, label_a, label_b, tab_criteria,
             showlegend=False,
         )
         fig_delta.add_hline(y=0, line_dash="dash", line_color="gray")
-        st.plotly_chart(fig_delta, use_container_width=True)
+        st.plotly_chart(fig_delta, width='stretch')
 
     with tab_vehicle:
         st.subheader("Vehicle status vs TLR type: A vs B (TP rate delta)")
@@ -191,12 +191,12 @@ def _render_compare_tabs(analyzer_a, analyzer_b, label_a, label_b, tab_criteria,
             title=f"TP rate delta (B − A): Vehicle status vs traffic light type",
             height=400, xaxis={"tickangle": -45},
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
         st.caption("Green = B better, Red = A better.")
         with st.expander("Raw A"):
-            st.dataframe(analyzer_a.create_vehicle_status_counts_matrix(), use_container_width=True, hide_index=True)
+            st.dataframe(analyzer_a.create_vehicle_status_counts_matrix(), width='stretch', hide_index=True)
         with st.expander("Raw B"):
-            st.dataframe(analyzer_b.create_vehicle_status_counts_matrix(), use_container_width=True, hide_index=True)
+            st.dataframe(analyzer_b.create_vehicle_status_counts_matrix(), width='stretch', hide_index=True)
 
     with tab_critical:
         st.subheader("Critical & priority zones: A vs B (TP rate delta)")
@@ -221,11 +221,11 @@ def _render_compare_tabs(analyzer_a, analyzer_b, label_a, label_b, tab_criteria,
             title="TP rate delta (B − A): Critical & priority zones",
             height=400, xaxis={"tickangle": -45},
         )
-        st.plotly_chart(fig_cp, use_container_width=True)
+        st.plotly_chart(fig_cp, width='stretch')
         with st.expander("Raw A"):
-            st.dataframe(analyzer_a.create_vehicle_status_critical_priority_counts_matrix(), use_container_width=True, hide_index=True)
+            st.dataframe(analyzer_a.create_vehicle_status_critical_priority_counts_matrix(), width='stretch', hide_index=True)
         with st.expander("Raw B"):
-            st.dataframe(analyzer_b.create_vehicle_status_critical_priority_counts_matrix(), use_container_width=True, hide_index=True)
+            st.dataframe(analyzer_b.create_vehicle_status_critical_priority_counts_matrix(), width='stretch', hide_index=True)
 
     with tab_details:
         st.subheader("Vehicle status details")
@@ -233,7 +233,7 @@ def _render_compare_tabs(analyzer_a, analyzer_b, label_a, label_b, tab_criteria,
         analyzer = analyzer_b if view_which == label_b else analyzer_a
         details_df = analyzer.get_vehicle_status_details_df()
         if details_df is not None and not details_df.empty:
-            st.dataframe(details_df, use_container_width=True, hide_index=True)
+            st.dataframe(details_df, width='stretch', hide_index=True)
         else:
             st.info("No vehicle status details available.")
 

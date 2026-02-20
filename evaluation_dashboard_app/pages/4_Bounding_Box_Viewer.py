@@ -427,9 +427,9 @@ if show_a and show_b:
     fig_b = _build_one_bev_figure(df_frame_b, title_b, show_invalid)
     col1, col2 = st.columns(2)
     with col1:
-        st.plotly_chart(fig_a, use_container_width=True)
+        st.plotly_chart(fig_a, width='stretch')
     with col2:
-        st.plotly_chart(fig_b, use_container_width=True)
+        st.plotly_chart(fig_b, width='stretch')
 else:
     # Single run: one BEV plot
     fig = _build_one_bev_figure(
@@ -643,13 +643,13 @@ if not uuid_traj.empty:
         with col_ta:
             traj_a = uuid_traj[uuid_traj["run"] == "A"]
             if not traj_a.empty:
-                st.plotly_chart(_draw_trajectory_figure(traj_a, f"Run A: UUID {bad_uuid} ({label_str})"), use_container_width=True)
+                st.plotly_chart(_draw_trajectory_figure(traj_a, f"Run A: UUID {bad_uuid} ({label_str})"), width='stretch')
             else:
                 st.info("No trajectory for this UUID in run A.")
         with col_tb:
             traj_b = uuid_traj[uuid_traj["run"] == "B"]
             if not traj_b.empty:
-                st.plotly_chart(_draw_trajectory_figure(traj_b, f"Run B: UUID {bad_uuid} ({label_str})"), use_container_width=True)
+                st.plotly_chart(_draw_trajectory_figure(traj_b, f"Run B: UUID {bad_uuid} ({label_str})"), width='stretch')
             else:
                 st.info("No trajectory for this UUID in run B.")
     else:
