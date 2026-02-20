@@ -229,11 +229,198 @@ def _render_compare_tabs(analyzer_a, analyzer_b, label_a, label_b, tab_criteria,
 
     with tab_details:
         st.subheader("Vehicle status details")
+        details_a = analyzer_a.get_vehicle_status_details_df()
+        details_b = analyzer_b.get_vehicle_status_details_df()
+        if details_a is not None and not details_a.empty and details_b is not None and not details_b.empty:
+            merge_keys = ["scenario", "frame_index"]
+            a_sub = details_a[merge_keys + ["frame_name", "status", "traffic_light_type"]].copy()
+            a_sub = a_sub.rename(columns={"frame_name": "frame_name_a", "status": "status_a", "traffic_light_type": f"traffic_light_type ({label_a})"})
+            b_sub = details_b[merge_keys + ["frame_name", "status", "traffic_light_type"]].copy()
+            b_sub = b_sub.rename(columns={"frame_name": "frame_name_b", "status": "status_b", "traffic_light_type": f"traffic_light_type ({label_b})"})
+            merged = a_sub.merge(b_sub, on=merge_keys, how="inner")
+            tlr_col_a = f"traffic_light_type ({label_a})"
+            tlr_col_b = f"traffic_light_type ({label_b})"
+            merged["_diff"] = merged[tlr_col_a] != merged[tlr_col_b]
+            diff_tlr = merged[merged["_diff"]]
+
+            view_mode = st.radio(
+                "Compare view",
+                [
+                    "Only frames where traffic light type differs (A vs B)",
+                    "All frames (mark differences)",
+                ],
+                horizontal=True,
+                key="tlr_compare_view_mode",
+            )
+            show_only_diff = view_mode == "Only frames where traffic light type differs (A vs B)"
+
+            # ---- Filters & sort (apply to both views) ----
+            all_scenarios = sorted(merged["scenario"].unique().tolist())
+            all_statuses = ["Driving", "Turning", "No Move"]
+            all_tlr_types = sorted(
+                set(merged[tlr_col_a].dropna().astype(str).unique()) | set(merged[tlr_col_b].dropna().astype(str).unique())
+            )
+
+            with st.expander("Filters & sort", expanded=False):
+                f1, f2, f3 = st.columns(3)
+                with f1:
+                    sel_scenarios = st.multiselect(
+                        "Scenario(s)",
+                        options=all_scenarios,
+                        default=[],
+                        key="tlr_filter_scenario",
+                        help="Leave empty to show all scenarios. Select one or more to focus on specific scenes.",
+                    )
+                with f2:
+                    sel_status = st.multiselect(
+                        "Vehicle status (A or B)",
+                        options=all_statuses,
+                        default=[],
+                        key="tlr_filter_status",
+                        help="Show only rows where status in A or B is one of these. Empty = all.",
+                    )
+                with f3:
+                    sel_tlr_a = st.multiselect(
+                        f"Traffic light type in {label_a}",
+                        options=all_tlr_types,
+                        default=[],
+                        key="tlr_filter_tlr_a",
+                        help="Filter by type in baseline. Empty = any.",
+                    )
+                s1, s2 = st.columns(2)
+                with s1:
+                    sel_tlr_b = st.multiselect(
+                        f"Traffic light type in {label_b}",
+                        options=all_tlr_types,
+                        default=[],
+                        key="tlr_filter_tlr_b",
+                        help="Filter by type in compare. Empty = any.",
+                    )
+                with s2:
+                    sort_by = st.selectbox(
+                        "Sort by",
+                        [
+                            "Scenario, then frame index",
+                            "Frame index only",
+                            "Difference first (then scenario, frame)",
+                            f"Traffic light type ({label_a})",
+                            f"Traffic light type ({label_b})",
+                        ],
+                        key="tlr_sort_by",
+                    )
+
+            # Apply filters to merged and diff_tlr
+            filtered_merged = merged.copy()
+            if sel_scenarios:
+                filtered_merged = filtered_merged[filtered_merged["scenario"].isin(sel_scenarios)]
+            if sel_status:
+                filtered_merged = filtered_merged[
+                    filtered_merged["status_a"].isin(sel_status) | filtered_merged["status_b"].isin(sel_status)
+                ]
+            if sel_tlr_a:
+                filtered_merged = filtered_merged[filtered_merged[tlr_col_a].astype(str).isin(sel_tlr_a)]
+            if sel_tlr_b:
+                filtered_merged = filtered_merged[filtered_merged[tlr_col_b].astype(str).isin(sel_tlr_b)]
+            filtered_diff = filtered_merged[filtered_merged["_diff"]]
+
+            # Sort
+            if sort_by == "Scenario, then frame index":
+                filtered_merged = filtered_merged.sort_values(["scenario", "frame_index"]).reset_index(drop=True)
+            elif sort_by == "Frame index only":
+                filtered_merged = filtered_merged.sort_values("frame_index").reset_index(drop=True)
+            elif sort_by == "Difference first (then scenario, frame)":
+                filtered_merged = filtered_merged.sort_values(
+                    ["_diff", "scenario", "frame_index"], ascending=[False, True, True]
+                ).reset_index(drop=True)
+            elif sort_by == f"Traffic light type ({label_a})":
+                filtered_merged = filtered_merged.sort_values([tlr_col_a, "scenario", "frame_index"]).reset_index(drop=True)
+            else:
+                filtered_merged = filtered_merged.sort_values([tlr_col_b, "scenario", "frame_index"]).reset_index(drop=True)
+
+            # Use filtered data for display
+            to_show_merged = filtered_merged
+            to_show_diff = filtered_diff
+
+            if show_only_diff:
+                if not to_show_diff.empty:
+                    st.markdown("**Frames where traffic light type differs (A vs B)**")
+                    display_df = to_show_diff[[
+                        "scenario", "frame_index",
+                        tlr_col_a, tlr_col_b,
+                        "status_a", "status_b",
+                    ]].copy()
+                    display_df = display_df.rename(columns={"status_a": f"status ({label_a})", "status_b": f"status ({label_b})"})
+                    def _highlight_diff_columns(series):
+                        if series.name in (tlr_col_a, tlr_col_b):
+                            return ["background-color: #ffe6e6"] * len(series)
+                        return [""] * len(series)
+                    styled = display_df.style.apply(_highlight_diff_columns, axis=0)
+                    st.dataframe(styled, width='stretch', hide_index=True)
+                    caption = f"Showing **{len(to_show_diff)}** frame(s) with different traffic light type (of {len(diff_tlr)} total before filters)."
+                    if sel_scenarios or sel_status or sel_tlr_a or sel_tlr_b:
+                        caption += " Filters applied."
+                    st.caption(caption)
+                    # Download CSV
+                    csv_bytes = display_df.to_csv(index=False).encode("utf-8")
+                    st.download_button("Download as CSV", data=csv_bytes, file_name="tlr_diff_frames.csv", mime="text/csv", key="tlr_dl_diff")
+                else:
+                    st.info(
+                        f"No frames with different traffic light type between {label_a} and {label_b}"
+                        + (" for the selected filters." if (sel_scenarios or sel_status or sel_tlr_a or sel_tlr_b) else ".")
+                    )
+            else:
+                st.markdown("**All frames (A vs B)** — rows where traffic light type differs are highlighted.")
+                display_df = to_show_merged[[
+                    "scenario", "frame_index",
+                    tlr_col_a, tlr_col_b,
+                    "status_a", "status_b",
+                ]].copy()
+                display_df = display_df.rename(columns={"status_a": f"status ({label_a})", "status_b": f"status ({label_b})"})
+                def _highlight_diff_rows(df):
+                    diff_mask = to_show_merged["_diff"].values
+                    data = [
+                        ["background-color: #ffe6e6" if diff_mask[i] and col in (tlr_col_a, tlr_col_b) else "" for col in df.columns]
+                        for i in range(len(df))
+                    ]
+                    return pd.DataFrame(data, index=df.index, columns=df.columns)
+                styled = display_df.style.apply(_highlight_diff_rows, axis=None)
+                st.dataframe(styled, width='stretch', hide_index=True)
+                num_diff = to_show_merged["_diff"].sum()
+                caption = f"Showing **{len(to_show_merged)}** frame(s) ({int(num_diff)} with different type). Total before filters: {len(merged)}."
+                if sel_scenarios or sel_status or sel_tlr_a or sel_tlr_b:
+                    caption += " Filters applied."
+                st.caption(caption)
+                csv_bytes = display_df.to_csv(index=False).encode("utf-8")
+                st.download_button("Download as CSV", data=csv_bytes, file_name="tlr_compare_all_frames.csv", mime="text/csv", key="tlr_dl_all")
+        else:
+            st.caption("Need details from both A and B to show traffic light type differences.")
+        st.markdown("---")
+        st.markdown("**Per-dataset details** (single run)")
         view_which = st.radio("Show details for", [label_a, label_b], horizontal=True, key="tlr_details_which")
         analyzer = analyzer_b if view_which == label_b else analyzer_a
         details_df = analyzer.get_vehicle_status_details_df()
         if details_df is not None and not details_df.empty:
+            # Filter by scenario for per-dataset view too
+            single_scenarios = sorted(details_df["scenario"].unique().tolist())
+            with st.expander("Filter by scenario", expanded=False):
+                single_sel = st.multiselect(
+                    "Scenario(s)",
+                    options=single_scenarios,
+                    default=[],
+                    key="tlr_single_filter_scenario",
+                    help="Leave empty for all scenarios.",
+                )
+            if single_sel:
+                details_df = details_df[details_df["scenario"].isin(single_sel)]
             st.dataframe(details_df, width='stretch', hide_index=True)
+            if not details_df.empty:
+                st.download_button(
+                    "Download as CSV",
+                    data=details_df.to_csv(index=False).encode("utf-8"),
+                    file_name=f"tlr_details_{view_which.replace(' ', '_')}.csv",
+                    mime="text/csv",
+                    key="tlr_dl_single",
+                )
         else:
             st.info("No vehicle status details available.")
 
