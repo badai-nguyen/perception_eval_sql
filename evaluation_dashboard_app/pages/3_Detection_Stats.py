@@ -263,7 +263,6 @@ with st.sidebar:
             )
     
     con = get_duckdb_connection()
-    print("target_file", target_file)
     # Validate parquet files are readable before creating views
     ok, msg = validate_parquet_file(con, target_file)
     if not ok:
