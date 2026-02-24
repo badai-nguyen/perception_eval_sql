@@ -1,6 +1,8 @@
 # data
 data/
 downloads/
+# Docker Compose bind mounts (host-visible data)
+evaluation_dashboard_app/deploy/postgres_data/
 *.pyc
 *.txt
 *.pkl

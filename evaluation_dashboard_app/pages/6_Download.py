@@ -19,13 +19,34 @@ from typing import Text, Optional, List, Dict, Any
 from lib.WebAPI import scenarioAPI
 from lib.user_config import UserConfig
 from lib.path_utils import get_data_root, resolve_under_data_root
-from lib.perception_eval_result_summarizer import run_eval_result, generate_score_json
+from lib.eval_summary import find_eval_result_dirs, run_eval_result_for_dir, generate_summary_and_score_csv
+from lib.db import is_task_queue_enabled, create_task, list_recent_tasks, get_task
+from lib.auth import get_current_user_id, is_auth_enabled
 
 try:
     from lib.perception_catalog_io import pkl_archive_to_parquet
     CATALOG_IO_AVAILABLE = True
 except ImportError:
     CATALOG_IO_AVAILABLE = False
+
+
+def _enqueue_task(task_type: str, parameters: Dict[str, Any]) -> Optional[str]:
+    """Create task in Postgres and enqueue to RQ. Returns task_id or None on failure."""
+    session_id = get_current_user_id() if is_auth_enabled() else None
+    task_id = create_task(task_type, parameters, session_id=session_id)
+    if not task_id:
+        return None
+    try:
+        from redis import Redis
+        from rq import Queue
+        from worker.tasks import run_job
+        redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+        conn = Redis.from_url(redis_url)
+        queue = Queue(os.environ.get("RQ_QUEUE", "default"), connection=conn)
+        queue.enqueue(run_job, task_id, task_type, parameters)
+        return task_id
+    except Exception:
+        return None
 
 # Initialize or load user config
 _user_config = UserConfig(warning_fn=st.warning)
@@ -716,6 +737,26 @@ st.set_page_config(
 st.title("🚗 Autoware Evaluator Results Downloader")
 st.markdown("---")
 
+# Task queue status (production deployment); per-user when auth is enabled
+if is_task_queue_enabled():
+    _current_user = get_current_user_id() if is_auth_enabled() else None
+    if _current_user:
+        st.caption(f"Logged in as **{_current_user}** (showing your tasks only)")
+    with st.expander("📋 Recent tasks (task queue enabled)", expanded=False):
+        tasks = list_recent_tasks(limit=20, session_id=_current_user)
+        if tasks:
+            for t in tasks:
+                status_emoji = {"pending": "⏳", "running": "🔄", "completed": "✅", "failed": "❌"}.get(t.get("status"), "•")
+                st.caption(f"{status_emoji} **{t.get('type', '')}** — {t.get('status', '')} — `{t.get('id', '')[:8]}...`")
+                if t.get("result_path"):
+                    st.caption(f"   Result: `{t['result_path']}`")
+                if t.get("error_message"):
+                    st.caption(f"   Error: {t['error_message'][:200]}")
+        else:
+            st.caption("No tasks yet.")
+        if st.button("Refresh task list", key="refresh_tasks"):
+            st.rerun()
+
 # Initialize session state
 if 'downloaded_scenarios' not in st.session_state:
     st.session_state.downloaded_scenarios = []
@@ -727,213 +768,10 @@ if "suite_options" not in st.session_state:
     st.session_state.suite_options = []
 
 
-def find_eval_result_dirs(root_dir: str, recursive: bool = True) -> List[str]:
-    if not os.path.isdir(root_dir):
-        return []
-    if recursive:
-        walker = os.walk(root_dir)
-    else:
-        walker = [(root_dir, [d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d))], [])]
-    result_dirs = []
-    for current_dir, subdirs, files in walker:
-        if "scenario.yaml" in files and "scene_result.pkl" in files:
-            result_dirs.append(current_dir)
-    return sorted(result_dirs)
-
-
-def run_eval_result_for_dir(result_dir: str, overwrite: bool = False) -> Dict[str, Any]:
-    result_file = os.path.join(result_dir, "result.txt")
-    score_file = os.path.join(result_dir, "score.json")
-    if os.path.exists(result_file) and not overwrite:
-        if os.path.exists(score_file):
-            return {"path": result_dir, "status": "skipped", "detail": "result.txt exists"}
-        try:
-            generate_score_json(result_dir)
-            return {"path": result_dir, "status": "success", "detail": "score.json generated"}
-        except Exception as e:
-            error_output = f"Error: {e}\n{traceback.format_exc()}"
-            with open(result_file, "a", encoding="utf-8") as f:
-                f.write(f"\n{error_output}")
-            return {"path": result_dir, "status": "failed", "detail": str(e)}
-
-    try:
-        report_text = run_eval_result(result_dir)
-        with open(result_file, "w", encoding="utf-8") as f:
-            f.write(report_text)
-        generate_score_json(result_dir)
-        return {"path": result_dir, "status": "success", "detail": "completed"}
-    except Exception as e:
-        error_output = f"Error: {e}\n{traceback.format_exc()}"
-        with open(result_file, "w", encoding="utf-8") as f:
-            f.write(error_output)
-        return {"path": result_dir, "status": "failed", "detail": str(e)}
-
-
 def _run_eval_result_worker(result_dir: str, overwrite: bool) -> Dict[str, Any]:
     """Worker wrapper so the main thread owns Streamlit progress updates."""
     return run_eval_result_for_dir(result_dir, overwrite=overwrite)
 
-
-def generate_summary_and_score_csv(input_path: str) -> Dict[str, Any]:
-    """
-    Generate Summary.csv and Score.csv in the input_path directory
-    based on each subdirectory's result.txt and score.json.
-    """
-    def _infer_suite_name(dir_name: str) -> str:
-        base = Path(dir_name).name.rstrip("/")
-        parts = base.rsplit("_", 1)
-        if len(parts) == 2:
-            maybe_uuid = parts[1]
-            if len(maybe_uuid) == 36 and maybe_uuid.count("-") == 4:
-                return parts[0]
-        return base
-
-    result_folders = glob.glob(os.path.join(input_path, "*/"))
-    result_folders.sort()
-    result_entries: List[Dict[str, str]] = []
-    flat_results = False
-    for folder in result_folders:
-        if os.path.exists(os.path.join(folder, "result.txt")):
-            flat_results = True
-            result_entries.append({"suite": "", "path": folder})
-
-    if not flat_results:
-        for suite_dir in result_folders:
-            suite_name = _infer_suite_name(suite_dir)
-            suite_cases = glob.glob(os.path.join(suite_dir, "*/"))
-            suite_cases.sort()
-            for case_dir in suite_cases:
-                if os.path.exists(os.path.join(case_dir, "result.txt")):
-                    result_entries.append({"suite": suite_name, "path": case_dir})
-
-    summary_lines: List[str] = []
-    score_lines: List[str] = []
-
-    # Summary.csv
-    summary_header = "Scenario,TP,TP_xave,TP_xstd,TP_xrms,TP_yave,TP_ystd,TP_yrms,TP_vx,TP_vy,Suite\n"
-    # in streamlit, Summary.csv does not need header line
-    #summary_lines.append(summary_header)
-    for entry in result_entries:
-        folder = entry["path"]
-        suite_name = entry["suite"]
-        result_txt = os.path.join(folder, "result.txt")
-        if not os.path.exists(result_txt):
-            continue
-
-        data: List[float] = []
-        with open(result_txt, "r", encoding="utf-8") as txt:
-            found = False
-            for input_line in txt:
-                if not found:
-                    if "TP xave xstd xrms yave ystd yrms vx vy" in input_line:
-                        found = True
-                else:
-                    parts = [p for p in input_line.split(" ") if p.strip() != ""]
-                    try:
-                        data = [float(s) for s in parts]
-                    except ValueError:
-                        data = []
-                    break
-
-        if not data:
-            continue
-
-        scenario_name = Path(folder).name
-        # Keep the same derived fields as the reference script.
-        tp_percent = data[0] * 100
-        x_ave = data[1]
-        x_std = data[2]
-        x_rms = abs(data[1]) + data[2] * 3
-        y_ave = data[4]
-        y_std = data[5]
-        y_rms = abs(data[4]) + data[5] * 3
-        vx = data[7]
-        vy = data[8]
-
-        summary_lines.append(
-            f"{scenario_name},{tp_percent:.3f},{x_ave:.3f},{x_std:.3f},"
-            f"{x_rms:.3f},{y_ave:.3f},{y_std:.3f},{y_rms:.3f},"
-            f"{vx:.3f},{vy:.3f},{suite_name}\n"
-        )
-
-    # Score.csv
-    score_header = "Scenario,Option,GT_OBJ,"
-    for _ in range(4):
-        score_header += (
-            "Distance,NM,TP/TN,ADD,AIL,UIL,PFN/PFP,UUID Num,"
-            "Practical Pass Rate,MAX_DIST_THRESH,OBJ_CNTS,"
-        )
-    score_header += "\n"
-    # in streamlit, Score.csv does not need header line
-    #score_lines.append(score_header)
-
-    for entry in result_entries:
-        folder = entry["path"]
-        score_json = os.path.join(folder, "score.json")
-        if not os.path.exists(score_json):
-            continue
-
-        with open(score_json, "r", encoding="utf-8") as f:
-            dic = json.load(f)
-
-        line = f"{Path(folder).name},"
-        line += f"{dic.get('Option', '')},"
-        line += f"{dic.get('criteria0', {}).get('GT_OBJ', '')},"
-
-        dic_items = [(k, v) for k, v in dic.items() if k != "Option" and isinstance(v, dict)]
-        num_items = len(dic_items)
-        for idx, (k, v) in enumerate(dic_items):
-            is_last = idx == (num_items - 1)
-            line += f"{k},"
-            line += f"{v.get('NM', '')},"
-            line += f"{v.get('TP/TN', '')},"
-            line += f"{v.get('ADD', '')},"
-            line += f"{v.get('AIL', '')},"
-            line += f"{v.get('UIL', '')},"
-            line += f"{v.get('PFN/PFP', '')},"
-            line += f"{v.get('UUID_NUM', '')},"
-
-            nm = v.get("NM", 0)
-            try:
-                nm_value = float(nm)
-            except (TypeError, ValueError):
-                nm_value = 0.0
-            if nm_value == 0:
-                line += "100.0,"
-            else:
-                try:
-                    pass_rate = 100.0 * (
-                        float(v.get("TP/TN", 0))
-                        + float(v.get("AIL", 0))
-                        + float(v.get("ADD", 0))
-                    ) / nm_value
-                except (TypeError, ValueError, ZeroDivisionError):
-                    pass_rate = 0.0
-                line += f"{pass_rate:.3f},"
-
-            line += f"{v.get('MAX_DIST_THRESH', '')},"
-
-            obj_cnts = v.get("OBJ_CNTS", {})
-            if isinstance(obj_cnts, dict):
-                obj_parts = [f"{obj}:{cnt}" for obj, cnt in obj_cnts.items()]
-                line += ";".join(obj_parts) 
-            # Only add trailing comma if not last
-                if not is_last:
-                    line += ","
-
-        score_lines.append(line + "\n")
-
-    with open(os.path.join(input_path, "Summary.csv"), mode="w", encoding="utf-8") as f:
-        f.writelines(summary_lines)
-    with open(os.path.join(input_path, "Score.csv"), mode="w", encoding="utf-8") as f:
-        f.writelines(score_lines)
-
-    return {
-        "summary_path": os.path.join(input_path, "Summary.csv"),
-        "score_path": os.path.join(input_path, "Score.csv"),
-        "summary_rows": max(len(summary_lines) - 1, 0),
-        "score_rows": max(len(score_lines) - 1, 0),
-    }
 
 # Sidebar for configuration
 with st.sidebar:
@@ -1218,10 +1056,6 @@ with tab1:
             st.stop()
         output_path = str(resolved_output)
         set_config_value("output_path", output_path)
-        # Create output directory
-        os.makedirs(output_path, exist_ok=True)
-        
-        # Save all params to config so they're always updated with last inputs
         set_config_value("environment", environment)
         set_config_value("project_id", project_id)
         set_config_value("job_id", st.session_state.job_id)
@@ -1235,6 +1069,24 @@ with tab1:
             set_config_value("large_file_mb", large_file_mb)
             set_config_value("keep_zip_files", keep_zip_files)
 
+        if is_task_queue_enabled():
+            params = {
+                "output_path": output_path,
+                "project_id": project_id,
+                "job_id": st.session_state.job_id,
+                "suite_id": suite_id or "",
+                "download_type": "archives" if download_type == "Archives (ZIP)" else "result_json",
+                "phase": phase if download_type == "Archives (ZIP)" else "",
+            }
+            task_id = _enqueue_task("download_results", params)
+            if task_id:
+                st.success(f"Task queued. ID: `{task_id}`. Check **Recent tasks** for status.")
+            else:
+                st.error("Failed to enqueue task. Check REDIS_URL and DATABASE_URL.")
+            st.stop()
+
+        # Create output directory (inline path)
+        os.makedirs(output_path, exist_ok=True)
         try:
             job_result = JobResult(
                 environment=environment,
@@ -1335,15 +1187,35 @@ with tab2:
         if not all([project_id, st.session_state.job_id]):
             st.error("Please fill in all required fields: Project ID and Job ID")
             st.stop()
-        
-        # Parse scenario IDs
+        resolved_output, path_err = resolve_under_data_root(output_path, allow_create=True)
+        if path_err:
+            st.error(f"Output path is invalid: {path_err}.")
+            st.stop()
+        out_path = str(resolved_output)
+
+        if is_task_queue_enabled():
+            params = {
+                "output_dir": out_path,
+                "output_path": out_path,
+                "project_id": project_id,
+                "job_id": st.session_state.job_id,
+                "suite_id": suite_id or "",
+                "overwrite": overwrite,
+            }
+            task_id = _enqueue_task("download_scenarios", params)
+            if task_id:
+                st.success(f"Task queued. ID: `{task_id}`. Check **Recent tasks** for status.")
+            else:
+                st.error("Failed to enqueue task. Check REDIS_URL and DATABASE_URL.")
+            st.stop()
+
+        # Parse scenario IDs (inline path)
         selected_ids = None
         if scenario_ids_text:
             selected_ids = [id.strip() for id in scenario_ids_text.split('\n') if id.strip()]
             st.info(f"Will download {len(selected_ids)} specific scenarios")
         
         try:
-            # Initialize JobResult
             job_result = JobResult(
                 environment=environment,
                 project_id=project_id,
@@ -1352,8 +1224,6 @@ with tab2:
                 suite_ids=selected_suite_ids,
                 output_path=output_path
             )
-            
-            
             with st.expander("Downloading Scenarios", expanded=True):
                 downloaded = job_result.download_scenarios(
                     output_dir=output_path,
@@ -1594,6 +1464,43 @@ with tab4:
             disabled=not CATALOG_IO_AVAILABLE,
             help="Generate both parquet and Summary.csv/Score.csv.",
         )
+    # Task queue: enqueue eval/parquet tasks and skip inline execution
+    if is_task_queue_enabled() and (run_eval_clicked or generate_parquet_clicked or generate_both_clicked):
+        resolved_eval, eval_err = resolve_under_data_root(eval_root, allow_missing=True)
+        if eval_err:
+            st.error(f"Eval root is invalid: {eval_err}. Use a path under the server data root.")
+        else:
+            eval_path = str(resolved_eval)
+            set_config_value("eval_root", eval_path)
+            enqueued = []
+            if generate_parquet_clicked or generate_both_clicked:
+                if CATALOG_IO_AVAILABLE:
+                    tid = _enqueue_task("build_parquet", {
+                        "pkl_dir": eval_path,
+                        "project_id": project_id or "",
+                        "job_id": st.session_state.job_id or "",
+                    })
+                    if tid:
+                        enqueued.append(f"build_parquet ({tid[:8]}...)")
+                else:
+                    st.warning("Parquet task skipped: perception_catalog_io not available.")
+            if run_eval_clicked or generate_both_clicked:
+                if only_generate_summary:
+                    tid = _enqueue_task("generate_summary_csv", {"eval_root": eval_path})
+                else:
+                    tid = _enqueue_task("run_eval_dirs", {
+                        "eval_root": eval_path,
+                        "recursive": eval_recursive,
+                        "overwrite": eval_overwrite,
+                    })
+                if tid:
+                    enqueued.append(f"{'generate_summary_csv' if only_generate_summary else 'run_eval_dirs'} ({tid[:8]}...)")
+            if enqueued:
+                st.success("Tasks queued: " + ", ".join(enqueued) + ". Check **Recent tasks** for status.")
+            else:
+                st.error("Failed to enqueue. Check REDIS_URL and DATABASE_URL.")
+        st.stop()
+
     if generate_parquet_clicked or generate_both_clicked and CATALOG_IO_AVAILABLE:
         resolved, err = resolve_under_data_root(eval_root, allow_missing=True)
         if err:

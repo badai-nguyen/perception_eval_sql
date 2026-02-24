@@ -4,6 +4,8 @@ This document describes what is needed when deploying the evaluation dashboard o
 
 **Design choice: no per-user authentication.** The app is intended as a **shared team tool**. All data is visible and shareable by everyone who can access the server. There is no login; team members simply open the web UI and use shareable links to point each other to specific runs or comparisons.
 
+**Production stack (recommended for multi-user):** For heavier use, deploy with **Nginx, Redis, Worker, and Postgres** so that long-running tasks (downloads, eval, parquet generation) run in background workers and do not block the UI. Task status is stored in Postgres and visible in the Download page under **Recent tasks**. See [PRODUCTION_DEPLOYMENT.md](PRODUCTION_DEPLOYMENT.md) for build and deploy steps.
+
 ---
 
 ## 1. Overview of Requirements
@@ -91,7 +93,7 @@ Per-user authentication is **not** used. The dashboard is a **local-team tool**:
 - [ ] Mount or create that directory when using Docker; ensure it is persistent and backed up if needed.
 - [ ] Provide **server-side credentials** for the Download API (e.g. mount `~/.webauto` into the container). All users’ download requests use this single set; no per-user API credentials.
 - [ ] Restrict access as needed (firewall, VPN, or reverse proxy) so only your team can reach the app. No in-app login required.
-- [ ] Optionally run behind a **reverse proxy** (nginx/Caddy) for TLS and rate limiting.
+- [ ] For production, use the **Nginx + Redis + Worker + Postgres** stack (see [PRODUCTION_DEPLOYMENT.md](PRODUCTION_DEPLOYMENT.md)); optionally run behind a **reverse proxy** (nginx/Caddy) for TLS and rate limiting.
 - [ ] Inform users to use **“Copy shareable link”** and the **Data Management** page to share results and clean up old runs.
 
 ---

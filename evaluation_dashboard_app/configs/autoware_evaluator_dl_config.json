@@ -1,23 +1,27 @@
 {
   "overview_mode": "Compare Mode",
-  "overview_run_a": "separate_iou_threshold_ped_byc_0.2_yolox_off",
-  "overview_run_b": "separated_iou_threshold_default_0.6_yolox_off",
+  "overview_run_a": "v4.3.1_bevfusion_lidar_01301423",
+  "overview_run_b": "v4.3.1_bevfusion_lidar_01301423 (3 \u756a\u76ee\u306e\u30b3\u30d4\u30fc)",
   "environment": "default",
   "project_id": "x2_dev",
-  "job_id": "86ace45e-348c-5aca-b01a-40954d8e3ae0",
-  "suite_id": "84c2a34e-387d-4218-927a-e06308e6fccc",
-  "output_path": "./data/seperate_iou_thresh_ped_0.2_ped_size_valid_yolox_off",
+  "job_id": "205ae9f6-6fa9-5d3b-a27b-ee6632f23466",
+  "suite_id": "",
+  "output_path": "/home/leigu/perception_eval_sql/evaluation_dashboard_app/data/TLR_B",
   "download_type": "Archives (ZIP)",
   "phase": "perception.object_recognition.tracking.objects",
   "skip_large_file": true,
   "large_file_mb": 50.0,
-  "eval_root": "./data/v4.3.1_centerpoint2.5",
+  "eval_root": "/home/leigu/perception_eval_sql/evaluation_dashboard_app/data/TLR_B",
   "eval_workers": 1,
   "eval_recursive": true,
-  "eval_overwrite": false,
+  "eval_overwrite": true,
   "eval_parallel": false,
-  "suite_ids": [
-    "84c2a34e-387d-4218-927a-e06308e6fccc"
-  ],
-  "keep_zip_files": false
+  "suite_ids": [],
+  "keep_zip_files": true,
+  "eval_notify_when_done": false,
+  "parquet_parent": "./data/test",
+  "upload_run_name": "",
+  "overview_compare_runs": [
+    "v4.3.1_bevfusion_lidar_01301423 (3 \u756a\u76ee\u306e\u30b3\u30d4\u30fc)"
+  ]
 }
