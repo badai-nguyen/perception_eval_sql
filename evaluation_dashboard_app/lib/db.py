@@ -81,6 +81,15 @@ def _ensure_table(conn) -> None:
             CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_tasks_session_id ON tasks(session_id);
         """)
+        # Progress and log columns (backward compatible: add if missing)
+        for col, typ in [
+            ("progress_message", "TEXT"),
+            ("progress_pct", "REAL"),
+            ("log_output", "TEXT"),
+        ]:
+            cur.execute(
+                f"ALTER TABLE tasks ADD COLUMN IF NOT EXISTS {col} {typ}"
+            )
 
 
 def init_db() -> bool:
@@ -209,8 +218,105 @@ def update_task_status(
         return False
 
 
+# Max size for log_output: keep last 50KB when appending
+LOG_OUTPUT_MAX_BYTES = 50 * 1024
+
+
+def update_task_progress(
+    task_id: str,
+    *,
+    message: Optional[str] = None,
+    pct: Optional[float] = None,
+) -> bool:
+    """Update task progress_message and/or progress_pct. Returns True if updated."""
+    url = get_database_url()
+    if not url:
+        return False
+    if message is None and pct is None:
+        return True
+    try:
+        import psycopg2
+    except ImportError:
+        return False
+    now = datetime.utcnow()
+    conn = None
+    try:
+        conn = psycopg2.connect(url)
+        conn.autocommit = False
+        try:
+            with conn.cursor() as cur:
+                if message is not None and pct is not None:
+                    cur.execute(
+                        "UPDATE tasks SET progress_message = %s, progress_pct = %s, updated_at = %s WHERE id = %s",
+                        (message, pct, now, task_id),
+                    )
+                elif message is not None:
+                    cur.execute(
+                        "UPDATE tasks SET progress_message = %s, updated_at = %s WHERE id = %s",
+                        (message, now, task_id),
+                    )
+                elif pct is not None:
+                    cur.execute(
+                        "UPDATE tasks SET progress_pct = %s, updated_at = %s WHERE id = %s",
+                        (pct, now, task_id),
+                    )
+                else:
+                    return True
+                n = cur.rowcount
+                conn.commit()
+                return n > 0
+        finally:
+            conn.close()
+    except Exception:
+        if conn:
+            conn.rollback()
+        return False
+
+
+def append_task_log(task_id: str, line: str) -> bool:
+    """Append a line to task log_output (with newline). Trims from start if over LOG_OUTPUT_MAX_BYTES. Returns True if updated."""
+    url = get_database_url()
+    if not url:
+        return False
+    try:
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+    except ImportError:
+        return False
+    conn = None
+    try:
+        conn = psycopg2.connect(url)
+        conn.autocommit = False
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT log_output FROM tasks WHERE id = %s",
+                    (task_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return False
+                existing = (row["log_output"] or "") + line + "\n"
+                enc = existing.encode("utf-8")
+                if len(enc) > LOG_OUTPUT_MAX_BYTES:
+                    # Keep last LOG_OUTPUT_MAX_BYTES; decode may drop partial char at start
+                    existing = enc[-LOG_OUTPUT_MAX_BYTES:].decode("utf-8", errors="ignore")
+                cur.execute(
+                    "UPDATE tasks SET log_output = %s, updated_at = %s WHERE id = %s",
+                    (existing, datetime.utcnow(), task_id),
+                )
+                conn.commit()
+                return cur.rowcount > 0
+        finally:
+            conn.close()
+    except Exception:
+        if conn:
+            conn.rollback()
+        return False
+
+
 def get_task(task_id: str) -> Optional[Dict[str, Any]]:
-    """Return task row as dict (id, type, status, parameters, result_path, error_message, created_at, updated_at)."""
+    """Return task row as dict (id, type, status, parameters, result_path, error_message, progress_message, progress_pct, log_output, created_at, updated_at)."""
     url = get_database_url()
     if not url:
         return None
@@ -224,7 +330,9 @@ def get_task(task_id: str) -> Optional[Dict[str, Any]]:
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
-                    "SELECT id, type, status, parameters, result_path, error_message, created_at, updated_at FROM tasks WHERE id = %s",
+                    """SELECT id, type, status, parameters, result_path, error_message,
+                       progress_message, progress_pct, log_output, created_at, updated_at
+                       FROM tasks WHERE id = %s""",
                     (task_id,),
                 )
                 row = cur.fetchone()
@@ -251,18 +359,19 @@ def list_recent_tasks(limit: int = 50, session_id: Optional[str] = None) -> List
         conn = psycopg2.connect(url)
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cols = "id, type, status, parameters, result_path, error_message, progress_message, progress_pct, log_output, created_at, updated_at"
                 if session_id:
                     cur.execute(
-                        """
-                        SELECT id, type, status, parameters, result_path, error_message, created_at, updated_at
+                        f"""
+                        SELECT {cols}
                         FROM tasks WHERE session_id = %s ORDER BY created_at DESC LIMIT %s
                         """,
                         (session_id, limit),
                     )
                 else:
                     cur.execute(
-                        """
-                        SELECT id, type, status, parameters, result_path, error_message, created_at, updated_at
+                        f"""
+                        SELECT {cols}
                         FROM tasks ORDER BY created_at DESC LIMIT %s
                         """,
                         (limit,),

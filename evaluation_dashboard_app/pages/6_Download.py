@@ -737,25 +737,160 @@ st.set_page_config(
 st.title("🚗 Autoware Evaluator Results Downloader")
 st.markdown("---")
 
+
+def _task_type_label(task_type: str) -> str:
+    """Human-readable label for task type."""
+    labels = {
+        "download_results": "Download results",
+        "download_scenarios": "Download scenarios",
+        "run_eval_dirs": "Run eval dirs",
+        "generate_summary_csv": "Generate summary CSV",
+        "build_parquet": "Build parquet",
+    }
+    return labels.get(task_type, task_type or "Task")
+
+
+def _task_summary(t: Dict[str, Any]) -> str:
+    """One-line summary from task parameters (job_id, output_path, etc.)."""
+    params = t.get("parameters") or {}
+    task_type = t.get("type", "")
+    if task_type == "download_results":
+        out = params.get("output_path") or params.get("job_id") or ""
+        return f"job_id={params.get('job_id', '')} → {out}"
+    if task_type == "download_scenarios":
+        out = params.get("output_dir") or params.get("output_path") or ""
+        return f"job_id={params.get('job_id', '')} → {out}"
+    if task_type in ("run_eval_dirs", "generate_summary_csv"):
+        return params.get("eval_root", "")
+    if task_type == "build_parquet":
+        return params.get("pkl_dir", "")
+    return ""
+
+
+def _task_duration(t: Dict[str, Any]) -> Optional[str]:
+    """Format duration from created_at to updated_at if both exist."""
+    created = t.get("created_at")
+    updated = t.get("updated_at")
+    if not created or not updated:
+        return None
+    try:
+        start = created.timestamp() if hasattr(created, "timestamp") else None
+        end = updated.timestamp() if hasattr(updated, "timestamp") else None
+        if start is None or end is None:
+            return None
+        secs = int(end - start)
+        if secs < 60:
+            return f"{secs}s"
+        if secs < 3600:
+            return f"{secs // 60}m {secs % 60}s"
+        return f"{secs // 3600}h {(secs % 3600) // 60}m"
+    except Exception:
+        return None
+
+
+def _render_task_card(t: Dict[str, Any]) -> None:
+    """Render a single task as a card: status, progress, log, details."""
+    task_id = t.get("id", "")
+    task_type = t.get("type", "")
+    status = t.get("status", "")
+    status_labels = {"pending": "Pending", "running": "Running", "completed": "Completed", "failed": "Failed"}
+    status_label = status_labels.get(status, status)
+    type_label = _task_type_label(task_type)
+    summary = _task_summary(t)
+    created = t.get("created_at")
+    created_str = str(created)[:19] if created else ""
+    duration = _task_duration(t)
+
+    # Status badge
+    if status == "pending":
+        st.markdown(f"**{type_label}** — :orange[{status_label}]")
+    elif status == "running":
+        st.markdown(f"**{type_label}** — :blue[{status_label}]")
+    elif status == "completed":
+        st.markdown(f"**{type_label}** — :green[{status_label}]")
+    else:
+        st.markdown(f"**{type_label}** — :red[{status_label}]")
+
+    if summary:
+        st.caption(f"_{summary}_")
+    st.caption(f"ID `{str(task_id)[:8]}...` · Created {created_str}" + (f" · Duration {duration}" if duration else ""))
+
+    # Running: progress bar and current step
+    if status == "running":
+        progress_msg = t.get("progress_message") or "Running..."
+        pct = t.get("progress_pct")
+        if pct is not None:
+            st.progress(float(pct) / 100.0)
+        else:
+            st.progress(0)
+        st.caption(progress_msg)
+
+    # Failed: show error prominently
+    if status == "failed" and t.get("error_message"):
+        st.error(t.get("error_message"))
+
+    # Result path (copyable)
+    if t.get("result_path"):
+        rp = t["result_path"]
+        st.text_input("Result path", value=rp, key=f"result_path_{str(task_id)}", disabled=True, label_visibility="collapsed")
+        st.caption("Copy path above to open in file browser or CLI.")
+
+    # Expandable Log
+    log_output = (t.get("log_output") or "").strip()
+    if log_output:
+        with st.expander("View log", expanded=False):
+            st.code(log_output, language=None)
+
+    # Expandable Details
+    with st.expander("Details", expanded=False):
+        if t.get("result_path"):
+            st.text(f"Result path: {t['result_path']}")
+        if status == "failed" and t.get("error_message"):
+            st.text(f"Error: {t['error_message']}")
+        params = t.get("parameters") or {}
+        if params:
+            st.json(params)
+    st.markdown("---")
+
+
+def _render_task_list(tasks: List[Dict[str, Any]], current_user: Optional[str]) -> bool:
+    """Render task list; returns True if any task is pending or running."""
+    if current_user:
+        st.caption(f"Logged in as **{current_user}** (showing your tasks only)")
+    if not tasks:
+        st.caption("No tasks yet.")
+        return False
+    has_active = False
+    for t in tasks:
+        if t.get("status") in ("pending", "running"):
+            has_active = True
+        _render_task_card(t)
+    return has_active
+
+
 # Task queue status (production deployment); per-user when auth is enabled
+_current_user = None
 if is_task_queue_enabled():
     _current_user = get_current_user_id() if is_auth_enabled() else None
-    if _current_user:
-        st.caption(f"Logged in as **{_current_user}** (showing your tasks only)")
-    with st.expander("📋 Recent tasks (task queue enabled)", expanded=False):
+    st.subheader("Task status")
+    _use_fragment = getattr(st, "fragment", None) is not None
+    if _use_fragment:
+        try:
+            @st.fragment(run_every=timedelta(seconds=3))
+            def _task_list_poll():
+                _t = list_recent_tasks(limit=20, session_id=_current_user)
+                _render_task_list(_t, _current_user)
+            _task_list_poll()
+        except (TypeError, AttributeError):
+            _use_fragment = False
+    if not _use_fragment:
         tasks = list_recent_tasks(limit=20, session_id=_current_user)
-        if tasks:
-            for t in tasks:
-                status_emoji = {"pending": "⏳", "running": "🔄", "completed": "✅", "failed": "❌"}.get(t.get("status"), "•")
-                st.caption(f"{status_emoji} **{t.get('type', '')}** — {t.get('status', '')} — `{t.get('id', '')[:8]}...`")
-                if t.get("result_path"):
-                    st.caption(f"   Result: `{t['result_path']}`")
-                if t.get("error_message"):
-                    st.caption(f"   Error: {t['error_message'][:200]}")
-        else:
-            st.caption("No tasks yet.")
+        has_active = _render_task_list(tasks, _current_user)
         if st.button("Refresh task list", key="refresh_tasks"):
             st.rerun()
+        if has_active:
+            st.info("You have running tasks. Refresh the page to see latest status and logs.")
+    st.markdown("---")
 
 # Initialize session state
 if 'downloaded_scenarios' not in st.session_state:
@@ -1075,12 +1210,13 @@ with tab1:
                 "project_id": project_id,
                 "job_id": st.session_state.job_id,
                 "suite_id": suite_id or "",
+                "suite_ids": selected_suite_ids or None,
                 "download_type": "archives" if download_type == "Archives (ZIP)" else "result_json",
                 "phase": phase if download_type == "Archives (ZIP)" else "",
             }
             task_id = _enqueue_task("download_results", params)
             if task_id:
-                st.success(f"Task queued. ID: `{task_id}`. Check **Recent tasks** for status.")
+                st.success("Task queued. It will appear in the **Task status** section below; the list updates automatically.")
             else:
                 st.error("Failed to enqueue task. Check REDIS_URL and DATABASE_URL.")
             st.stop()
@@ -1194,6 +1330,9 @@ with tab2:
         out_path = str(resolved_output)
 
         if is_task_queue_enabled():
+            selected_ids = None
+            if scenario_ids_text:
+                selected_ids = [id.strip() for id in scenario_ids_text.split("\n") if id.strip()]
             params = {
                 "output_dir": out_path,
                 "output_path": out_path,
@@ -1201,10 +1340,12 @@ with tab2:
                 "job_id": st.session_state.job_id,
                 "suite_id": suite_id or "",
                 "overwrite": overwrite,
+                "scenario_name_filter": scenario_filter or None,
+                "selected_ids": selected_ids,
             }
             task_id = _enqueue_task("download_scenarios", params)
             if task_id:
-                st.success(f"Task queued. ID: `{task_id}`. Check **Recent tasks** for status.")
+                st.success("Task queued. It will appear in the **Task status** section below; the list updates automatically.")
             else:
                 st.error("Failed to enqueue task. Check REDIS_URL and DATABASE_URL.")
             st.stop()
@@ -1496,7 +1637,7 @@ with tab4:
                 if tid:
                     enqueued.append(f"{'generate_summary_csv' if only_generate_summary else 'run_eval_dirs'} ({tid[:8]}...)")
             if enqueued:
-                st.success("Tasks queued: " + ", ".join(enqueued) + ". Check **Recent tasks** for status.")
+                st.success("Tasks queued: " + ", ".join(enqueued) + ". See **Task status** below; the list updates automatically.")
             else:
                 st.error("Failed to enqueue. Check REDIS_URL and DATABASE_URL.")
         st.stop()

@@ -105,7 +105,7 @@ docker compose build --no-cache
 3. **Start the stack**
 
    ```sh
-   docker-compose up -d
+   docker compose up -d
    ```
 
    To run multiple workers, use `--scale worker=N` (e.g. 3 workers):

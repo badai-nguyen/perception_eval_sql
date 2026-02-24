@@ -4,6 +4,7 @@ Updates Postgres task status (running -> completed/failed).
 """
 
 import os
+import re
 import sys
 from typing import Any, Dict
 
@@ -12,7 +13,7 @@ _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _APP_ROOT not in sys.path:
     sys.path.insert(0, _APP_ROOT)
 
-from lib.db import update_task_status
+from lib.db import update_task_status, update_task_progress, append_task_log
 
 # Optional imports for tasks that need them
 def _import_eval_summary():
@@ -30,16 +31,20 @@ def _import_catalog_io():
 def job_generate_summary_csv(task_id: str, parameters: Dict[str, Any]) -> None:
     """Generate Summary.csv and Score.csv under eval_root."""
     update_task_status(task_id, "running")
+    append_task_log(task_id, "Starting generate_summary_csv")
     try:
         eval_summary = _import_eval_summary()
         eval_root = parameters.get("eval_root")
         if not eval_root:
             update_task_status(task_id, "failed", error_message="Missing eval_root")
             return
+        append_task_log(task_id, f"Generating summary under {eval_root}")
         info = eval_summary.generate_summary_and_score_csv(eval_root)
         result_path = info.get("summary_path", eval_root)
+        append_task_log(task_id, f"Done. Output: {result_path}")
         update_task_status(task_id, "completed", result_path=result_path)
     except Exception as e:
+        append_task_log(task_id, f"Failed: {e}")
         update_task_status(task_id, "failed", error_message=str(e))
         raise
 
@@ -47,6 +52,7 @@ def job_generate_summary_csv(task_id: str, parameters: Dict[str, Any]) -> None:
 def job_run_eval_dirs(task_id: str, parameters: Dict[str, Any]) -> None:
     """Run eval_result for each dir under eval_root, then generate Summary/Score CSV."""
     update_task_status(task_id, "running")
+    append_task_log(task_id, "Starting run_eval_dirs")
     try:
         eval_summary = _import_eval_summary()
         eval_root = parameters.get("eval_root")
@@ -59,12 +65,20 @@ def job_run_eval_dirs(task_id: str, parameters: Dict[str, Any]) -> None:
         if not target_dirs:
             update_task_status(task_id, "failed", error_message="No result directories found")
             return
-        for result_dir in target_dirs:
+        total = len(target_dirs)
+        append_task_log(task_id, f"Processing {total} directories")
+        for i, result_dir in enumerate(target_dirs):
+            pct = 100.0 * (i + 1) / total if total else 0
+            update_task_progress(task_id, message=f"Processing {i+1}/{total}: {result_dir}", pct=pct)
+            append_task_log(task_id, f"Processing {i+1}/{total}: {result_dir}")
             eval_summary.run_eval_result_for_dir(result_dir, overwrite=overwrite)
+        append_task_log(task_id, "Generating summary CSV")
         info = eval_summary.generate_summary_and_score_csv(eval_root)
         result_path = info.get("summary_path", eval_root)
+        append_task_log(task_id, f"Done. Output: {result_path}")
         update_task_status(task_id, "completed", result_path=result_path)
     except Exception as e:
+        append_task_log(task_id, f"Failed: {e}")
         update_task_status(task_id, "failed", error_message=str(e))
         raise
 
@@ -72,6 +86,7 @@ def job_run_eval_dirs(task_id: str, parameters: Dict[str, Any]) -> None:
 def job_build_parquet(task_id: str, parameters: Dict[str, Any]) -> None:
     """Build scene_result parquet from pkl directory."""
     update_task_status(task_id, "running")
+    append_task_log(task_id, "Starting build_parquet")
     try:
         pkl_archive_to_parquet = _import_catalog_io()
         if pkl_archive_to_parquet is None:
@@ -81,6 +96,7 @@ def job_build_parquet(task_id: str, parameters: Dict[str, Any]) -> None:
         if not pkl_dir:
             update_task_status(task_id, "failed", error_message="Missing pkl_dir")
             return
+        append_task_log(task_id, f"Building parquet from {pkl_dir}")
         project_id = parameters.get("project_id")
         job_id = parameters.get("job_id")
         parquet_path = pkl_archive_to_parquet(
@@ -90,27 +106,43 @@ def job_build_parquet(task_id: str, parameters: Dict[str, Any]) -> None:
             project_id=project_id,
             job_id=job_id,
         )
+        append_task_log(task_id, f"Done. Output: {parquet_path}")
         update_task_status(task_id, "completed", result_path=parquet_path)
     except Exception as e:
+        append_task_log(task_id, f"Failed: {e}")
         update_task_status(task_id, "failed", error_message=str(e))
         raise
+
+
+def _progress_callback(task_id: str, message: str) -> None:
+    """Append message to task log and update progress_message; derive pct from 'N/M' if present."""
+    append_task_log(task_id, message)
+    match = re.search(r"(\d+)\s*/\s*(\d+)", message)
+    if match:
+        n, m = int(match.group(1)), int(match.group(2))
+        pct = 100.0 * n / m if m else 0
+        update_task_progress(task_id, message=message, pct=pct)
+    else:
+        update_task_progress(task_id, message=message)
 
 
 def job_download_results(task_id: str, parameters: Dict[str, Any]) -> None:
     """Download job results (archives or result JSON) and extract/organize. Requires auth."""
     update_task_status(task_id, "running")
+    append_task_log(task_id, "Starting download_results")
     try:
-        # Download logic is in 6_Download; worker uses download_core if available
         from lib import download_core  # noqa: F401
         output_path = parameters.get("output_path")
         project_id = parameters.get("project_id")
         job_id = parameters.get("job_id")
         suite_id = parameters.get("suite_id")
+        suite_ids = parameters.get("suite_ids")  # optional list
         download_type = parameters.get("download_type", "archives")  # archives | result_json
         phase = parameters.get("phase", "first")
         if not all([output_path, project_id, job_id]):
             update_task_status(task_id, "failed", error_message="Missing output_path, project_id, or job_id")
             return
+        on_progress = lambda msg: _progress_callback(task_id, msg)
         download_core.run_download_results(
             project_id=project_id,
             job_id=job_id,
@@ -118,7 +150,10 @@ def job_download_results(task_id: str, parameters: Dict[str, Any]) -> None:
             output_path=output_path,
             download_type=download_type,
             phase=phase,
+            suite_ids=suite_ids,
+            on_progress=on_progress,
         )
+        append_task_log(task_id, "Download and extract completed")
         update_task_status(task_id, "completed", result_path=output_path)
     except ImportError:
         update_task_status(
@@ -129,6 +164,7 @@ def job_download_results(task_id: str, parameters: Dict[str, Any]) -> None:
     except NotImplementedError as e:
         update_task_status(task_id, "failed", error_message=str(e))
     except Exception as e:
+        append_task_log(task_id, f"Failed: {e}")
         update_task_status(task_id, "failed", error_message=str(e))
         raise
 
@@ -136,6 +172,7 @@ def job_download_results(task_id: str, parameters: Dict[str, Any]) -> None:
 def job_download_scenarios(task_id: str, parameters: Dict[str, Any]) -> None:
     """Download scenarios from job to output_dir. Requires auth."""
     update_task_status(task_id, "running")
+    append_task_log(task_id, "Starting download_scenarios")
     try:
         from lib import download_core  # noqa: F401
         output_dir = parameters.get("output_dir") or parameters.get("output_path")
@@ -143,16 +180,23 @@ def job_download_scenarios(task_id: str, parameters: Dict[str, Any]) -> None:
         job_id = parameters.get("job_id")
         suite_id = parameters.get("suite_id")
         overwrite = parameters.get("overwrite", False)
+        scenario_name_filter = parameters.get("scenario_name_filter")
+        selected_ids = parameters.get("selected_ids")
         if not all([output_dir, project_id, job_id]):
             update_task_status(task_id, "failed", error_message="Missing output_dir, project_id, or job_id")
             return
+        on_progress = lambda msg: _progress_callback(task_id, msg)
         download_core.run_download_scenarios(
             project_id=project_id,
             job_id=job_id,
             suite_id=suite_id,
             output_dir=output_dir,
             overwrite=overwrite,
+            scenario_name_filter=scenario_name_filter,
+            selected_ids=selected_ids,
+            on_progress=on_progress,
         )
+        append_task_log(task_id, "Download scenarios completed")
         update_task_status(task_id, "completed", result_path=output_dir)
     except ImportError:
         update_task_status(
@@ -163,6 +207,7 @@ def job_download_scenarios(task_id: str, parameters: Dict[str, Any]) -> None:
     except NotImplementedError as e:
         update_task_status(task_id, "failed", error_message=str(e))
     except Exception as e:
+        append_task_log(task_id, f"Failed: {e}")
         update_task_status(task_id, "failed", error_message=str(e))
         raise
 
