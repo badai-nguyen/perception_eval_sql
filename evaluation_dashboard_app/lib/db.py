@@ -86,6 +86,7 @@ def _ensure_table(conn) -> None:
             ("progress_message", "TEXT"),
             ("progress_pct", "REAL"),
             ("log_output", "TEXT"),
+            ("result_summary", "TEXT"),
         ]:
             cur.execute(
                 f"ALTER TABLE tasks ADD COLUMN IF NOT EXISTS {col} {typ}"
@@ -315,8 +316,43 @@ def append_task_log(task_id: str, line: str) -> bool:
         return False
 
 
+def update_task_result_summary(task_id: str, summary: Dict[str, Any]) -> bool:
+    """Store a JSON-serialized result summary for the task (e.g. success/failed counts, paths). Returns True if updated."""
+    url = get_database_url()
+    if not url:
+        return False
+    try:
+        import psycopg2
+        import json as _json
+    except ImportError:
+        return False
+    try:
+        payload = _json.dumps(summary, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return False
+    conn = None
+    try:
+        conn = psycopg2.connect(url)
+        conn.autocommit = False
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE tasks SET result_summary = %s, updated_at = %s WHERE id = %s",
+                    (payload, datetime.utcnow(), task_id),
+                )
+                n = cur.rowcount
+                conn.commit()
+                return n > 0
+        finally:
+            conn.close()
+    except Exception:
+        if conn:
+            conn.rollback()
+        return False
+
+
 def get_task(task_id: str) -> Optional[Dict[str, Any]]:
-    """Return task row as dict (id, type, status, parameters, result_path, error_message, progress_message, progress_pct, log_output, created_at, updated_at)."""
+    """Return task row as dict (id, type, status, parameters, result_path, error_message, progress_message, progress_pct, log_output, result_summary, created_at, updated_at)."""
     url = get_database_url()
     if not url:
         return None
@@ -331,7 +367,7 @@ def get_task(task_id: str) -> Optional[Dict[str, Any]]:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
                     """SELECT id, type, status, parameters, result_path, error_message,
-                       progress_message, progress_pct, log_output, created_at, updated_at
+                       progress_message, progress_pct, log_output, result_summary, created_at, updated_at
                        FROM tasks WHERE id = %s""",
                     (task_id,),
                 )
@@ -359,7 +395,7 @@ def list_recent_tasks(limit: int = 50, session_id: Optional[str] = None) -> List
         conn = psycopg2.connect(url)
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cols = "id, type, status, parameters, result_path, error_message, progress_message, progress_pct, log_output, created_at, updated_at"
+                cols = "id, type, status, parameters, result_path, error_message, progress_message, progress_pct, log_output, result_summary, created_at, updated_at"
                 if session_id:
                     cur.execute(
                         f"""

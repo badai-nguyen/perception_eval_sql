@@ -793,70 +793,203 @@ def _task_duration(t: Dict[str, Any]) -> Optional[str]:
         return None
 
 
-def _render_task_card(t: Dict[str, Any], current_user: Optional[str]) -> None:
-    """Render a single task in a compact row; details in expander."""
-    task_id = t.get("id", "")
-    task_type = t.get("type", "")
+def _render_summary_table(rows: Optional[List[Dict[str, Any]]]) -> None:
+    """Render a summary table from rows (e.g. Scenario Name, Scenario ID, Status) when present."""
+    if not rows:
+        return
+    try:
+        df = pd.DataFrame(rows)
+        st.subheader("Download Status")
+        st.dataframe(df, width="stretch")
+    except Exception:
+        pass
+
+
+def _render_result_summary(summary: Dict[str, Any]) -> None:
+    """Render a result summary block (like local mode) from task result_summary JSON."""
+    job = summary.get("job", "")
+    if job == "download_results":
+        total = summary.get("total", 0)
+        success = summary.get("success", 0)
+        failed = summary.get("failed", 0)
+        out = summary.get("output_path", "")
+        st.subheader("Summary")
+        st.write(f"- Total scenarios processed: **{total}**")
+        st.write(f"- Successfully downloaded: **{success}**")
+        if failed:
+            st.write(f"- Failed: **{failed}**")
+        st.write(f"- Output directory: `{out}`")
+        if success > 0:
+            st.info("To generate the final summary CSV files, go to the **Eval Results** tab and run the evaluation.")
+        _render_summary_table(summary.get("rows"))
+    elif job == "download_scenarios":
+        total = summary.get("total", 0)
+        success = summary.get("success", 0)
+        failed = summary.get("failed", 0)
+        out = summary.get("output_path", "")
+        st.subheader("Summary")
+        st.write(f"- Total scenarios: **{total}**")
+        st.write(f"- Successfully downloaded: **{success}**")
+        if failed:
+            st.write(f"- Failed: **{failed}**")
+        st.write(f"- Result JSON files: **{total}** downloaded.")
+        st.write(f"- Output directory: `{out}`")
+        if success > 0:
+            st.info("To generate summary CSV files, go to the **Eval Results** tab and run the evaluation.")
+        _render_summary_table(summary.get("rows"))
+    elif job == "run_eval_dirs":
+        dirs = summary.get("directories_processed", 0)
+        path = summary.get("summary_path", "")
+        srows = summary.get("summary_rows", 0)
+        scrows = summary.get("score_rows", 0)
+        st.subheader("Eval Summary")
+        st.write(f"- Directories processed: **{dirs}**")
+        st.write(f"- Generated Summary.csv (**{srows}** rows) and Score.csv (**{scrows}** rows) in `{path}`")
+    elif job == "generate_summary_csv":
+        path = summary.get("summary_path", "")
+        srows = summary.get("summary_rows", 0)
+        scrows = summary.get("score_rows", 0)
+        st.subheader("Summary")
+        st.write(f"- Generated Summary.csv (**{srows}** rows) and Score.csv (**{scrows}** rows) in `{path}`")
+    elif job == "build_parquet":
+        path = summary.get("output_path", "")
+        st.subheader("Summary")
+        st.write(f"- Output: `{path}`")
+    else:
+        st.json(summary)
+
+
+def _render_task_detail_content(t: Dict[str, Any]) -> None:
+    """Render full task detail (summary, path, error, log, params) into current container."""
     status = t.get("status", "")
-    status_labels = {"pending": "Pending", "running": "Running", "completed": "Completed", "failed": "Failed"}
-    status_label = status_labels.get(status, status)
-    type_label = _task_type_label(task_type)
-    summary = _task_summary(t)
-    duration = _task_duration(t)
-    # Row 1: [type · status · duration / summary] [Delete]
-    col1, col2 = st.columns([5, 1])
-    with col1:
-        if status == "pending":
-            line = f"**{type_label}** — :orange[{status_label}]" + (f" · {duration}" if duration else "")
-        elif status == "running":
-            line = f"**{type_label}** — :blue[{status_label}]"
-        elif status == "completed":
-            line = f"**{type_label}** — :green[{status_label}]" + (f" · {duration}" if duration else "")
-        else:
-            line = f"**{type_label}** — :red[{status_label}]" + (f" · {duration}" if duration else "")
-        if summary:
-            st.caption(f"{line} · {summary}")
-        else:
-            st.caption(line)
-    with col2:
-        if st.button("Delete", key=f"del_{str(task_id)}", type="secondary"):
-            delete_task(str(task_id), session_id=current_user)
-            st.rerun()
-    # Row 2: [More ▼]
-    with st.expander("More", expanded=False):
-        if t.get("result_path"):
-            st.text_input("Result path", value=t["result_path"], key=f"rp_{str(task_id)}", disabled=True, label_visibility="collapsed")
-        if status == "failed" and t.get("error_message"):
-            st.error(t.get("error_message"))
-        log_output = (t.get("log_output") or "").strip()
-        if log_output:
-            st.code(log_output, language=None)
-        params = t.get("parameters") or {}
-        if params:
-            st.json(params)
-    # Progress only when running
-    if status == "running":
-        progress_msg = t.get("progress_message") or "Running..."
-        pct = t.get("progress_pct")
-        if pct is not None:
-            st.progress(float(pct) / 100.0)
-        else:
-            st.progress(0)
-        st.caption(progress_msg)
+    result_summary_raw = t.get("result_summary")
+    if result_summary_raw:
+        try:
+            result_summary = json.loads(result_summary_raw) if isinstance(result_summary_raw, str) else result_summary_raw
+            _render_result_summary(result_summary)
+            st.markdown("---")
+        except (TypeError, ValueError):
+            pass
+    if t.get("result_path"):
+        st.text_input("Result path", value=t["result_path"], key=f"rp_modal_{str(t.get('id'))}", disabled=True, label_visibility="collapsed")
+    if status == "failed" and t.get("error_message"):
+        st.error(t.get("error_message"))
+    log_output = (t.get("log_output") or "").strip()
+    if log_output:
+        st.caption("Log output")
+        st.code(log_output, language=None)
+    params = t.get("parameters") or {}
+    if params:
+        st.caption("Parameters")
+        st.json(params)
+
+
+def _open_task_detail(task_id: str) -> None:
+    st.session_state["_task_detail_id"] = str(task_id)
 
 
 def _render_task_list(tasks: List[Dict[str, Any]], current_user: Optional[str]) -> bool:
-    """Render task list; returns True if any task is pending or running."""
+    """Render task list as a table; returns True if any task is pending or running."""
     if current_user:
         st.caption(f"Logged in as **{current_user}** (showing your tasks only)")
     if not tasks:
         st.caption("No tasks yet.")
         return False
     has_active = False
+
+    # Table header (compact: use caption and thin separators)
+    h1, h2, h3, h4, h5 = st.columns([2.2, 1, 0.9, 2.4, 1.2])
+    with h1:
+        st.caption("**Type**")
+    with h2:
+        st.caption("**Status**")
+    with h3:
+        st.caption("**Duration**")
+    with h4:
+        st.caption("**Summary**")
+    with h5:
+        st.caption("**Actions**")
+    st.markdown("<div style='height:1px; background:#ddd; margin:2px 0 4px 0;'></div>", unsafe_allow_html=True)
+
+    use_dialog = callable(getattr(st, "dialog", None))
+
     for t in tasks:
         if t.get("status") in ("pending", "running"):
             has_active = True
-        _render_task_card(t, current_user)
+        task_id = t.get("id", "")
+        task_type = t.get("type", "")
+        status = t.get("status", "")
+        status_labels = {"pending": "Pending", "running": "Running", "completed": "Completed", "failed": "Failed"}
+        status_label = status_labels.get(status, status)
+        type_label = _task_type_label(task_type)
+        summary = _task_summary(t)
+        duration = _task_duration(t) or "—"
+        sid = str(task_id)
+
+        c1, c2, c3, c4, c5 = st.columns([2.2, 1, 0.9, 2.4, 1.2])
+        with c1:
+            st.caption(type_label)
+        with c2:
+            if status == "pending":
+                st.caption(f":orange[{status_label}]")
+            elif status == "running":
+                st.caption(f":blue[{status_label}]")
+            elif status == "completed":
+                st.caption(f":green[{status_label}]")
+            else:
+                st.caption(f":red[{status_label}]")
+        with c3:
+            st.caption(duration)
+        with c4:
+            summary_short = (summary[:60] + "…") if summary and len(summary) > 60 else (summary or "—")
+            st.caption(summary_short)
+        with c5:
+            a5, b5 = st.columns(2)
+            with a5:
+                if use_dialog:
+                    st.button("View", key=f"view_{sid}", on_click=_open_task_detail, args=(sid,))
+            with b5:
+                if st.button("Delete", key=f"del_{sid}", type="secondary"):
+                    delete_task(sid, session_id=current_user)
+                    st.rerun()
+
+        if status == "running":
+            progress_msg = t.get("progress_message") or "Running..."
+            pct = t.get("progress_pct")
+            px, pc = st.columns([4, 1])
+            with px:
+                if pct is not None:
+                    st.progress(float(pct) / 100.0)
+                else:
+                    st.progress(0)
+            with pc:
+                st.caption(progress_msg[:40] + "…" if len(progress_msg) > 40 else progress_msg)
+
+        if not use_dialog:
+            with st.expander("More", expanded=False):
+                _render_task_detail_content(t)
+        # Thin separator between rows (no heavy divider)
+        st.markdown("<div style='height:1px; background:#eee; margin:2px 0;'></div>", unsafe_allow_html=True)
+
+    # Modal for task detail when dialog is available
+    if use_dialog and st.session_state.get("_task_detail_id"):
+        _task_id = st.session_state["_task_detail_id"]
+        detail_task = next((x for x in tasks if str(x.get("id")) == _task_id), None)
+        if detail_task is None:
+            detail_task = get_task(_task_id)
+        if detail_task:
+
+            @st.dialog("Task details", width="large")
+            def _task_detail_modal():
+                _render_task_detail_content(detail_task)
+                if st.button("Close"):
+                    st.session_state.pop("_task_detail_id", None)
+                    st.rerun()
+
+            _task_detail_modal()
+            # Clear so X/outside click doesn't reopen on next fragment rerun
+            st.session_state.pop("_task_detail_id", None)
+
     return has_active
 
 
@@ -864,7 +997,7 @@ def _render_task_list(tasks: List[Dict[str, Any]], current_user: Optional[str]) 
 _current_user = None
 if is_task_queue_enabled():
     _current_user = get_current_user_id() if is_auth_enabled() else None
-    st.header("Task status")
+    st.subheader("Task status")
     _use_fragment = getattr(st, "fragment", None) is not None
     if _use_fragment:
         try:

@@ -241,18 +241,22 @@ def extract_archives(phase: str, output_path: str, keep_zip_files: bool = False)
         shutil.unpack_archive(archive_path, dir_path)
         if not keep_zip_files:
             os.remove(archive_path)
-        for sub_dir_path in os.listdir(dir_path):
-            if Path(sub_dir_path).name == "scenario.yaml":
-                continue
-            full_path = os.path.join(dir_path, sub_dir_path)
-            if Path(sub_dir_path).name != phase:
-                if os.path.isdir(full_path):
+        if not os.path.isdir(dir_path) or not os.listdir(dir_path):
+            # Empty extraction directory, skip further processing
+            logger.warning(f"No files found after extracting {os.path.basename(archive_path)}")
+        else:
+            for sub_dir_path in os.listdir(dir_path):
+                if Path(sub_dir_path).name == "scenario.yaml":
+                    continue
+                full_path = os.path.join(dir_path, sub_dir_path)
+                if Path(sub_dir_path).name != phase:
+                    if os.path.isdir(full_path):
+                        shutil.rmtree(full_path)
+                else:
+                    result_file = os.path.join(full_path, "scene_result.pkl")
+                    if os.path.exists(result_file):
+                        shutil.move(result_file, os.path.join(dir_path, "scene_result.pkl"))
                     shutil.rmtree(full_path)
-            else:
-                result_file = os.path.join(full_path, "scene_result.pkl")
-                if os.path.exists(result_file):
-                    shutil.move(result_file, os.path.join(dir_path, "scene_result.pkl"))
-                shutil.rmtree(full_path)
 
 
 def organize_files_into_directories(folder_path: str) -> None:
@@ -281,11 +285,11 @@ def run_download_results(
     suite_ids: Optional[List[str]] = None,
     on_progress: Optional[Callable[[str], None]] = None,
     on_warning: Optional[Callable[[str], None]] = None,
-) -> int:
+) -> tuple:
     """
     Download job results (archives or result JSON), extract and organize.
     Requires server-side webauto auth (AUTH_PROFILE / ~/.webauto).
-    Returns the number of failed downloads (0 means all succeeded).
+    Returns (failure_count, total_attempted, rows) where rows is a list of {"Scenario Name", "Scenario ID", "Status"}.
     """
     env = os.environ.get("EVALUATOR_ENVIRONMENT", DEFAULT_ENVIRONMENT)
     base_url = API_BASE_URL
@@ -301,11 +305,14 @@ def run_download_results(
     os.makedirs(output_path, exist_ok=True)
     suite_output_paths: set = set()
     failure_count = 0
+    total_attempted = 0
+    rows: List[Dict[str, Any]] = []
     for i, log_info in enumerate(log_dicts):
         if on_progress:
             on_progress(f"Downloading {i+1}/{len(log_dicts)}: {log_info['scenario_name']}")
         if "second" in log_info.get("scenario_name", ""):
             continue
+        total_attempted += 1
         out_dir = _get_output_path_for_log(output_path, log_info, suite_id, suite_ids)
         suite_output_paths.add(out_dir)
         if download_type == "archives":
@@ -334,8 +341,14 @@ def run_download_results(
                 out_dir,
                 on_warning=on_warning,
             )
+        status = "success" if ok else "failed"
         if not ok:
             failure_count += 1
+        rows.append({
+            "Scenario Name": log_info.get("scenario_name", ""),
+            "Scenario ID": log_info.get("scenario_id", ""),
+            "Status": status,
+        })
     if on_progress:
         on_progress("Extracting archives..." if download_type == "archives" else "Organizing files...")
     for out_dir in sorted(suite_output_paths):
@@ -343,7 +356,7 @@ def run_download_results(
             extract_archives(phase, out_dir, keep_zip_files=keep_zip_files)
         else:
             organize_files_into_directories(out_dir)
-    return failure_count
+    return (failure_count, total_attempted, rows)
 
 
 def run_download_scenarios(
@@ -357,11 +370,11 @@ def run_download_scenarios(
     selected_ids: Optional[List[str]] = None,
     on_progress: Optional[Callable[[str], None]] = None,
     on_warning: Optional[Callable[[str], None]] = None,
-) -> int:
+) -> tuple:
     """
     Download scenarios from job to output_dir (YAML per scenario).
     Requires server-side webauto auth. After scenarios, also downloads result JSON and organizes.
-    Returns the number of failed downloads (0 means all succeeded).
+    Returns (failure_count, total_attempted) for the result JSON download phase.
     """
     import yaml
     from lib.WebAPI import scenarioAPI
@@ -418,6 +431,7 @@ def run_download_scenarios(
     # Download result JSON files and organize (same as tab1 "Result JSON only")
     suite_output_paths = {_get_output_path_for_log(output_dir, log_info, suite_id, None) for log_info in log_dicts}
     failure_count = 0
+    rows: List[Dict[str, Any]] = []
     for log_info in log_dicts:
         out_dir = _get_output_path_for_log(output_dir, log_info, suite_id, None)
         ok = download_archive_log(
@@ -431,8 +445,15 @@ def run_download_scenarios(
             out_dir,
             on_warning=on_warning,
         )
+        status = "success" if ok else "failed"
         if not ok:
             failure_count += 1
+        rows.append({
+            "Scenario Name": log_info.get("scenario_name", ""),
+            "Scenario ID": log_info.get("scenario_id", ""),
+            "Status": status,
+        })
     for out_dir in sorted(suite_output_paths):
         organize_files_into_directories(out_dir)
-    return failure_count
+    total_attempted = len(log_dicts)
+    return (failure_count, total_attempted, rows)

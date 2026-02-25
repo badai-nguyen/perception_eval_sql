@@ -13,7 +13,7 @@ _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _APP_ROOT not in sys.path:
     sys.path.insert(0, _APP_ROOT)
 
-from lib.db import update_task_status, update_task_progress, append_task_log
+from lib.db import update_task_status, update_task_progress, append_task_log, update_task_result_summary
 
 # Optional imports for tasks that need them
 def _import_eval_summary():
@@ -41,6 +41,15 @@ def job_generate_summary_csv(task_id: str, parameters: Dict[str, Any]) -> None:
         append_task_log(task_id, f"Generating summary under {eval_root}")
         info = eval_summary.generate_summary_and_score_csv(eval_root)
         result_path = info.get("summary_path", eval_root)
+        update_task_result_summary(
+            task_id,
+            {
+                "job": "generate_summary_csv",
+                "summary_path": result_path,
+                "summary_rows": info.get("summary_rows", 0),
+                "score_rows": info.get("score_rows", 0),
+            },
+        )
         append_task_log(task_id, f"Done. Output: {result_path}")
         update_task_status(task_id, "completed", result_path=result_path)
     except Exception as e:
@@ -75,6 +84,14 @@ def job_run_eval_dirs(task_id: str, parameters: Dict[str, Any]) -> None:
         append_task_log(task_id, "Generating summary CSV")
         info = eval_summary.generate_summary_and_score_csv(eval_root)
         result_path = info.get("summary_path", eval_root)
+        summary = {
+            "job": "run_eval_dirs",
+            "directories_processed": total,
+            "summary_path": result_path,
+            "summary_rows": info.get("summary_rows", 0),
+            "score_rows": info.get("score_rows", 0),
+        }
+        update_task_result_summary(task_id, summary)
         append_task_log(task_id, f"Done. Output: {result_path}")
         update_task_status(task_id, "completed", result_path=result_path)
     except Exception as e:
@@ -106,6 +123,7 @@ def job_build_parquet(task_id: str, parameters: Dict[str, Any]) -> None:
             project_id=project_id,
             job_id=job_id,
         )
+        update_task_result_summary(task_id, {"job": "build_parquet", "output_path": parquet_path})
         append_task_log(task_id, f"Done. Output: {parquet_path}")
         update_task_status(task_id, "completed", result_path=parquet_path)
     except Exception as e:
@@ -144,7 +162,7 @@ def job_download_results(task_id: str, parameters: Dict[str, Any]) -> None:
             return
         on_progress = lambda msg: _progress_callback(task_id, msg)
         on_warning = lambda msg: append_task_log(task_id, msg)
-        failure_count = download_core.run_download_results(
+        failure_count, total_attempted, rows = download_core.run_download_results(
             project_id=project_id,
             job_id=job_id,
             suite_id=suite_id,
@@ -155,6 +173,16 @@ def job_download_results(task_id: str, parameters: Dict[str, Any]) -> None:
             on_progress=on_progress,
             on_warning=on_warning,
         )
+        success_count = total_attempted - failure_count
+        summary = {
+            "job": "download_results",
+            "total": total_attempted,
+            "success": success_count,
+            "failed": failure_count,
+            "output_path": output_path,
+            "rows": rows[:500],
+        }
+        update_task_result_summary(task_id, summary)
         append_task_log(task_id, "Download and extract completed")
         if failure_count > 0:
             err_msg = f"Download completed with {failure_count} failures. See task log for details."
@@ -193,7 +221,7 @@ def job_download_scenarios(task_id: str, parameters: Dict[str, Any]) -> None:
             return
         on_progress = lambda msg: _progress_callback(task_id, msg)
         on_warning = lambda msg: append_task_log(task_id, msg)
-        failure_count = download_core.run_download_scenarios(
+        failure_count, total_attempted, rows = download_core.run_download_scenarios(
             project_id=project_id,
             job_id=job_id,
             suite_id=suite_id,
@@ -204,6 +232,16 @@ def job_download_scenarios(task_id: str, parameters: Dict[str, Any]) -> None:
             on_progress=on_progress,
             on_warning=on_warning,
         )
+        success_count = total_attempted - failure_count
+        summary = {
+            "job": "download_scenarios",
+            "total": total_attempted,
+            "success": success_count,
+            "failed": failure_count,
+            "output_path": output_dir,
+            "rows": rows[:500],
+        }
+        update_task_result_summary(task_id, summary)
         append_task_log(task_id, "Download scenarios completed")
         if failure_count > 0:
             err_msg = f"Download completed with {failure_count} failures. See task log for details."
