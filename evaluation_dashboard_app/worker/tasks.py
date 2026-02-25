@@ -143,7 +143,8 @@ def job_download_results(task_id: str, parameters: Dict[str, Any]) -> None:
             update_task_status(task_id, "failed", error_message="Missing output_path, project_id, or job_id")
             return
         on_progress = lambda msg: _progress_callback(task_id, msg)
-        download_core.run_download_results(
+        on_warning = lambda msg: append_task_log(task_id, msg)
+        failure_count = download_core.run_download_results(
             project_id=project_id,
             job_id=job_id,
             suite_id=suite_id,
@@ -152,9 +153,14 @@ def job_download_results(task_id: str, parameters: Dict[str, Any]) -> None:
             phase=phase,
             suite_ids=suite_ids,
             on_progress=on_progress,
+            on_warning=on_warning,
         )
         append_task_log(task_id, "Download and extract completed")
-        update_task_status(task_id, "completed", result_path=output_path)
+        if failure_count > 0:
+            err_msg = f"Download completed with {failure_count} failures. See task log for details."
+            update_task_status(task_id, "failed", result_path=output_path, error_message=err_msg)
+        else:
+            update_task_status(task_id, "completed", result_path=output_path)
     except ImportError:
         update_task_status(
             task_id,
@@ -186,7 +192,8 @@ def job_download_scenarios(task_id: str, parameters: Dict[str, Any]) -> None:
             update_task_status(task_id, "failed", error_message="Missing output_dir, project_id, or job_id")
             return
         on_progress = lambda msg: _progress_callback(task_id, msg)
-        download_core.run_download_scenarios(
+        on_warning = lambda msg: append_task_log(task_id, msg)
+        failure_count = download_core.run_download_scenarios(
             project_id=project_id,
             job_id=job_id,
             suite_id=suite_id,
@@ -195,9 +202,14 @@ def job_download_scenarios(task_id: str, parameters: Dict[str, Any]) -> None:
             scenario_name_filter=scenario_name_filter,
             selected_ids=selected_ids,
             on_progress=on_progress,
+            on_warning=on_warning,
         )
         append_task_log(task_id, "Download scenarios completed")
-        update_task_status(task_id, "completed", result_path=output_dir)
+        if failure_count > 0:
+            err_msg = f"Download completed with {failure_count} failures. See task log for details."
+            update_task_status(task_id, "failed", result_path=output_dir, error_message=err_msg)
+        else:
+            update_task_status(task_id, "completed", result_path=output_dir)
     except ImportError:
         update_task_status(
             task_id,

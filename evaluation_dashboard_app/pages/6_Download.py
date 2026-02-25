@@ -20,7 +20,7 @@ from lib.WebAPI import scenarioAPI
 from lib.user_config import UserConfig
 from lib.path_utils import get_data_root, resolve_under_data_root
 from lib.eval_summary import find_eval_result_dirs, run_eval_result_for_dir, generate_summary_and_score_csv
-from lib.db import is_task_queue_enabled, create_task, list_recent_tasks, get_task
+from lib.db import is_task_queue_enabled, create_task, list_recent_tasks, get_task, delete_task
 from lib.auth import get_current_user_id, is_auth_enabled
 
 try:
@@ -463,21 +463,26 @@ class JobResult:
             if not keep_zip_files:
                 os.remove(archive_path)
 
-            for sub_dir_path in os.listdir(dir_path):
-                if Path(sub_dir_path).name == "scenario.yaml":
-                    continue
-                full_path = dir_path + "/" + sub_dir_path
-                if not Path(sub_dir_path).name == phase:
-                    if os.path.isdir(full_path):
+            # It is possible the zip file is empty, so handle that case gracefully
+            if not os.path.isdir(dir_path) or not os.listdir(dir_path):
+                # Empty extraction directory, skip further processing
+                st.warning(f"No files found after extracting {os.path.basename(archive_path)}")
+            else:
+                for sub_dir_path in os.listdir(dir_path):
+                    if Path(sub_dir_path).name == "scenario.yaml":
+                        continue
+                    full_path = os.path.join(dir_path, sub_dir_path)
+                    if not Path(sub_dir_path).name == phase:
+                        if os.path.isdir(full_path):
+                            shutil.rmtree(full_path)
+                    else:
+                        result_file = os.path.join(full_path, "scene_result.pkl")
+                        if os.path.exists(result_file):
+                            shutil.move(
+                                result_file,
+                                os.path.join(dir_path, "scene_result.pkl"),
+                            )
                         shutil.rmtree(full_path)
-                else:
-                    result_file = os.path.join(full_path, "scene_result.pkl")
-                    if os.path.exists(result_file):
-                        shutil.move(
-                            result_file,
-                            dir_path + "/scene_result.pkl",
-                        )
-                    shutil.rmtree(full_path)
         
         progress_bar.progress(1.0)
         st.success("Extraction complete!")
@@ -788,8 +793,8 @@ def _task_duration(t: Dict[str, Any]) -> Optional[str]:
         return None
 
 
-def _render_task_card(t: Dict[str, Any]) -> None:
-    """Render a single task as a card: status, progress, log, details."""
+def _render_task_card(t: Dict[str, Any], current_user: Optional[str]) -> None:
+    """Render a single task in a compact row; details in expander."""
     task_id = t.get("id", "")
     task_type = t.get("type", "")
     status = t.get("status", "")
@@ -797,25 +802,39 @@ def _render_task_card(t: Dict[str, Any]) -> None:
     status_label = status_labels.get(status, status)
     type_label = _task_type_label(task_type)
     summary = _task_summary(t)
-    created = t.get("created_at")
-    created_str = str(created)[:19] if created else ""
     duration = _task_duration(t)
-
-    # Status badge
-    if status == "pending":
-        st.markdown(f"**{type_label}** — :orange[{status_label}]")
-    elif status == "running":
-        st.markdown(f"**{type_label}** — :blue[{status_label}]")
-    elif status == "completed":
-        st.markdown(f"**{type_label}** — :green[{status_label}]")
-    else:
-        st.markdown(f"**{type_label}** — :red[{status_label}]")
-
-    if summary:
-        st.caption(f"_{summary}_")
-    st.caption(f"ID `{str(task_id)[:8]}...` · Created {created_str}" + (f" · Duration {duration}" if duration else ""))
-
-    # Running: progress bar and current step
+    # Row 1: [type · status · duration / summary] [Delete]
+    col1, col2 = st.columns([5, 1])
+    with col1:
+        if status == "pending":
+            line = f"**{type_label}** — :orange[{status_label}]" + (f" · {duration}" if duration else "")
+        elif status == "running":
+            line = f"**{type_label}** — :blue[{status_label}]"
+        elif status == "completed":
+            line = f"**{type_label}** — :green[{status_label}]" + (f" · {duration}" if duration else "")
+        else:
+            line = f"**{type_label}** — :red[{status_label}]" + (f" · {duration}" if duration else "")
+        if summary:
+            st.caption(f"{line} · {summary}")
+        else:
+            st.caption(line)
+    with col2:
+        if st.button("Delete", key=f"del_{str(task_id)}", type="secondary"):
+            delete_task(str(task_id), session_id=current_user)
+            st.rerun()
+    # Row 2: [More ▼]
+    with st.expander("More", expanded=False):
+        if t.get("result_path"):
+            st.text_input("Result path", value=t["result_path"], key=f"rp_{str(task_id)}", disabled=True, label_visibility="collapsed")
+        if status == "failed" and t.get("error_message"):
+            st.error(t.get("error_message"))
+        log_output = (t.get("log_output") or "").strip()
+        if log_output:
+            st.code(log_output, language=None)
+        params = t.get("parameters") or {}
+        if params:
+            st.json(params)
+    # Progress only when running
     if status == "running":
         progress_msg = t.get("progress_message") or "Running..."
         pct = t.get("progress_pct")
@@ -824,33 +843,6 @@ def _render_task_card(t: Dict[str, Any]) -> None:
         else:
             st.progress(0)
         st.caption(progress_msg)
-
-    # Failed: show error prominently
-    if status == "failed" and t.get("error_message"):
-        st.error(t.get("error_message"))
-
-    # Result path (copyable)
-    if t.get("result_path"):
-        rp = t["result_path"]
-        st.text_input("Result path", value=rp, key=f"result_path_{str(task_id)}", disabled=True, label_visibility="collapsed")
-        st.caption("Copy path above to open in file browser or CLI.")
-
-    # Expandable Log
-    log_output = (t.get("log_output") or "").strip()
-    if log_output:
-        with st.expander("View log", expanded=False):
-            st.code(log_output, language=None)
-
-    # Expandable Details
-    with st.expander("Details", expanded=False):
-        if t.get("result_path"):
-            st.text(f"Result path: {t['result_path']}")
-        if status == "failed" and t.get("error_message"):
-            st.text(f"Error: {t['error_message']}")
-        params = t.get("parameters") or {}
-        if params:
-            st.json(params)
-    st.markdown("---")
 
 
 def _render_task_list(tasks: List[Dict[str, Any]], current_user: Optional[str]) -> bool:
@@ -864,7 +856,7 @@ def _render_task_list(tasks: List[Dict[str, Any]], current_user: Optional[str]) 
     for t in tasks:
         if t.get("status") in ("pending", "running"):
             has_active = True
-        _render_task_card(t)
+        _render_task_card(t, current_user)
     return has_active
 
 
@@ -872,7 +864,7 @@ def _render_task_list(tasks: List[Dict[str, Any]], current_user: Optional[str]) 
 _current_user = None
 if is_task_queue_enabled():
     _current_user = get_current_user_id() if is_auth_enabled() else None
-    st.subheader("Task status")
+    st.header("Task status")
     _use_fragment = getattr(st, "fragment", None) is not None
     if _use_fragment:
         try:
@@ -890,7 +882,7 @@ if is_task_queue_enabled():
             st.rerun()
         if has_active:
             st.info("You have running tasks. Refresh the page to see latest status and logs.")
-    st.markdown("---")
+
 
 # Initialize session state
 if 'downloaded_scenarios' not in st.session_state:
@@ -1083,7 +1075,7 @@ with st.sidebar:
         with col_large_skip2:
             large_file_mb = st.number_input(
                 "Skip threshold (MB)",
-                value=get_config_value("large_file_mb", 50.0),
+                value=float(get_config_value("large_file_mb", 50.0)),
                 min_value=1.0,
                 max_value=5000.0,
                 step=1.0,

@@ -381,3 +381,36 @@ def list_recent_tasks(limit: int = 50, session_id: Optional[str] = None) -> List
             conn.close()
     except Exception:
         return []
+
+
+def delete_task(task_id: str, session_id: Optional[str] = None) -> bool:
+    """Delete a task by id. When session_id is set, only delete if the task belongs to that user. Returns True if deleted."""
+    url = get_database_url()
+    if not url:
+        return False
+    try:
+        import psycopg2
+    except ImportError:
+        return False
+    conn = None
+    try:
+        conn = psycopg2.connect(url)
+        conn.autocommit = False
+        try:
+            with conn.cursor() as cur:
+                if session_id is not None:
+                    cur.execute(
+                        "DELETE FROM tasks WHERE id = %s AND session_id = %s",
+                        (task_id, session_id),
+                    )
+                else:
+                    cur.execute("DELETE FROM tasks WHERE id = %s", (task_id,))
+                n = cur.rowcount
+                conn.commit()
+                return n > 0
+        finally:
+            conn.close()
+    except Exception:
+        if conn:
+            conn.rollback()
+        return False

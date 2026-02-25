@@ -1,0 +1,27 @@
+{
+  "overview_mode": "Compare Mode",
+  "overview_run_a": "201601091808",
+  "overview_run_b": "201601091809",
+  "environment": "default",
+  "project_id": "x2_dev",
+  "job_id": "28b66cdd-82be-54b4-8d1f-09d46c75a062",
+  "suite_id": "",
+  "output_path": "/app/data/test",
+  "download_type": "Archives (ZIP)",
+  "phase": "phase_name",
+  "skip_large_file": false,
+  "large_file_mb": 50.0,
+  "eval_root": "/app/data/test",
+  "eval_workers": 1,
+  "eval_recursive": true,
+  "eval_overwrite": false,
+  "eval_parallel": false,
+  "suite_ids": [],
+  "keep_zip_files": false,
+  "eval_notify_when_done": false,
+  "parquet_parent": "/app/data",
+  "upload_run_name": "",
+  "overview_compare_runs": [
+    "201601091809"
+  ]
+}

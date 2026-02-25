@@ -78,6 +78,31 @@ def _resp_json(resp: Any) -> Dict[str, Any]:
     return resp
 
 
+def _response_reason(resp: Any) -> str:
+    """Extract a short reason from error response body for log messages."""
+    if not hasattr(resp, "content") or not resp.content:
+        return ""
+    try:
+        raw = resp.content.decode("utf-8", errors="replace").strip()
+        if not raw:
+            return ""
+        try:
+            data = json.loads(raw)
+            code = data.get("code") or data.get("error_code", "")
+            message = data.get("message") or data.get("error", "")
+            if code and message:
+                return f" {code}: {message}"
+            if message:
+                return f" {message}"
+            if code:
+                return f" {code}"
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return f" {raw[:500]}" if len(raw) <= 500 else f" {raw[:497]}..."
+    except Exception:
+        return ""
+
+
 def get_case_simulation_log_info(
     auth_session: Any,
     api_base_url: str,
@@ -160,6 +185,7 @@ def download_archive_log(
     *,
     skip_large_file: bool = False,
     large_file_mb: float = 50.0,
+    on_warning: Optional[Callable[[str], None]] = None,
 ) -> bool:
     """Download one log (archive or result JSON) to output_path. Returns True on success."""
     url = f"{api_base_url}/projects/{project_id}/logs/{log_info[log_type]}/download"
@@ -168,10 +194,21 @@ def download_archive_log(
     try:
         resp = auth_session.post(url, headers=headers, data=json.dumps(post_obj).encode("utf-8"))
     except Exception as e:
-        logger.warning("Failed to get download URL for %s: %s", log_info.get("scenario_name"), e)
+        msg = f"Failed to get download URL for {log_info.get('scenario_name')}: {e}"
+        logger.warning("%s", msg)
+        if on_warning:
+            on_warning(msg)
         return False
     if hasattr(resp, "status_code") and resp.status_code != 200:
-        logger.warning("Failed to get download URL for %s: %s", log_info.get("scenario_name"), resp.status_code)
+        reason = _response_reason(resp)
+        log_id = log_info.get(log_type, "")
+        scenario = log_info.get("scenario_name", "")
+        msg = f"Can not get log_id {log_id}: {resp.status_code}{reason}"
+        if scenario:
+            msg = f"[{scenario}] {msg}"
+        logger.warning("%s", msg)
+        if on_warning:
+            on_warning(msg)
         return False
     content = _resp_json(resp)
     download_url = content.get("url")
@@ -189,7 +226,10 @@ def download_archive_log(
         )
         return size > 0
     except Exception as e:
-        logger.warning("Download failed %s: %s", dl_filename, e)
+        msg = f"Download failed {dl_filename}: {e}"
+        logger.warning("%s", msg)
+        if on_warning:
+            on_warning(msg)
         return False
 
 
@@ -240,10 +280,12 @@ def run_download_results(
     keep_zip_files: bool = False,
     suite_ids: Optional[List[str]] = None,
     on_progress: Optional[Callable[[str], None]] = None,
-) -> None:
+    on_warning: Optional[Callable[[str], None]] = None,
+) -> int:
     """
     Download job results (archives or result JSON), extract and organize.
     Requires server-side webauto auth (AUTH_PROFILE / ~/.webauto).
+    Returns the number of failed downloads (0 means all succeeded).
     """
     env = os.environ.get("EVALUATOR_ENVIRONMENT", DEFAULT_ENVIRONMENT)
     base_url = API_BASE_URL
@@ -258,6 +300,7 @@ def run_download_results(
         raise RuntimeError("No case reports found for this job/suite")
     os.makedirs(output_path, exist_ok=True)
     suite_output_paths: set = set()
+    failure_count = 0
     for i, log_info in enumerate(log_dicts):
         if on_progress:
             on_progress(f"Downloading {i+1}/{len(log_dicts)}: {log_info['scenario_name']}")
@@ -266,7 +309,7 @@ def run_download_results(
         out_dir = _get_output_path_for_log(output_path, log_info, suite_id, suite_ids)
         suite_output_paths.add(out_dir)
         if download_type == "archives":
-            download_archive_log(
+            ok = download_archive_log(
                 auth_session,
                 presigned,
                 base_url,
@@ -277,9 +320,10 @@ def run_download_results(
                 out_dir,
                 skip_large_file=skip_large_file,
                 large_file_mb=large_file_mb,
+                on_warning=on_warning,
             )
         else:
-            download_archive_log(
+            ok = download_archive_log(
                 auth_session,
                 presigned,
                 base_url,
@@ -288,7 +332,10 @@ def run_download_results(
                 "result_json_id",
                 "json",
                 out_dir,
+                on_warning=on_warning,
             )
+        if not ok:
+            failure_count += 1
     if on_progress:
         on_progress("Extracting archives..." if download_type == "archives" else "Organizing files...")
     for out_dir in sorted(suite_output_paths):
@@ -296,6 +343,7 @@ def run_download_results(
             extract_archives(phase, out_dir, keep_zip_files=keep_zip_files)
         else:
             organize_files_into_directories(out_dir)
+    return failure_count
 
 
 def run_download_scenarios(
@@ -308,10 +356,12 @@ def run_download_scenarios(
     scenario_name_filter: Optional[str] = None,
     selected_ids: Optional[List[str]] = None,
     on_progress: Optional[Callable[[str], None]] = None,
-) -> None:
+    on_warning: Optional[Callable[[str], None]] = None,
+) -> int:
     """
     Download scenarios from job to output_dir (YAML per scenario).
     Requires server-side webauto auth. After scenarios, also downloads result JSON and organizes.
+    Returns the number of failed downloads (0 means all succeeded).
     """
     import yaml
     from lib.WebAPI import scenarioAPI
@@ -360,13 +410,17 @@ def run_download_scenarios(
                     sort_keys=False,
                 )
         except Exception as e:
-            logger.warning("Failed to download scenario %s: %s", scenario_name, e)
+            msg = f"Failed to download scenario {scenario_name}: {e}"
+            logger.warning("%s", msg)
+            if on_warning:
+                on_warning(msg)
             raise
     # Download result JSON files and organize (same as tab1 "Result JSON only")
     suite_output_paths = {_get_output_path_for_log(output_dir, log_info, suite_id, None) for log_info in log_dicts}
+    failure_count = 0
     for log_info in log_dicts:
         out_dir = _get_output_path_for_log(output_dir, log_info, suite_id, None)
-        download_archive_log(
+        ok = download_archive_log(
             auth_session,
             presigned,
             base_url,
@@ -375,6 +429,10 @@ def run_download_scenarios(
             "result_json_id",
             "json",
             out_dir,
+            on_warning=on_warning,
         )
+        if not ok:
+            failure_count += 1
     for out_dir in sorted(suite_output_paths):
         organize_files_into_directories(out_dir)
+    return failure_count

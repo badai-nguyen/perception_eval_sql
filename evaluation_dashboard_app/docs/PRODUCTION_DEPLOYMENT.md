@@ -160,6 +160,24 @@ When you run from `deploy/`, data is stored on your host so you can access it di
 
 Paths in compose are relative to `deploy/`: `../data`, `./postgres_data`, and `${HOME}/.webauto`. Do not commit `postgres_data/` (in `.gitignore`).
 
+## Docker config (separate from local)
+
+The app’s JSON config (e.g. Download page defaults) is read from a **different file** in Docker so your local `configs/autoware_evaluator_dl_config.json` is not used:
+
+- **Env:** `EVAL_DASHBOARD_CONFIG=/app/docker_config/autoware_evaluator_dl_config.json`
+- **File:** `deploy/configs/autoware_evaluator_dl_config.json` is mounted at `/app/docker_config/` in the container.
+
+Edit `deploy/configs/autoware_evaluator_dl_config.json` for Docker defaults (e.g. `output_path`, `eval_root`). Use paths inside the container (e.g. `/app/data/download`). Your local config stays unchanged.
+
+## Editing code without rebuilding
+
+The compose file mounts the app source (`Overview.py`, `pages/`, `lib/`, `worker/`, `configs/`) into the Streamlit and worker containers. You can edit these files on the host and see changes without rebuilding the image:
+
+- **Streamlit**: Saves to files under `pages/` or `lib/` are picked up automatically (Streamlit reloads).
+- **Worker**: Restart the worker after changing `worker/` or `lib/`: `docker compose restart worker`.
+
+Rebuild the image only when you change dependencies (e.g. `requirements-docker.txt`) or the Dockerfile.
+
 ## Directory layout (production)
 
 ```

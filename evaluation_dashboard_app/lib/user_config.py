@@ -2,7 +2,10 @@ import json
 import os
 from typing import Any, Callable, Dict, Optional
 
-CONFIG_FILE = os.path.expanduser("./configs/autoware_evaluator_dl_config.json")
+# Override with EVAL_DASHBOARD_CONFIG in Docker so container uses a different file than local
+CONFIG_FILE = os.environ.get("EVAL_DASHBOARD_CONFIG") or os.path.expanduser(
+    "./configs/autoware_evaluator_dl_config.json"
+)
 
 
 def load_user_config(config_file: str = CONFIG_FILE) -> Dict[str, Any]:

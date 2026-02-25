@@ -7,6 +7,9 @@
 #   - ../data -> evaluation runs (Summary.csv, parquet, downloads); same as app default
 #   - ./postgres_data -> Postgres database files (tasks table, etc.)
 #   - ${HOME}/.webauto -> Download/Scenario API credentials (streamlit + worker)
+#
+# App source is mounted so you can edit Python code without rebuilding the image.
+# Streamlit will reload on file changes. Restart the worker to pick up changes: docker compose restart worker
 
 services:
   nginx:
@@ -29,6 +32,7 @@ services:
     command: ["/app/docker-entrypoint.sh"]
     environment:
       - EVAL_DASHBOARD_DATA_ROOT=${EVAL_DASHBOARD_DATA_ROOT:-/app/data}
+      - EVAL_DASHBOARD_CONFIG=/app/docker_config/autoware_evaluator_dl_config.json
       - USE_TASK_QUEUE=${USE_TASK_QUEUE:-true}
       - DATABASE_URL=${DATABASE_URL}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
@@ -36,6 +40,14 @@ services:
     volumes:
       - ../data:/app/data
       - ${HOME}/.webauto:/root/.webauto
+      # Docker-only config (separate from your local configs)
+      - ./configs:/app/docker_config
+      # Mount app source so code changes apply without rebuild (Streamlit auto-reloads)
+      - ../Overview.py:/app/Overview.py
+      - ../pages:/app/pages
+      - ../lib:/app/lib
+      - ../worker:/app/worker
+      - ../configs:/app/configs
     env_file:
       - .env
     depends_on:
@@ -58,6 +70,7 @@ services:
     command: ["python3", "-m", "worker.run_worker"]
     environment:
       - EVAL_DASHBOARD_DATA_ROOT=${EVAL_DASHBOARD_DATA_ROOT:-/app/data}
+      - EVAL_DASHBOARD_CONFIG=/app/docker_config/autoware_evaluator_dl_config.json
       - USE_TASK_QUEUE=true
       - DATABASE_URL=${DATABASE_URL}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
@@ -65,6 +78,14 @@ services:
     volumes:
       - ../data:/app/data
       - ${HOME}/.webauto:/root/.webauto
+      # Docker-only config (separate from your local configs)
+      - ./configs:/app/docker_config
+      # Mount app source so code changes apply without rebuild (restart worker to pick up: docker compose restart worker)
+      - ../Overview.py:/app/Overview.py
+      - ../pages:/app/pages
+      - ../lib:/app/lib
+      - ../worker:/app/worker
+      - ../configs:/app/configs
     env_file:
       - .env
     depends_on:
