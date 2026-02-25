@@ -31,6 +31,7 @@ services:
     image: evaluation-dashboard
     command: ["/app/docker-entrypoint.sh"]
     environment:
+      - TZ=Asia/Tokyo
       - EVAL_DASHBOARD_DATA_ROOT=${EVAL_DASHBOARD_DATA_ROOT:-/app/data}
       - EVAL_DASHBOARD_CONFIG=/app/docker_config/autoware_evaluator_dl_config.json
       - USE_TASK_QUEUE=${USE_TASK_QUEUE:-true}
@@ -69,6 +70,7 @@ services:
     entrypoint: []
     command: ["python3", "-m", "worker.run_worker"]
     environment:
+      - TZ=Asia/Tokyo
       - EVAL_DASHBOARD_DATA_ROOT=${EVAL_DASHBOARD_DATA_ROOT:-/app/data}
       - EVAL_DASHBOARD_CONFIG=/app/docker_config/autoware_evaluator_dl_config.json
       - USE_TASK_QUEUE=true
@@ -98,6 +100,7 @@ services:
   postgres:
     image: postgres:15-alpine
     environment:
+      TZ: Asia/Tokyo
       POSTGRES_USER: ${POSTGRES_USER:-eval_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-eval_pass}
       POSTGRES_DB: ${POSTGRES_DB:-eval_dashboard}

@@ -11,11 +11,28 @@ import tempfile
 import traceback
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from typing import Text, Optional, List, Dict, Any
+
+# JST for task time display (UTC+9)
+_JST = timezone(timedelta(hours=9))
+
+
+def _to_jst(dt: Any) -> Optional[datetime]:
+    """Convert datetime to JST for display. Naive datetimes are assumed UTC."""
+    if dt is None:
+        return None
+    if not hasattr(dt, "astimezone"):
+        return None
+    try:
+        if getattr(dt, "tzinfo", None) is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(_JST)
+    except Exception:
+        return None
 from pathlib import Path
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
-from typing import Text, Optional, List, Dict, Any
 from lib.WebAPI import scenarioAPI
 from lib.user_config import UserConfig
 from lib.path_utils import get_data_root, resolve_under_data_root
@@ -772,6 +789,18 @@ def _task_summary(t: Dict[str, Any]) -> str:
     return ""
 
 
+def _task_time_str(t: Dict[str, Any]) -> str:
+    """Format task created_at for display in JST (e.g. 'Feb 24, 16:45')."""
+    created = t.get("created_at")
+    dt = _to_jst(created) if created else None
+    if not dt:
+        return "—"
+    try:
+        return dt.strftime("%b %d, %H:%M")
+    except Exception:
+        return str(created)[:16] if created else "—"
+
+
 def _task_duration(t: Dict[str, Any]) -> Optional[str]:
     """Format duration from created_at to updated_at if both exist."""
     created = t.get("created_at")
@@ -861,7 +890,32 @@ def _render_result_summary(summary: Dict[str, Any]) -> None:
 
 def _render_task_detail_content(t: Dict[str, Any]) -> None:
     """Render full task detail (summary, path, error, log, params) into current container."""
+    try:
+        _render_task_detail_content_impl(t)
+    except Exception as e:
+        st.error(f"Could not load task details: {e}")
+        import traceback
+        st.code(traceback.format_exc(), language=None)
+
+
+def _render_task_detail_content_impl(t: Dict[str, Any]) -> None:
+    """Implementation of task detail rendering (called inside try/except)."""
     status = t.get("status", "")
+    created_jst = _to_jst(t.get("created_at"))
+    updated_jst = _to_jst(t.get("updated_at"))
+    time_parts = []
+    if created_jst:
+        try:
+            time_parts.append(f"Created: {created_jst.strftime('%Y-%m-%d %H:%M:%S')} JST")
+        except Exception:
+            time_parts.append(f"Created: {t.get('created_at')}")
+    if updated_jst and updated_jst != created_jst:
+        try:
+            time_parts.append(f"Updated: {updated_jst.strftime('%Y-%m-%d %H:%M:%S')} JST")
+        except Exception:
+            time_parts.append(f"Updated: {t.get('updated_at')}")
+    if time_parts:
+        st.caption(" · ".join(time_parts))
     result_summary_raw = t.get("result_summary")
     if result_summary_raw:
         try:
@@ -898,16 +952,18 @@ def _render_task_list(tasks: List[Dict[str, Any]], current_user: Optional[str]) 
     has_active = False
 
     # Table header (compact: use caption and thin separators)
-    h1, h2, h3, h4, h5 = st.columns([2.2, 1, 0.9, 2.4, 1.2])
+    h1, h2, h3, h4, h5, h6 = st.columns([2, 0.9, 1.2, 0.8, 2.2, 1.2])
     with h1:
         st.caption("**Type**")
     with h2:
         st.caption("**Status**")
     with h3:
-        st.caption("**Duration**")
+        st.caption("**Time**")
     with h4:
-        st.caption("**Summary**")
+        st.caption("**Duration**")
     with h5:
+        st.caption("**Summary**")
+    with h6:
         st.caption("**Actions**")
     st.markdown("<div style='height:1px; background:#ddd; margin:2px 0 4px 0;'></div>", unsafe_allow_html=True)
 
@@ -924,9 +980,10 @@ def _render_task_list(tasks: List[Dict[str, Any]], current_user: Optional[str]) 
         type_label = _task_type_label(task_type)
         summary = _task_summary(t)
         duration = _task_duration(t) or "—"
+        time_str = _task_time_str(t)
         sid = str(task_id)
 
-        c1, c2, c3, c4, c5 = st.columns([2.2, 1, 0.9, 2.4, 1.2])
+        c1, c2, c3, c4, c5, c6 = st.columns([2, 0.9, 1.2, 0.8, 2.2, 1.2])
         with c1:
             st.caption(type_label)
         with c2:
@@ -939,16 +996,18 @@ def _render_task_list(tasks: List[Dict[str, Any]], current_user: Optional[str]) 
             else:
                 st.caption(f":red[{status_label}]")
         with c3:
-            st.caption(duration)
+            st.caption(time_str)
         with c4:
+            st.caption(duration)
+        with c5:
             summary_short = (summary[:60] + "…") if summary and len(summary) > 60 else (summary or "—")
             st.caption(summary_short)
-        with c5:
-            a5, b5 = st.columns(2)
-            with a5:
+        with c6:
+            a6, b6 = st.columns(2)
+            with a6:
                 if use_dialog:
                     st.button("View", key=f"view_{sid}", on_click=_open_task_detail, args=(sid,))
-            with b5:
+            with b6:
                 if st.button("Delete", key=f"del_{sid}", type="secondary"):
                     delete_task(sid, session_id=current_user)
                     st.rerun()
@@ -974,20 +1033,24 @@ def _render_task_list(tasks: List[Dict[str, Any]], current_user: Optional[str]) 
     # Modal for task detail when dialog is available
     if use_dialog and st.session_state.get("_task_detail_id"):
         _task_id = st.session_state["_task_detail_id"]
-        detail_task = next((x for x in tasks if str(x.get("id")) == _task_id), None)
-        if detail_task is None:
-            detail_task = get_task(_task_id)
-        if detail_task:
+        try:
+            detail_task = next((x for x in tasks if str(x.get("id")) == _task_id), None)
+            if detail_task is None:
+                detail_task = get_task(_task_id)
+            if detail_task:
 
-            @st.dialog("Task details", width="large")
-            def _task_detail_modal():
-                _render_task_detail_content(detail_task)
-                if st.button("Close"):
-                    st.session_state.pop("_task_detail_id", None)
-                    st.rerun()
+                @st.dialog("Task details", width="large")
+                def _task_detail_modal():
+                    _render_task_detail_content(detail_task)
+                    if st.button("Close"):
+                        st.session_state.pop("_task_detail_id", None)
+                        st.rerun()
 
-            _task_detail_modal()
-            # Clear so X/outside click doesn't reopen on next fragment rerun
+                _task_detail_modal()
+        except Exception as e:
+            st.error(f"Could not open task details: {e}")
+        finally:
+            # Clear so X/outside click or error doesn't leave page stuck; next run shows main content
             st.session_state.pop("_task_detail_id", None)
 
     return has_active
@@ -1578,9 +1641,14 @@ with tab3:
 with tab4:
     st.header("Eval Results")
 
+    # Safe default so tab4 never fails with NameError if sidebar output_path wasn't set (e.g. fragment-only run)
+    try:
+        _default_eval_root = str(output_path)
+    except NameError:
+        _default_eval_root = get_config_value("eval_root", str(get_data_root() / "download"))
     eval_root = st.text_input(
         "Root directory to evaluate",
-        value=str(output_path),
+        value=get_config_value("eval_root", _default_eval_root),
         help="Directory containing downloaded scenario results (must be under the server data root). Uploaded files are also saved here.",
     )
     set_config_value("eval_root", eval_root)
