@@ -55,6 +55,7 @@ class TLREvaluationAnalyzer:
         self.criteria_data: Dict[str, Dict] = {}
         self.cached_vehicle_statuses: Dict[str, List[Dict]] = {}
         self.cached_traffic_light_data: Dict[str, List[Dict]] = {}
+        self.scenario_errors: set = set()  # scenario names to skip (have error)
 
     def load_all_results(self) -> None:
         """Load all results: prefer result.json (JSONL), then fall back to pkl (scene_result.pkl / *.pkl.z)."""
@@ -200,10 +201,32 @@ class TLREvaluationAnalyzer:
                         pass
         return results
 
+    def _scenario_has_error(self, results: List[Dict]) -> bool:
+        """Return True if the scenario result indicates an error (skip such scenarios)."""
+        if not results:
+            return False
+        last_frame = None
+        for result in results:
+            if "Frame" in result and "FinalScore" in result["Frame"]:
+                last_frame = result
+                break
+        if not last_frame:
+            return False
+        result_obj = last_frame.get("Result", {})
+        if result_obj.get("Error") or result_obj.get("error"):
+            return True
+        summary = result_obj.get("Summary", "") or ""
+        if "error" in summary.lower():
+            return True
+        return False
+
     def extract_criteria_data(self) -> None:
-        """Extract criteria evaluation data from all scenarios."""
+        """Extract criteria evaluation data from all scenarios. Skips scenarios that have error."""
         for scenario_name, results in self.scenario_results.items():
             if not results:
+                continue
+            if self._scenario_has_error(results):
+                self.scenario_errors.add(scenario_name)
                 continue
             last_frame = None
             for result in results:
@@ -218,9 +241,9 @@ class TLREvaluationAnalyzer:
                 self.criteria_data[scenario_name] = criteria_data
 
     def pre_calculate_all_data(self) -> None:
-        """Pre-calculate and cache vehicle statuses and traffic light data for all scenarios."""
+        """Pre-calculate and cache vehicle statuses and traffic light data for all scenarios. Skips error scenarios."""
         for scenario_name, results in self.scenario_results.items():
-            if not results:
+            if not results or scenario_name in self.scenario_errors:
                 continue
             self.cached_vehicle_statuses[scenario_name] = self._calculate_vehicle_status(results)
             self.cached_traffic_light_data[scenario_name] = self._extract_traffic_light_data(results)
@@ -529,7 +552,7 @@ class TLREvaluationAnalyzer:
     def _calculate_status_tlr_data(self, status: str, tlr_type: str) -> Tuple[int, int, float]:
         total_tp = total_frames = 0
         for scenario_name, results in self.scenario_results.items():
-            if not results:
+            if not results or scenario_name in self.scenario_errors:
                 continue
             vehicle_statuses = self.cached_vehicle_statuses.get(scenario_name)
             traffic_light_data = self.cached_traffic_light_data.get(scenario_name)
@@ -651,7 +674,7 @@ class TLREvaluationAnalyzer:
     def _calculate_status_tlr_data_critical_priority(self, status: str, tlr_type: str) -> Tuple[int, int, float]:
         total_tp = total_frames = 0
         for scenario_name, results in self.scenario_results.items():
-            if not results:
+            if not results or scenario_name in self.scenario_errors:
                 continue
             vehicle_statuses = self.cached_vehicle_statuses.get(scenario_name)
             traffic_light_data = self.cached_traffic_light_data.get(scenario_name)
@@ -726,10 +749,10 @@ class TLREvaluationAnalyzer:
         return False
 
     def get_vehicle_status_details_df(self) -> pd.DataFrame | None:
-        """Return a DataFrame of per-frame vehicle status and TLR info for all scenarios."""
+        """Return a DataFrame of per-frame vehicle status and TLR info for all scenarios. Skips error scenarios."""
         all_status_data = []
         for scenario_name, results in self.scenario_results.items():
-            if not results:
+            if not results or scenario_name in self.scenario_errors:
                 continue
             vehicle_statuses = self.cached_vehicle_statuses.get(scenario_name)
             traffic_light_data = self.cached_traffic_light_data.get(scenario_name)

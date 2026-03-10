@@ -220,43 +220,19 @@ def _render_compare_tabs(analyzer_a, analyzer_b, label_a, label_b, tab_criteria,
         fig_delta.add_hline(y=0, line_dash="dash", line_color="gray")
         st.plotly_chart(fig_delta, use_container_width=True)
 
-        # Option: TP rate by criteria per suite pair (A & B); suite names normalized (no UUID postfix)
+        # TP rate by criteria: per suite pair — automatically plot all scenario comparisons (A & B)
         common_suites = analyzer_a.get_common_scenario_keys(analyzer_b)
         if common_suites:
-            show_per_suite = st.checkbox(
-                "Show TP rate by criteria per suite pair (A & B)",
-                value=False,
-                key="tlr_compare_per_suite_pair",
-            )
-            if show_per_suite:
-                st.subheader("TP rate by criteria: per suite pair")
-                selected_suite = st.selectbox(
-                    "Select suite pair",
-                    options=common_suites,
-                    format_func=lambda x: x,
-                    key="tlr_suite_pair_select",
+            st.subheader("TP rate by criteria: per suite pair")
+            st.caption(f"TP rate by criteria (A vs B) for each of the {len(common_suites)} common suite pairs.")
+            for i, suite_name in enumerate(common_suites):
+                per_suite_df, fig_suite = _build_suite_pair_compare(
+                    analyzer_a, analyzer_b, suite_name, label_a, label_b
                 )
-                if selected_suite:
-                    per_suite_df, fig_suite = _build_suite_pair_compare(
-                        analyzer_a, analyzer_b, selected_suite, label_a, label_b
-                    )
-                    if per_suite_df is not None and fig_suite is not None:
-                        st.dataframe(per_suite_df, use_container_width=True, hide_index=True, key="tlr_suite_single_df")
-                        st.plotly_chart(fig_suite, use_container_width=True, key="tlr_suite_single_chart")
-                    else:
-                        st.caption("No criteria data for this suite pair.")
-
-                # Plot compare result for all available suite pairs
-                st.subheader("Compare result: all suite pairs")
-                st.caption(f"TP rate by criteria (A vs B) for each of the {len(common_suites)} common suite pairs.")
-                for i, suite_name in enumerate(common_suites):
-                    per_suite_df, fig_suite = _build_suite_pair_compare(
-                        analyzer_a, analyzer_b, suite_name, label_a, label_b
-                    )
-                    if per_suite_df is not None and fig_suite is not None:
-                        with st.expander(f"**{suite_name}**", expanded=False, key=f"tlr_suite_exp_{i}"):
-                            st.dataframe(per_suite_df, use_container_width=True, hide_index=True, key=f"tlr_suite_df_{i}")
-                            st.plotly_chart(fig_suite, use_container_width=True, key=f"tlr_suite_chart_{i}")
+                if per_suite_df is not None and fig_suite is not None:
+                    with st.expander(f"**{suite_name}**", expanded=False):
+                        st.dataframe(per_suite_df, use_container_width=True, hide_index=True, key=f"tlr_suite_df_{i}")
+                        st.plotly_chart(fig_suite, use_container_width=True, key=f"tlr_suite_chart_{i}")
         else:
             st.caption("No common suite pairs between A and B — cannot show per-suite TP rate by criteria.")
 
