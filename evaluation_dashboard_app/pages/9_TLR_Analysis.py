@@ -130,6 +130,60 @@ def _render_single_tabs(analyzer, tab_criteria, tab_vehicle, tab_critical, tab_d
             st.info("No vehicle status details available.")
 
 
+def _build_suite_pair_compare(analyzer_a, analyzer_b, normalized_suite_name, label_a, label_b):
+    """Build per-suite compare: (dataframe of criteria vs TP rates, figure) or (None, None) if no data."""
+    key_a, key_b = analyzer_a.get_original_keys_for_suite_pair(normalized_suite_name, analyzer_b)
+    mat_a = analyzer_a.get_criteria_matrix_for_scenario(key_a) if key_a else None
+    mat_b = analyzer_b.get_criteria_matrix_for_scenario(key_b) if key_b else None
+    if mat_a is None and mat_b is None:
+        return None, None
+    criteria_list = [f"criteria_{i}" for i in range(21)]
+    rows = []
+    for c in criteria_list:
+        tp_a = tp_b = None
+        if mat_a is not None and not mat_a.empty:
+            row_a = mat_a[mat_a["Criteria"] == c]
+            if not row_a.empty:
+                tp_a = row_a["TP rate"].iloc[0]
+        if mat_b is not None and not mat_b.empty:
+            row_b = mat_b[mat_b["Criteria"] == c]
+            if not row_b.empty:
+                tp_b = row_b["TP rate"].iloc[0]
+        if tp_a is not None or tp_b is not None:
+            delta = (tp_b - tp_a) if (tp_a is not None and tp_b is not None) else None
+            rows.append({
+                "Criteria": c,
+                f"TP rate ({label_a})": tp_a,
+                f"TP rate ({label_b})": tp_b,
+                "Δ (B − A)": delta,
+            })
+    if not rows:
+        return None, None
+    per_suite_df = pd.DataFrame(rows)
+    per_suite_df["criteria_num"] = per_suite_df["Criteria"].str.replace("criteria_", "").astype(int)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=per_suite_df["criteria_num"],
+        y=per_suite_df[f"TP rate ({label_a})"],
+        name=label_a,
+        mode="lines+markers",
+    ))
+    fig.add_trace(go.Scatter(
+        x=per_suite_df["criteria_num"],
+        y=per_suite_df[f"TP rate ({label_b})"],
+        name=label_b,
+        mode="lines+markers",
+    ))
+    fig.update_layout(
+        title=f"TP rate by criteria — {normalized_suite_name}",
+        xaxis_title="Criteria number",
+        yaxis_title="TP rate",
+        yaxis_range=[0, 1.1],
+        height=320,
+    )
+    return per_suite_df, fig
+
+
 def _render_compare_tabs(analyzer_a, analyzer_b, label_a, label_b, tab_criteria, tab_vehicle, tab_critical, tab_details):
     with tab_criteria:
         st.subheader("Criteria: A vs B (TP rate and delta)")
@@ -165,6 +219,46 @@ def _render_compare_tabs(analyzer_a, analyzer_b, label_a, label_b, tab_criteria,
         )
         fig_delta.add_hline(y=0, line_dash="dash", line_color="gray")
         st.plotly_chart(fig_delta, use_container_width=True)
+
+        # Option: TP rate by criteria per suite pair (A & B); suite names normalized (no UUID postfix)
+        common_suites = analyzer_a.get_common_scenario_keys(analyzer_b)
+        if common_suites:
+            show_per_suite = st.checkbox(
+                "Show TP rate by criteria per suite pair (A & B)",
+                value=False,
+                key="tlr_compare_per_suite_pair",
+            )
+            if show_per_suite:
+                st.subheader("TP rate by criteria: per suite pair")
+                selected_suite = st.selectbox(
+                    "Select suite pair",
+                    options=common_suites,
+                    format_func=lambda x: x,
+                    key="tlr_suite_pair_select",
+                )
+                if selected_suite:
+                    per_suite_df, fig_suite = _build_suite_pair_compare(
+                        analyzer_a, analyzer_b, selected_suite, label_a, label_b
+                    )
+                    if per_suite_df is not None and fig_suite is not None:
+                        st.dataframe(per_suite_df, use_container_width=True, hide_index=True, key="tlr_suite_single_df")
+                        st.plotly_chart(fig_suite, use_container_width=True, key="tlr_suite_single_chart")
+                    else:
+                        st.caption("No criteria data for this suite pair.")
+
+                # Plot compare result for all available suite pairs
+                st.subheader("Compare result: all suite pairs")
+                st.caption(f"TP rate by criteria (A vs B) for each of the {len(common_suites)} common suite pairs.")
+                for i, suite_name in enumerate(common_suites):
+                    per_suite_df, fig_suite = _build_suite_pair_compare(
+                        analyzer_a, analyzer_b, suite_name, label_a, label_b
+                    )
+                    if per_suite_df is not None and fig_suite is not None:
+                        with st.expander(f"**{suite_name}**", expanded=False, key=f"tlr_suite_exp_{i}"):
+                            st.dataframe(per_suite_df, use_container_width=True, hide_index=True, key=f"tlr_suite_df_{i}")
+                            st.plotly_chart(fig_suite, use_container_width=True, key=f"tlr_suite_chart_{i}")
+        else:
+            st.caption("No common suite pairs between A and B — cannot show per-suite TP rate by criteria.")
 
     with tab_vehicle:
         st.subheader("Vehicle status vs TLR type: A vs B (TP rate delta)")

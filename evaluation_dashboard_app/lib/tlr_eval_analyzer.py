@@ -14,6 +14,24 @@ from typing import Dict, List, Tuple, Any
 import pandas as pd
 import numpy as np
 
+# Trailing UUID postfix to strip from scenario/suite names (e.g. ..._02_a9b99be8-c8c2-5cc3-a2b8-3017b3ae6237 -> ..._02)
+_UUID_SUFFIX_RE = re.compile(r"_[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def normalize_suite_name(scenario_key: str) -> str:
+    """Return suite name without trailing UUID postfix. Handles keys with path segments (e.g. SuiteName/testcase_uuid)."""
+    if not scenario_key:
+        return scenario_key
+    parts = scenario_key.replace("\\", "/").split("/")
+    if not parts:
+        return scenario_key
+    last = parts[-1]
+    last_normalized = _UUID_SUFFIX_RE.sub("", last)
+    if last_normalized != last:
+        parts[-1] = last_normalized
+        return "/".join(parts)
+    return scenario_key
+
 
 def _obj_to_dict(obj: Any) -> Any:
     """Recursively convert an object to dict/list primitives for TLR frame structure."""
@@ -418,6 +436,49 @@ class TLREvaluationAnalyzer:
                 "TP rate": tp_rate,
             })
         return pd.DataFrame(matrix_data)
+
+    def get_criteria_matrix_for_scenario(self, scenario_name: str) -> pd.DataFrame | None:
+        """Return criteria matrix (TP rate, counts) for a single scenario/suite testcase, or None if no data."""
+        if scenario_name not in self.criteria_data:
+            return None
+        cdata = self.criteria_data[scenario_name]
+        criteria_list = [f"criteria_{i}" for i in range(21)]
+        matrix_data = []
+        for criteria in criteria_list:
+            if criteria not in cdata:
+                continue
+            matrix_data.append({
+                "Criteria": criteria,
+                "Number of TP": cdata[criteria]["tp"],
+                "Number of total frames": cdata[criteria]["total"],
+                "TP rate": cdata[criteria]["tp_rate"],
+            })
+        return pd.DataFrame(matrix_data) if matrix_data else None
+
+    def get_common_scenario_keys(self, other: "TLREvaluationAnalyzer") -> List[str]:
+        """Return sorted list of normalized suite names that exist in both this analyzer and the other (suite pairs).
+        Suite names are normalized by stripping trailing UUID postfix (e.g. ..._02_a9b99be8-... -> ..._02)."""
+        norm_self = {normalize_suite_name(k): k for k in self.criteria_data.keys()}
+        norm_other = {normalize_suite_name(k): k for k in other.criteria_data.keys()}
+        common = set(norm_self.keys()) & set(norm_other.keys())
+        return sorted(common)
+
+    def get_original_keys_for_suite_pair(
+        self, normalized_suite_name: str, other: "TLREvaluationAnalyzer"
+    ) -> Tuple[str | None, str | None]:
+        """Return (original_key_in_self, original_key_in_other) for the given normalized suite name.
+        If multiple scenarios normalize to the same name, returns the first match in each."""
+        key_self = None
+        key_other = None
+        for k in self.criteria_data.keys():
+            if normalize_suite_name(k) == normalized_suite_name:
+                key_self = k
+                break
+        for k in other.criteria_data.keys():
+            if normalize_suite_name(k) == normalized_suite_name:
+                key_other = k
+                break
+        return (key_self, key_other)
 
     def create_vehicle_status_matrix(self) -> pd.DataFrame:
         """Create matrix of vehicle status vs traffic light type (TP rates)."""
