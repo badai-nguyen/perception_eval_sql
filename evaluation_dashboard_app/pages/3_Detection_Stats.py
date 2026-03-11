@@ -22,8 +22,21 @@ if "runA" not in st.session_state:
 
 mode = st.session_state.get("mode", "Single Mode")
 runA = st.session_state["runA"]
-runB = st.session_state.get("runB")
-single_mode = mode == "Single Mode"
+# Multi-run compare: use all_runs and run_labels when available (Overview sets these in Compare Mode)
+all_runs = st.session_state.get("all_runs")
+run_labels = st.session_state.get("run_labels")
+if mode == "Compare Mode" and all_runs and run_labels and len(all_runs) >= 2:
+    runs = all_runs
+    run_labels_list = run_labels
+else:
+    runs = [runA]
+    run_labels_list = ["A"]
+    if mode == "Compare Mode":
+        runB = st.session_state.get("runB")
+        if runB is not None:
+            runs = [runA, runB]
+            run_labels_list = ["A", "B"]
+single_mode = len(runs) == 1
 
 def list_parquets_in_run(run_path) -> List[str]:
     """Return sorted list of absolute paths to .parquet files in the run directory."""
@@ -127,8 +140,8 @@ def create_view_eval_flat(con, target_file: str, view_name: str = "view_eval_fla
     """
     con.execute(query)
 
-def create_view_tpr_fpr(con, view_name: str = "view_tpr_fpr_by_class_dist_topic"):
-    """Create TPR/FPR view."""
+def create_view_tpr_fpr(con, view_name: str = "view_tpr_fpr_by_class_dist_topic", source_eval_flat: str = "view_eval_flat"):
+    """Create TPR/FPR view. source_eval_flat is the name of the eval_flat view to read from."""
     query = f"""
     CREATE OR REPLACE VIEW {view_name} AS
     WITH stats AS (
@@ -144,7 +157,7 @@ def create_view_tpr_fpr(con, view_name: str = "view_tpr_fpr_by_class_dist_topic"
             COUNT(*) FILTER (WHERE source='GT' AND status='TP') AS tp_gt,
             COUNT(*) FILTER (WHERE source='EST' AND status IN ('TP','FP')) AS est_total,
             COUNT(*) FILTER (WHERE source='EST' AND status='FP') AS fp_est
-        FROM view_eval_flat
+        FROM {source_eval_flat}
         GROUP BY
             t4dataset_id, topic_name, label, distance_bin, bin_idx,
             coalesce(try(CAST(visibility AS VARCHAR)), 'not available'),
@@ -152,14 +165,8 @@ def create_view_tpr_fpr(con, view_name: str = "view_tpr_fpr_by_class_dist_topic"
     )
     SELECT
         *,
-        CASE
-            WHEN gt_total > 0 THEN CAST(tp_gt AS DOUBLE) / gt_total
-            ELSE NULL
-        END AS tpr,
-        CASE
-            WHEN est_total > 0 THEN CAST(fp_est AS DOUBLE) / est_total
-            ELSE NULL
-        END AS fpr
+        CASE WHEN gt_total > 0 THEN CAST(tp_gt AS DOUBLE) / gt_total ELSE NULL END AS tpr,
+        CASE WHEN est_total > 0 THEN CAST(fp_est AS DOUBLE) / est_total ELSE NULL END AS fpr
     FROM stats
     """
     con.execute(query)
@@ -208,185 +215,77 @@ def build_filter_clause(filters: dict,*, enable_dist_h: bool = True) -> str:
 # =============================
 # Parquet files from run path(s)
 # =============================
-parquet_list_a = list_parquets_in_run(runA["path"])
-if not parquet_list_a:
-    st.error(f"No parquet files found in run directory: {path_display(runA['path'])}. Add a .parquet file or generate one from the Download page.")
-    st.stop()
-
-if single_mode:
-    parquet_list_b = []
-    compared_target_file = parquet_list_a[0]  # unused in single mode
-else:
-    if runB is None:
-        st.warning("Compare Mode requires a Candidate (B) run. Select runs on the Overview page.")
-        st.stop()
-    parquet_list_b = list_parquets_in_run(runB["path"])
-    if not parquet_list_b:
-        st.error(f"No parquet files found in Candidate run: {path_display(runB['path'])}.")
+parquet_lists = [list_parquets_in_run(r["path"]) for r in runs]
+for i, (r, pl) in enumerate(zip(runs, parquet_lists)):
+    if not pl:
+        label = run_labels_list[i] if i < len(run_labels_list) else str(i)
+        st.error(f"No parquet files found in run ({label}): {path_display(r['path'])}. Add a .parquet file or generate one from the Download page.")
         st.stop()
 
 # =============================
 # Loaded Runs (from Overview)
 # =============================
 st.subheader("Loaded Runs")
-st.markdown(f"**Baseline (A):** `{path_display(runA['path'])}`")
-if not single_mode and runB:
-    st.markdown(f"**Candidate (B):** `{path_display(runB['path'])}`")
+for i, r in enumerate(runs):
+    lbl = run_labels_list[i] if i < len(run_labels_list) else str(i)
+    prefix = "Baseline (A):" if lbl == "A" else f"Candidate ({lbl}):"
+    st.markdown(f"**{prefix}** `{path_display(r['path'])}`")
 
 # =============================
 # Sidebar - Filters
 # =============================
+# File selection per run
+target_files = []
 with st.sidebar:
     st.header("Filters / Inputs")
-    
-    # File selection (from run directories)
-    if len(parquet_list_a) == 1:
-        target_file = parquet_list_a[0]
-    else:
-        target_file = st.selectbox(
-            "Baseline (A) File",
-            parquet_list_a,
-            format_func=lambda p: os.path.basename(p),
-            key="target_file"
-        )
-    
-    if not single_mode:
-        if len(parquet_list_b) == 1:
-            compared_target_file = parquet_list_b[0]
+    for i, (pl, lbl) in enumerate(zip(parquet_lists, run_labels_list)):
+        if len(pl) == 1:
+            target_files.append(pl[0])
         else:
-            compared_target_file = st.selectbox(
-                "Candidate (B) File",
-                parquet_list_b,
+            tf = st.selectbox(
+                f"Run ({lbl}) File",
+                pl,
                 format_func=lambda p: os.path.basename(p),
-                index=min(1, len(parquet_list_b) - 1),
-                key="compared_target_file"
+                index=min(i, len(pl) - 1),
+                key=f"target_file_{lbl}"
             )
-    
-    con = get_duckdb_connection()
-    # Validate parquet files are readable before creating views
-    ok, msg = validate_parquet_file(con, target_file)
+            target_files.append(tf)
+
+con = get_duckdb_connection()
+for i, (path, lbl) in enumerate(zip(target_files, run_labels_list)):
+    ok, msg = validate_parquet_file(con, path)
     if not ok:
-        st.error(f"**Baseline (A) file** cannot be read: {msg}")
+        st.sidebar.error(f"**Run ({lbl}) file** cannot be read: {msg}")
         st.stop()
-    if not single_mode:
-        ok_comp, msg_comp = validate_parquet_file(con, compared_target_file)
-        if not ok_comp:
-            st.error(f"**Candidate (B) file** cannot be read: {msg_comp}")
-            st.stop()
-    
-    # Create views
-    try:
-        create_view_eval_flat(con, target_file, "view_eval_flat")
-        create_view_tpr_fpr(con, "view_tpr_fpr_by_class_dist_topic")
-        if not single_mode:
-            create_view_eval_flat(con, compared_target_file, "view_eval_flat_comp")
-            create_view_tpr_fpr(con, "view_tpr_fpr_by_class_dist_topic_c")
-            con.execute("""
-                CREATE OR REPLACE VIEW view_tpr_fpr_by_class_dist_topic_c AS
-                WITH stats AS (
-                    SELECT
-                        t4dataset_id,
-                        topic_name,
-                        label,
-                        distance_bin,
-                        bin_idx,
-                        coalesce(try(CAST(visibility AS VARCHAR)), 'not available') AS visibility,
-                        coalesce(try(CAST(suite_name AS VARCHAR)), '') AS suite_name,
-                        COUNT(*) FILTER (WHERE source='GT' AND status IN ('TP','FN')) AS gt_total,
-                        COUNT(*) FILTER (WHERE source='GT' AND status='TP') AS tp_gt,
-                        COUNT(*) FILTER (WHERE source='EST' AND status IN ('TP','FP')) AS est_total,
-                        COUNT(*) FILTER (WHERE source='EST' AND status='FP') AS fp_est
-                    FROM view_eval_flat_comp
-                    GROUP BY
-                        t4dataset_id, topic_name, label, distance_bin, bin_idx,
-                        coalesce(try(CAST(visibility AS VARCHAR)), 'not available'),
-                        coalesce(try(CAST(suite_name AS VARCHAR)), '')
-                )
-                SELECT
-                    *,
-                    CASE WHEN gt_total > 0 THEN CAST(tp_gt AS DOUBLE) / gt_total ELSE NULL END AS tpr,
-                    CASE WHEN est_total > 0 THEN CAST(fp_est AS DOUBLE) / est_total ELSE NULL END AS fpr
-                FROM stats
-            """)
-    except Exception as e:
-        st.error(f"Error creating views: {e}")
-        st.stop()
-    
-    # Topic selection
+
+# Create one eval_flat + tpr_fpr view per run (view_eval_flat_1, view_tpr_fpr_1, ...)
+try:
+    for i, path in enumerate(target_files):
+        v_flat = "view_eval_flat" if i == 0 else f"view_eval_flat_{i}"
+        v_tpr = "view_tpr_fpr_by_class_dist_topic" if i == 0 else f"view_tpr_fpr_{i}"
+        create_view_eval_flat(con, path, v_flat)
+        create_view_tpr_fpr(con, v_tpr, source_eval_flat=v_flat)
+except Exception as e:
+    st.error(f"Error creating views: {e}")
+    st.stop()
+
+# Filter options from first file (applied to all runs)
+target_file = target_files[0]
+with st.sidebar:
     topics = list_values(con, target_file, "topic_name")
-    if topics:
-        topic_name = st.selectbox(
-            "Topic Name",
-            ["__all__"] + topics,
-            key="topic_name"
-        )
-    else:
-        topic_name = "__all__"
-    
-    if not single_mode:
-        compared_topics = list_values(con, compared_target_file, "topic_name")
-        if compared_topics:
-            compared_topic_name = st.selectbox(
-                "Candidate (B) Topic Name",
-                ["__all__"] + compared_topics,
-                key="compared_topic_name"
-            )
-        else:
-            compared_topic_name = "__all__"
-    else:
-        compared_topic_name = topic_name
-    
-    # Label selection
+    topic_name = st.selectbox("Topic Name", ["__all__"] + topics, key="topic_name") if topics else "__all__"
     labels = list_values(con, target_file, "label")
-    if labels:
-        selected_labels = st.multiselect(
-            "Label(s)",
-            labels,
-            default=labels[:5] if len(labels) > 5 else labels,
-            key="labels"
-        )
-    else:
-        selected_labels = []
-    
-    # Suites selection (default: include all)
+    selected_labels = st.multiselect("Label(s)", labels, default=labels[:5] if labels and len(labels) > 5 else (labels or []), key="labels")
     try:
         suite_options = list_values(con, target_file, "COALESCE(CAST(suite_name AS VARCHAR), '')")
     except Exception:
         suite_options = []
-    if suite_options:
-        selected_suites = st.multiselect(
-            "Suites",
-            suite_options,
-            default=suite_options,
-            key="suites",
-            help="Filter by suite(s). Default: all included."
-        )
-    else:
-        selected_suites = []
-    
-    # Visibility selection
+    selected_suites = st.multiselect("Suites", suite_options, default=suite_options, key="suites", help="Filter by suite(s). Default: all included.") if suite_options else []
     vis_options = list_values(con, target_file, "COALESCE(CAST(visibility AS VARCHAR), 'not available') AS visibility")
-    if vis_options:
-        selected_visibility = st.multiselect(
-            "Visibility",
-            vis_options,
-            default=vis_options,
-            key="visibility"
-        )
-    else:
-        selected_visibility = []
-    
-    # Max evaluation range
-    max_eval_range = st.selectbox(
-        "Max Evaluation Range [m]",
-        [50, 80, 100, 120, 150],
-        index=0,
-        key="max_eval_range"
-    )
+    selected_visibility = st.multiselect("Visibility", vis_options, default=vis_options, key="visibility") if vis_options else []
+    max_eval_range = st.selectbox("Max Evaluation Range [m]", [50, 80, 100, 120, 150], index=0, key="max_eval_range")
 
-# =============================
-# Build Filters
-# =============================
+# Build filters (same values for all runs)
 filters_base = {
     'topic_name': topic_name,
     'label': selected_labels,
@@ -394,31 +293,15 @@ filters_base = {
     'visibility': selected_visibility,
     'max_eval_range': max_eval_range
 }
-
-filters_comp = {
-    'topic_name': compared_topic_name,
-    'label': selected_labels,
-    'suites': selected_suites,
-    'visibility': selected_visibility,
-    'max_eval_range': max_eval_range
-}
+filters_list = [filters_base] * len(runs)
 
 # =============================
 # Main Content
 # =============================
 
-if st.checkbox("Debug: Inspect Parquet (Both Files)" if not single_mode else "Debug: Inspect Parquet"):
-    if single_mode:
-        col_left, _ = st.columns([1, 1])
-        cols_used = [col_left]
-        file_labels = [("Baseline (A) File", target_file)]
-    else:
-        col_left, col_right = st.columns(2)
-        cols_used = [col_left, col_right]
-        file_labels = [
-            ("Baseline (A) File", target_file),
-            ("Candidate (B) File", compared_target_file)
-        ]
+if st.checkbox("Debug: Inspect Parquet (All Runs)" if not single_mode else "Debug: Inspect Parquet"):
+    cols_used = st.columns(len(target_files))
+    file_labels = [(f"Run ({run_labels_list[i]}) File", target_files[i]) for i in range(len(target_files))]
     schema_results = []
     for col, (label, file_path) in zip(cols_used, file_labels):
         with col:
@@ -468,47 +351,36 @@ if st.checkbox("Debug: Inspect Parquet (Both Files)" if not single_mode else "De
             st.dataframe(stats_df)
 
     # --- Show info about schema differences (compare mode only) ---
-    if not single_mode and len(schema_results) == 2:
-        label1, df1 = schema_results[0]
-        label2, df2 = schema_results[1]
-        cols1 = set(zip(df1["column_name"], df1["column_type"]))
-        cols2 = set(zip(df2["column_name"], df2["column_type"]))
-        names1 = set(df1["column_name"])
-        names2 = set(df2["column_name"])
-
-        added = names2 - names1
-        removed = names1 - names2
-        common = names1 & names2
-
-        # Changed types
-        types1 = {row["column_name"]: row["column_type"] for _, row in df1.iterrows()}
-        types2 = {row["column_name"]: row["column_type"] for _, row in df2.iterrows()}
-        dtype_changes = []
-        for cname in sorted(common):
-            t1 = types1.get(cname)
-            t2 = types2.get(cname)
-            if t1 != t2:
-                dtype_changes.append((cname, t1, t2))
-
-        with st.expander("⚖️ Difference between schemas", expanded=True):
-            if not (added or removed or dtype_changes):
-                st.success("✅ The schemas are identical (column names and types match exactly).")
+    if not single_mode and len(schema_results) >= 2:
+        with st.expander("⚖️ Difference between schemas", expanded=(len(schema_results) == 2)):
+            if len(schema_results) == 2:
+                label1, df1 = schema_results[0]
+                label2, df2 = schema_results[1]
+                names1 = set(df1["column_name"])
+                names2 = set(df2["column_name"])
+                added, removed = names2 - names1, names1 - names2
+                common = names1 & names2
+                types1 = {row["column_name"]: row["column_type"] for _, row in df1.iterrows()}
+                types2 = {row["column_name"]: row["column_type"] for _, row in df2.iterrows()}
+                dtype_changes = [(c, types1.get(c), types2.get(c)) for c in sorted(common) if types1.get(c) != types2.get(c)]
+                if not (added or removed or dtype_changes):
+                    st.success("✅ The schemas are identical (column names and types match exactly).")
+                else:
+                    if added:
+                        st.error(f"Columns only in `{label2}`: {', '.join(sorted(added))}")
+                    if removed:
+                        st.error(f"Columns only in `{label1}`: {', '.join(sorted(removed))}")
+                    if dtype_changes:
+                        st.warning("Columns with different types:")
+                        st.dataframe(pd.DataFrame(dtype_changes, columns=["Column", f"Type in {label1}", f"Type in {label2}"]), hide_index=True)
             else:
-                st.markdown("#### Schema differences (between the two files):")
-
-                if added:
-                    st.error(f"Columns only in `{label2}`: {', '.join(sorted(added))}")
-                if removed:
-                    st.error(f"Columns only in `{label1}`: {', '.join(sorted(removed))}")
-                if dtype_changes:
-                    st.warning("Columns with different types:")
-                    dtype_df = pd.DataFrame(dtype_changes, columns=["Column", f"Type in {label1}", f"Type in {label2}"])
-                    st.dataframe(dtype_df, hide_index=True)
-            if added or removed or dtype_changes:
-                # Show details for debugging purposes
-                st.caption("Check above differences to adapt code or troubleshoot data loading issues.")
+                st.info(f"{len(schema_results)} runs loaded. Compare schemas per run in the columns above.")
 
 
+
+# Helper: view name for run index i (0-based)
+def _flat_view(i: int) -> str:
+    return "view_eval_flat" if i == 0 else f"view_eval_flat_{i}"
 
 # =============================
 # Panel 1: t4dataset Summary
@@ -530,32 +402,12 @@ try:
         """
         df_status = con.execute(query_status).df()
     else:
-        query_base = f"""
-        WITH base AS (
-            SELECT COUNT(DISTINCT t4dataset_id) AS id_num, '{os.path.basename(target_file)}' AS series
-            FROM view_eval_flat
-        ),
-        comp AS (
-            SELECT COUNT(DISTINCT t4dataset_id) AS id_num, '{os.path.basename(compared_target_file)}' AS series
-            FROM view_eval_flat_comp
-        )
-        SELECT * FROM base
-        UNION ALL
-        SELECT * FROM comp
-        """
+        parts = [f"SELECT COUNT(DISTINCT t4dataset_id) AS id_num, '{run_labels_list[i]}' AS series FROM {_flat_view(i)}" for i in range(len(runs))]
+        query_base = " UNION ALL ".join(parts)
         df_summary = con.execute(query_base).df()
-        query_status = """
-        SELECT 'Baseline (A)' AS dataset, label, status, COUNT(*) AS num
-        FROM view_eval_flat
-        GROUP BY label, status
-        UNION ALL
-        SELECT 'Candidate (B)' AS dataset, label, status, COUNT(*) AS num
-        FROM view_eval_flat_comp
-        GROUP BY label, status
-        ORDER BY dataset, label, status
-        """
+        parts_status = [f"SELECT '{run_labels_list[i]}' AS dataset, label, status, COUNT(*) AS num FROM {_flat_view(i)} GROUP BY label, status" for i in range(len(runs))]
+        query_status = " UNION ALL ".join(parts_status) + " ORDER BY dataset, label, status"
         df_status = con.execute(query_status).df()
-
 
     if single_mode:
         st.write("**Status Count Table (label × status)**")
@@ -575,10 +427,7 @@ try:
         else:
             st.info("No status count data available")
     else:
-        st.write("**Status Count Table (rows=label, cols=Baseline (A) / Candidate (B) × Status)**")
-        st.markdown("""
-        Status count for both datasets. Columns are in the form "Baseline (A) TP", "Baseline (A) FP", etc., to allow easy comparison.
-        """)
+        st.write("**Status Count Table (label × status by run)**")
         if not df_status.empty:
             df_status_wide = df_status.pivot_table(index='label', columns=['dataset', 'status'], values='num', fill_value=0)
             df_status_wide.columns = [f"{col[0]} {col[1]}" for col in df_status_wide.columns]
@@ -591,8 +440,8 @@ try:
                 color="status",
                 barmode="stack",
                 facet_col="dataset",
-                title="Status Distribution per Label (by File)",
-                category_orders={"dataset": ["Baseline (A)", "Candidate (B)"]},
+                title="Status Distribution per Label (by Run)",
+                category_orders={"dataset": run_labels_list},
                 labels={"num": "Count", "label": "Label", "status": "Status"}
             )
             st.plotly_chart(fig2, width="stretch")
@@ -607,23 +456,24 @@ except Exception as e:
 # =============================
 st.subheader("TP Rate" + (" Comparison" if not single_mode else ""))
 
+_tpr_query = """
+SELECT
+    label,
+    CASE
+        WHEN COUNT(*) FILTER (WHERE source='GT' AND status IN ('TP','FN')) > 0
+        THEN CAST(COUNT(*) FILTER (WHERE source='GT' AND status='TP') AS DOUBLE)
+             / COUNT(*) FILTER (WHERE source='GT' AND status IN ('TP','FN'))
+        ELSE 0
+    END AS tpr
+FROM {view}
+WHERE {filter_clause}
+GROUP BY label
+ORDER BY label
+"""
 if single_mode:
     try:
         filter_clause = build_filter_clause(filters_base)
-        query = f"""
-        SELECT
-            label,
-            CASE 
-                WHEN COUNT(*) FILTER (WHERE source='GT' AND status IN ('TP','FN')) > 0 
-                THEN CAST(COUNT(*) FILTER (WHERE source='GT' AND status='TP') AS DOUBLE) 
-                     / COUNT(*) FILTER (WHERE source='GT' AND status IN ('TP','FN'))
-                ELSE 0
-            END AS tpr
-        FROM view_eval_flat
-        WHERE {filter_clause}
-        GROUP BY label
-        ORDER BY label
-        """
+        query = _tpr_query.format(view="view_eval_flat", filter_clause=filter_clause)
         df_tpr_base = con.execute(query).df()
         if not df_tpr_base.empty:
             fig = px.bar(
@@ -640,73 +490,34 @@ if single_mode:
     except Exception as e:
         st.error(f"Error: {e}")
 else:
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("**Baseline (A) Data**")
-        try:
-            filter_clause = build_filter_clause(filters_base)
-            query = f"""
-            SELECT
-                label,
-                CASE 
-                    WHEN COUNT(*) FILTER (WHERE source='GT' AND status IN ('TP','FN')) > 0 
-                    THEN CAST(COUNT(*) FILTER (WHERE source='GT' AND status='TP') AS DOUBLE) 
-                         / COUNT(*) FILTER (WHERE source='GT' AND status IN ('TP','FN'))
-                    ELSE 0
-                END AS tpr
-            FROM view_eval_flat
-            WHERE {filter_clause}
-            GROUP BY label
-            ORDER BY label
-            """
-            df_tpr_base = con.execute(query).df()
-            if not df_tpr_base.empty:
-                fig = px.bar(
-                    df_tpr_base,
-                    x='label',
-                    y='tpr',
-                    title=f"Total TP rate within {max_eval_range} [m] with Baseline (A) data",
-                    labels={'tpr': 'TP Rate', 'label': 'Label'}
-                )
-                fig.update_layout(yaxis_range=[0, 1.2])
-                st.plotly_chart(fig, width="stretch")
-            else:
-                st.info("No data available")
-        except Exception as e:
-            st.error(f"Error: {e}")
-    with col2:
-        st.markdown("**Candidate (B) Data**")
-        try:
-            filter_clause = build_filter_clause(filters_comp)
-            query = f"""
-            SELECT
-                label,
-                CASE 
-                    WHEN COUNT(*) FILTER (WHERE source='GT' AND status IN ('TP','FN')) > 0 
-                    THEN CAST(COUNT(*) FILTER (WHERE source='GT' AND status='TP') AS DOUBLE) 
-                         / COUNT(*) FILTER (WHERE source='GT' AND status IN ('TP','FN'))
-                    ELSE 0
-                END AS tpr
-            FROM view_eval_flat_comp
-            WHERE {filter_clause}
-            GROUP BY label
-            ORDER BY label
-            """
-            df_tpr_comp = con.execute(query).df()
-            if not df_tpr_comp.empty:
-                fig = px.bar(
-                    df_tpr_comp,
-                    x='label',
-                    y='tpr',
-                    title=f"Total TP rate within {max_eval_range} [m] with Candidate (B) data",
-                    labels={'tpr': 'TP Rate', 'label': 'Label'}
-                )
-                fig.update_layout(yaxis_range=[0, 1.2])
-                st.plotly_chart(fig, width="stretch")
-            else:
-                st.info("No data available")
-        except Exception as e:
-            st.error(f"Error: {e}")
+    try:
+        dfs_tpr = []
+        for i in range(len(runs)):
+            fc = build_filter_clause(filters_list[i])
+            q = _tpr_query.format(view=_flat_view(i), filter_clause=fc)
+            df_i = con.execute(q).df()
+            df_i["run"] = run_labels_list[i]
+            dfs_tpr.append(df_i)
+        df_tpr_all = pd.concat(dfs_tpr, ignore_index=True)
+        if not df_tpr_all.empty:
+            fig = px.bar(
+                df_tpr_all,
+                x="label",
+                y="tpr",
+                color="run",
+                barmode="group",
+                title=f"Total TP rate within {max_eval_range} [m] by run",
+                labels={"tpr": "TP Rate", "label": "Label", "run": "Run"}
+            )
+            fig.update_layout(yaxis_range=[0, 1.2])
+            st.plotly_chart(fig, width="stretch")
+        else:
+            st.info("No data available")
+    except Exception as e:
+        st.error(f"Error: {e}")
+
+def _tpr_fpr_view(i: int) -> str:
+    return "view_tpr_fpr_by_class_dist_topic" if i == 0 else f"view_tpr_fpr_{i}"
 
 # =============================
 # Panel 3: TP Rate by Distance Bin
@@ -744,61 +555,37 @@ try:
         else:
             st.info("No data available")
     else:
-        filter_clause_comp = build_filter_clause(filters_comp, enable_dist_h=False)
-        query = f"""
-        WITH base AS (
-            SELECT
-                distance_bin,
-                CASE WHEN SUM(gt_total) > 0 THEN CAST(SUM(tp_gt) AS DOUBLE) / SUM(gt_total) ELSE 0 END AS tpr,
-                CASE WHEN SUM(est_total) > 0 THEN CAST(SUM(fp_est) AS DOUBLE) / SUM(est_total) ELSE 0 END AS fpr
-            FROM view_tpr_fpr_by_class_dist_topic
-            WHERE {filter_clause_base}
+        dfs_dist = []
+        for i in range(len(runs)):
+            fc = build_filter_clause(filters_list[i], enable_dist_h=False)
+            q = f"""
+            SELECT distance_bin,
+                CASE WHEN SUM(gt_total) > 0 THEN CAST(SUM(tp_gt) AS DOUBLE) / SUM(gt_total) ELSE 0 END AS tpr
+            FROM {_tpr_fpr_view(i)}
+            WHERE {fc}
             GROUP BY distance_bin
-        ),
-        comp AS (
-            SELECT
-                distance_bin,
-                CASE WHEN SUM(gt_total) > 0 THEN CAST(SUM(tp_gt) AS DOUBLE) / SUM(gt_total) ELSE 0 END AS tpr_comp,
-                CASE WHEN SUM(est_total) > 0 THEN CAST(SUM(fp_est) AS DOUBLE) / SUM(est_total) ELSE 0 END AS fpr_comp
-            FROM view_tpr_fpr_by_class_dist_topic_c
-            WHERE {filter_clause_comp}
-            GROUP BY distance_bin
-        )
-        SELECT
-            b.distance_bin,
-            b.tpr AS tp_rate_before,
-            c.tpr_comp AS tp_rate_after,
-            (c.tpr_comp - b.tpr) AS tp_rate_diff
-        FROM base b
-        JOIN comp c USING (distance_bin)
-        ORDER BY CAST(REPLACE(SPLIT_PART(b.distance_bin, ',', 1), '[', ' ') AS INTEGER)
-        """
-        df_tpr_dist = con.execute(query).df()
+            ORDER BY CAST(REPLACE(SPLIT_PART(distance_bin, ',', 1), '[', ' ') AS INTEGER)
+            """
+            df_i = con.execute(q).df()
+            df_i["run"] = run_labels_list[i]
+            dfs_dist.append(df_i)
+        df_tpr_dist = pd.concat(dfs_dist, ignore_index=True)
         if not df_tpr_dist.empty:
             fig = go.Figure()
-            fig.add_trace(go.Bar(
-                x=df_tpr_dist['distance_bin'],
-                y=df_tpr_dist['tp_rate_before'],
-                name='TP Rate Baseline (A)',
-                marker_color='lightblue'
-            ))
-            fig.add_trace(go.Bar(
-                x=df_tpr_dist['distance_bin'],
-                y=df_tpr_dist['tp_rate_after'],
-                name='TP Rate Candidate (B)',
-                marker_color='lightcoral'
-            ))
-            fig.add_trace(go.Bar(
-                x=df_tpr_dist['distance_bin'],
-                y=df_tpr_dist['tp_rate_diff'],
-                name='TP Rate Diff',
-                marker_color='lightgreen'
-            ))
+            colors = ["lightblue", "lightcoral", "lightgreen", "#9B59B6", "#1ABC9C", "#E86A33"]
+            for i, lbl in enumerate(run_labels_list):
+                d = df_tpr_dist[df_tpr_dist["run"] == lbl]
+                fig.add_trace(go.Bar(
+                    x=d["distance_bin"],
+                    y=d["tpr"],
+                    name=f"TP Rate ({lbl})",
+                    marker_color=colors[i % len(colors)]
+                ))
             fig.update_layout(
-                title="TP Rate Comparison by Distance Bin",
+                title="TP Rate by Distance Bin (all runs)",
                 xaxis_title="Distance Bin",
                 yaxis_title="TP Rate",
-                barmode='group',
+                barmode="group",
                 yaxis_range=[0, 1]
             )
             st.plotly_chart(fig, width="stretch")
@@ -842,59 +629,37 @@ try:
         else:
             st.info("No data available")
     else:
-        filter_clause_comp = build_filter_clause(filters_comp, enable_dist_h=False)
-        query = f"""
-        WITH base AS (
-            SELECT
-                distance_bin,
+        dfs_fpr = []
+        for i in range(len(runs)):
+            fc = build_filter_clause(filters_list[i], enable_dist_h=False)
+            q = f"""
+            SELECT distance_bin,
                 CASE WHEN SUM(est_total) > 0 THEN CAST(SUM(fp_est) AS DOUBLE) / SUM(est_total) ELSE 0 END AS fpr
-            FROM view_tpr_fpr_by_class_dist_topic
-            WHERE {filter_clause_base}
+            FROM {_tpr_fpr_view(i)}
+            WHERE {fc}
             GROUP BY distance_bin
-        ),
-        comp AS (
-            SELECT
-                distance_bin,
-                CASE WHEN SUM(est_total) > 0 THEN CAST(SUM(fp_est) AS DOUBLE) / SUM(est_total) ELSE 0 END AS fpr_comp
-            FROM view_tpr_fpr_by_class_dist_topic_c
-            WHERE {filter_clause_comp}
-            GROUP BY distance_bin
-        )
-        SELECT
-            b.distance_bin,
-            b.fpr AS fp_rate_before,
-            c.fpr_comp AS fp_rate_after,
-            (c.fpr_comp - b.fpr) AS fp_rate_diff
-        FROM base b
-        JOIN comp c USING (distance_bin)
-        ORDER BY CAST(REPLACE(SPLIT_PART(b.distance_bin, ',', 1), '[', ' ') AS INTEGER)
-        """
-        df_fpr_dist = con.execute(query).df()
+            ORDER BY CAST(REPLACE(SPLIT_PART(distance_bin, ',', 1), '[', ' ') AS INTEGER)
+            """
+            df_i = con.execute(q).df()
+            df_i["run"] = run_labels_list[i]
+            dfs_fpr.append(df_i)
+        df_fpr_dist = pd.concat(dfs_fpr, ignore_index=True)
         if not df_fpr_dist.empty:
             fig = go.Figure()
-            fig.add_trace(go.Bar(
-                x=df_fpr_dist['distance_bin'],
-                y=df_fpr_dist['fp_rate_before'],
-                name='FP Rate Baseline (A)',
-                marker_color='lightblue'
-            ))
-            fig.add_trace(go.Bar(
-                x=df_fpr_dist['distance_bin'],
-                y=df_fpr_dist['fp_rate_after'],
-                name='FP Rate Candidate (B)',
-                marker_color='lightcoral'
-            ))
-            fig.add_trace(go.Bar(
-                x=df_fpr_dist['distance_bin'],
-                y=df_fpr_dist['fp_rate_diff'],
-                name='FP Rate Diff',
-                marker_color='lightgreen'
-            ))
+            colors = ["lightblue", "lightcoral", "lightgreen", "#9B59B6", "#1ABC9C", "#E86A33"]
+            for i, lbl in enumerate(run_labels_list):
+                d = df_fpr_dist[df_fpr_dist["run"] == lbl]
+                fig.add_trace(go.Bar(
+                    x=d["distance_bin"],
+                    y=d["fpr"],
+                    name=f"FP Rate ({lbl})",
+                    marker_color=colors[i % len(colors)]
+                ))
             fig.update_layout(
-                title="FP Rate Comparison by Distance Bin",
+                title="FP Rate by Distance Bin (all runs)",
                 xaxis_title="Distance Bin",
                 yaxis_title="FP Rate",
-                barmode='group',
+                barmode="group",
                 yaxis_range=[0, 1]
             )
             st.plotly_chart(fig, width="stretch")
@@ -904,67 +669,71 @@ except Exception as e:
     st.error(f"Error: {e}")
 
 # =============================
-# Panel 5: Improved and Degraded Count (compare mode only)
+# Panel 5: Improved and Degraded Count (compare mode only, each candidate vs A)
 # =============================
 if not single_mode:
-    st.subheader("Improved and Degraded count by objects")
-    try:
-        filter_clause_comp_p5 = build_filter_clause(filters_comp, enable_dist_h=False)
-        query = f"""
-        WITH base_gt AS (
+    st.subheader("Improved and Degraded count by objects (each run vs Baseline A)")
+    for idx in range(1, len(runs)):
+        lbl = run_labels_list[idx]
+        try:
+            filter_clause_comp_p5 = build_filter_clause(filters_list[idx], enable_dist_h=False)
+            comp_flat = _flat_view(idx)
+            query = f"""
+            WITH base_gt AS (
+                SELECT
+                    t4dataset_id,
+                    frame_index,
+                    uuid AS gt_uuid,
+                    COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_base
+                FROM view_eval_flat
+                WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL
+                    AND {filter_clause_base}
+                GROUP BY 1,2,3
+            ),
+            comp_gt AS (
+                SELECT
+                    t4dataset_id,
+                    frame_index,
+                    uuid AS gt_uuid,
+                    COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_comp
+                FROM {comp_flat}
+                WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL
+                    AND {filter_clause_comp_p5}
+                GROUP BY 1,2,3
+            ),
+            joined AS (
+                SELECT
+                    COALESCE(CAST(b.t4dataset_id AS VARCHAR), CAST(c.t4dataset_id AS VARCHAR)) AS t4dataset_id,
+                    COALESCE(CAST(b.frame_index AS VARCHAR), CAST(c.frame_index AS VARCHAR)) AS frame_index,
+                    COALESCE(b.gt_uuid, c.gt_uuid) AS gt_uuid,
+                    COALESCE(b.tp_base, FALSE) AS tp_base,
+                    COALESCE(c.tp_comp, FALSE) AS tp_comp
+                FROM base_gt b
+                FULL OUTER JOIN comp_gt c
+                    ON b.t4dataset_id = c.t4dataset_id
+                   AND b.frame_index = c.frame_index
+                   AND b.gt_uuid = c.gt_uuid
+            )
             SELECT
                 t4dataset_id,
-                frame_index,
-                uuid AS gt_uuid,
-                COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_base
-            FROM view_eval_flat
-            WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL 
-                AND {filter_clause_base}
-            GROUP BY 1,2,3
-        ),
-        comp_gt AS (
-            SELECT
-                t4dataset_id,
-                frame_index,
-                uuid AS gt_uuid,
-                COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_comp
-            FROM view_eval_flat_comp
-            WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL 
-                AND {filter_clause_comp_p5}
-            GROUP BY 1,2,3
-        ),
-        joined AS (
-            SELECT
-                COALESCE(CAST(b.t4dataset_id AS VARCHAR), CAST(c.t4dataset_id AS VARCHAR)) AS t4dataset_id,
-                COALESCE(CAST(b.frame_index AS VARCHAR), CAST(c.frame_index AS VARCHAR)) AS frame_index,
-                COALESCE(b.gt_uuid, c.gt_uuid) AS gt_uuid,
-                COALESCE(b.tp_base, FALSE) AS tp_base,
-                COALESCE(c.tp_comp, FALSE) AS tp_comp
-            FROM base_gt b
-            FULL OUTER JOIN comp_gt c
-                ON b.t4dataset_id = c.t4dataset_id
-               AND b.frame_index = c.frame_index
-               AND b.gt_uuid = c.gt_uuid
-        )
-        SELECT
-            t4dataset_id,
-            CAST(COUNT(*) FILTER (WHERE TRUE) AS DOUBLE) AS total_gt,
-            CAST(COUNT(*) FILTER (WHERE NOT tp_base AND tp_comp) AS DOUBLE) AS improved_cnt,
-            CAST(COUNT(*) FILTER (WHERE tp_base AND NOT tp_comp) AS DOUBLE) AS degraded_cnt,
-            CAST(COUNT(*) FILTER (WHERE tp_base AND tp_comp) AS DOUBLE) AS both_tp_cnt,
-            CAST(COUNT(*) FILTER (WHERE NOT tp_base AND NOT tp_comp) AS DOUBLE) AS both_fn_cnt,
-            CAST(SUM((CASE WHEN tp_comp THEN 1 ELSE 0 END) - (CASE WHEN tp_base THEN 1 ELSE 0 END)) AS DOUBLE) AS net_tp_delta
-        FROM joined
-        GROUP BY 1
-        ORDER BY net_tp_delta DESC
-        """
-        df_improved = con.execute(query).df()
-        if not df_improved.empty:
-            st.dataframe(df_improved, width="stretch")
-        else:
-            st.info("No data available")
-    except Exception as e:
-        st.error(f"Error: {e}")
+                CAST(COUNT(*) FILTER (WHERE TRUE) AS DOUBLE) AS total_gt,
+                CAST(COUNT(*) FILTER (WHERE NOT tp_base AND tp_comp) AS DOUBLE) AS improved_cnt,
+                CAST(COUNT(*) FILTER (WHERE tp_base AND NOT tp_comp) AS DOUBLE) AS degraded_cnt,
+                CAST(COUNT(*) FILTER (WHERE tp_base AND tp_comp) AS DOUBLE) AS both_tp_cnt,
+                CAST(COUNT(*) FILTER (WHERE NOT tp_base AND NOT tp_comp) AS DOUBLE) AS both_fn_cnt,
+                CAST(SUM((CASE WHEN tp_comp THEN 1 ELSE 0 END) - (CASE WHEN tp_base THEN 1 ELSE 0 END)) AS DOUBLE) AS net_tp_delta
+            FROM joined
+            GROUP BY 1
+            ORDER BY net_tp_delta DESC
+            """
+            df_improved = con.execute(query).df()
+            if not df_improved.empty:
+                with st.expander(f"Run {lbl} vs A", expanded=(len(runs) == 2)):
+                    st.dataframe(df_improved, width="stretch")
+            else:
+                st.caption(f"Run {lbl} vs A: No data.")
+        except Exception as e:
+            st.error(f"Error (Run {lbl} vs A): {e}")
 
 # =============================
 # Panel 6: Mean Error (single) / Mean Error Comparison (compare)
@@ -1033,174 +802,85 @@ else:
         except Exception as e:
             st.error(f"Error: {e}")
     else:
-        filter_clause_comp_err = build_filter_clause(filters_comp)
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**Baseline (A) Mean Error**")
-            try:
-                query = f"""
-                SELECT
-                    label,
-                    AVG(ABS(CAST(x_error AS DOUBLE))) FILTER (
-                        WHERE status = 'TP' AND x_error IS NOT NULL
-                    ) AS mean_abs_x_error,
-                    AVG(ABS(CAST(y_error AS DOUBLE))) FILTER (
-                        WHERE status = 'TP' AND y_error IS NOT NULL
-                    ) AS mean_abs_y_error,
-                    AVG(ABS(CAST(yaw_error AS DOUBLE))) FILTER (
-                        WHERE status = 'TP' AND yaw_error IS NOT NULL
-                    ) AS mean_abs_yaw_error
-                FROM view_eval_flat
-                WHERE {filter_clause_base}
-                GROUP BY label
-                ORDER BY label
-                """
-                df_error_base = con.execute(query).df()
-                if not df_error_base.empty:
-                    fig = go.Figure()
-                    fig.add_trace(go.Bar(
-                        x=df_error_base['label'],
-                        y=df_error_base['mean_abs_x_error'],
-                        name='X Error',
-                        marker_color='lightblue'
-                    ))
-                    fig.add_trace(go.Bar(
-                        x=df_error_base['label'],
-                        y=df_error_base['mean_abs_y_error'],
-                        name='Y Error',
-                        marker_color='lightcoral'
-                    ))
-                    fig.add_trace(go.Bar(
-                        x=df_error_base['label'],
-                        y=df_error_base['mean_abs_yaw_error'],
-                        name='Yaw Error',
-                        marker_color='lightgreen'
-                    ))
-                    fig.update_layout(
-                        title=f"Baseline (A) Mean Error within {max_eval_range} [m]",
-                        xaxis_title="Label",
-                        yaxis_title="Error [m] or [rad]",
-                        barmode='group'
-                    )
-                    st.plotly_chart(fig, width="stretch")
-                else:
-                    st.info("No data available")
-            except Exception as e:
-                st.error(f"Error: {e}")
-        with col2:
-            st.markdown("**Candidate (B) Mean Error**")
-            try:
-                query = f"""
-                SELECT
-                    label,
-                    AVG(ABS(CAST(x_error AS DOUBLE))) FILTER (WHERE status = 'TP') AS mean_abs_x_error,
-                    AVG(ABS(CAST(y_error AS DOUBLE))) FILTER (WHERE status = 'TP') AS mean_abs_y_error,
-                    AVG(ABS(CAST(yaw_error AS DOUBLE))) FILTER (WHERE status = 'TP') AS mean_abs_yaw_error
-                FROM view_eval_flat_comp
-                WHERE {filter_clause_comp_err}
-                GROUP BY label
-                ORDER BY label
-                """
-                df_error_comp = con.execute(query).df()
-                if not df_error_comp.empty:
-                    fig = go.Figure()
-                    fig.add_trace(go.Bar(
-                        x=df_error_comp['label'],
-                        y=df_error_comp['mean_abs_x_error'],
-                        name='X Error',
-                        marker_color='lightblue'
-                    ))
-                    fig.add_trace(go.Bar(
-                        x=df_error_comp['label'],
-                        y=df_error_comp['mean_abs_y_error'],
-                        name='Y Error',
-                        marker_color='lightcoral'
-                    ))
-                    fig.add_trace(go.Bar(
-                        x=df_error_comp['label'],
-                        y=df_error_comp['mean_abs_yaw_error'],
-                        name='Yaw Error',
-                        marker_color='lightgreen'
-                    ))
-                    fig.update_layout(
-                        title=f"Candidate (B) Mean Error within {max_eval_range} [m]",
-                        xaxis_title="Label",
-                        yaxis_title="Error [m] or [rad]",
-                        barmode='group'
-                    )
-                    st.plotly_chart(fig, width="stretch")
-                else:
-                    st.info("No data available")
-            except Exception as e:
-                st.error(f"Error: {e}")
-
-        # =============================
-        # Panel 7: Error Difference (compare mode only)
-        # =============================
-        st.subheader("Difference of mean absolute error (Candidate (B) − Baseline (A))")
         try:
-            query = f"""
-            WITH topic_a AS (
+            dfs_err = []
+            for i in range(len(runs)):
+                fc = build_filter_clause(filters_list[i])
+                q = f"""
                 SELECT
                     label,
-                    AVG(ABS(x_error)) FILTER (WHERE status = 'TP') AS x_a,
-                    AVG(ABS(y_error)) FILTER (WHERE status = 'TP') AS y_a,
-                    AVG(ABS(yaw_error)) FILTER (WHERE status = 'TP') AS yaw_a
-                FROM view_eval_flat
-                WHERE {filter_clause_base}
+                    AVG(ABS(CAST(x_error AS DOUBLE))) FILTER (WHERE status = 'TP' AND x_error IS NOT NULL) AS mean_abs_x_error,
+                    AVG(ABS(CAST(y_error AS DOUBLE))) FILTER (WHERE status = 'TP' AND y_error IS NOT NULL) AS mean_abs_y_error,
+                    AVG(ABS(CAST(yaw_error AS DOUBLE))) FILTER (WHERE status = 'TP' AND yaw_error IS NOT NULL) AS mean_abs_yaw_error
+                FROM {_flat_view(i)}
+                WHERE {fc}
                 GROUP BY label
-            ),
-            topic_b AS (
-                SELECT
-                    label,
-                    AVG(ABS(x_error)) FILTER (WHERE status = 'TP') AS x_b,
-                    AVG(ABS(y_error)) FILTER (WHERE status = 'TP') AS y_b,
-                    AVG(ABS(yaw_error)) FILTER (WHERE status = 'TP') AS yaw_b
-                FROM view_eval_flat_comp
-                WHERE {filter_clause_comp_err}
-                GROUP BY label
-            )
-            SELECT
-                a.label,
-                (x_b - x_a) AS x_diff,
-                (y_b - y_a) AS y_diff,
-                (yaw_b - yaw_a) AS yaw_diff
-            FROM topic_a a
-            JOIN topic_b b USING (label)
-            ORDER BY label
-            """
-            df_error_diff = con.execute(query).df()
-            if not df_error_diff.empty:
-                fig = go.Figure()
-                fig.add_trace(go.Bar(
-                    x=df_error_diff['label'],
-                    y=df_error_diff['x_diff'],
-                    name='X Diff',
-                    marker_color='lightblue'
-                ))
-                fig.add_trace(go.Bar(
-                    x=df_error_diff['label'],
-                    y=df_error_diff['y_diff'],
-                    name='Y Diff',
-                    marker_color='lightcoral'
-                ))
-                fig.add_trace(go.Bar(
-                    x=df_error_diff['label'],
-                    y=df_error_diff['yaw_diff'],
-                    name='Yaw Diff',
-                    marker_color='lightgreen'
-                ))
-                fig.update_layout(
-                    title=f"Difference of mean absolute error within {max_eval_range} [m] (Candidate (B) − Baseline (A))",
-                    xaxis_title="Label",
-                    yaxis_title="Error Difference [m] or [rad]",
-                    barmode='group'
-                )
-                st.plotly_chart(fig, width="stretch")
+                ORDER BY label
+                """
+                df_i = con.execute(q).df()
+                df_i["run"] = run_labels_list[i]
+                dfs_err.append(df_i)
+            df_err_melt = pd.concat(dfs_err, ignore_index=True)
+            if not df_err_melt.empty:
+                for err_type, col in [("X Error", "mean_abs_x_error"), ("Y Error", "mean_abs_y_error"), ("Yaw Error", "mean_abs_yaw_error")]:
+                    fig = px.bar(
+                        df_err_melt,
+                        x="label",
+                        y=col,
+                        color="run",
+                        barmode="group",
+                        title=f"Mean {err_type} within {max_eval_range} [m] by run",
+                        labels={"label": "Label", col: err_type, "run": "Run"}
+                    )
+                    st.plotly_chart(fig, width="stretch")
             else:
                 st.info("No data available")
         except Exception as e:
             st.error(f"Error: {e}")
+
+        st.subheader("Difference of mean absolute error (each run − Baseline A)")
+        for idx in range(1, len(runs)):
+            lbl = run_labels_list[idx]
+            try:
+                fc_c = build_filter_clause(filters_list[idx])
+                query = f"""
+                WITH topic_a AS (
+                    SELECT label,
+                        AVG(ABS(x_error)) FILTER (WHERE status = 'TP') AS x_a,
+                        AVG(ABS(y_error)) FILTER (WHERE status = 'TP') AS y_a,
+                        AVG(ABS(yaw_error)) FILTER (WHERE status = 'TP') AS yaw_a
+                    FROM view_eval_flat
+                    WHERE {filter_clause_base}
+                    GROUP BY label
+                ),
+                topic_c AS (
+                    SELECT label,
+                        AVG(ABS(x_error)) FILTER (WHERE status = 'TP') AS x_c,
+                        AVG(ABS(y_error)) FILTER (WHERE status = 'TP') AS y_c,
+                        AVG(ABS(yaw_error)) FILTER (WHERE status = 'TP') AS yaw_c
+                    FROM {_flat_view(idx)}
+                    WHERE {fc_c}
+                    GROUP BY label
+                )
+                SELECT a.label,
+                    (c.x_c - a.x_a) AS x_diff,
+                    (c.y_c - a.y_a) AS y_diff,
+                    (c.yaw_c - a.yaw_a) AS yaw_diff
+                FROM topic_a a
+                JOIN topic_c c USING (label)
+                ORDER BY label
+                """
+                df_ed = con.execute(query).df()
+                if not df_ed.empty:
+                    with st.expander(f"Run {lbl} − A", expanded=(len(runs) == 2)):
+                        fig = go.Figure()
+                        fig.add_trace(go.Bar(x=df_ed["label"], y=df_ed["x_diff"], name="X Diff", marker_color="lightblue"))
+                        fig.add_trace(go.Bar(x=df_ed["label"], y=df_ed["y_diff"], name="Y Diff", marker_color="lightcoral"))
+                        fig.add_trace(go.Bar(x=df_ed["label"], y=df_ed["yaw_diff"], name="Yaw Diff", marker_color="lightgreen"))
+                        fig.update_layout(title=f"Error diff ({lbl} − A) within {max_eval_range} [m]", xaxis_title="Label", yaxis_title="Error Difference [m] or [rad]", barmode="group")
+                        st.plotly_chart(fig, width="stretch")
+            except Exception as e:
+                st.error(f"Error (Run {lbl} − A): {e}")
 
 # =============================
 # Panel 8: Object Count with Distance
@@ -1208,22 +888,43 @@ else:
 st.subheader("Object count with distance")
 
 try:
-    query = f"""
-    SELECT dist_h, label
-    FROM view_eval_flat
-    WHERE {filter_clause_base}
-    """
-    df_dist = con.execute(query).df()
-    
+    if single_mode:
+        query = f"""
+        SELECT dist_h, label
+        FROM view_eval_flat
+        WHERE {filter_clause_base}
+        """
+        df_dist = con.execute(query).df()
+    else:
+        dfs_d = []
+        for i in range(len(runs)):
+            fc = build_filter_clause(filters_list[i])
+            q = f"SELECT dist_h, label FROM {_flat_view(i)} WHERE {fc}"
+            df_i = con.execute(q).df()
+            df_i["run"] = run_labels_list[i]
+            dfs_d.append(df_i)
+        df_dist = pd.concat(dfs_d, ignore_index=True)
     if not df_dist.empty:
-        fig = px.histogram(
-            df_dist,
-            x='dist_h',
-            color='label',
-            nbins=50,
-            title="Object Count by Distance",
-            labels={'dist_h': 'Distance [m]', 'label': 'Label'}
-        )
+        if single_mode:
+            fig = px.histogram(
+                df_dist,
+                x='dist_h',
+                color='label',
+                nbins=50,
+                title="Object Count by Distance",
+                labels={'dist_h': 'Distance [m]', 'label': 'Label'}
+            )
+        else:
+            fig = px.histogram(
+                df_dist,
+                x='dist_h',
+                color='run',
+                nbins=50,
+                barmode='overlay',
+                opacity=0.6,
+                title="Object Count by Distance (by run)",
+                labels={'dist_h': 'Distance [m]', 'run': 'Run'}
+            )
         st.plotly_chart(fig, width="stretch")
     else:
         st.info("No data available")

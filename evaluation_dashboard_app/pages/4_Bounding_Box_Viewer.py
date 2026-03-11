@@ -20,7 +20,16 @@ if "runA" not in st.session_state:
     st.stop()
 
 runA = st.session_state["runA"]
-runB = st.session_state.get("runB")
+mode = st.session_state.get("mode", "Single Mode")
+all_runs = st.session_state.get("all_runs")
+run_labels_state = st.session_state.get("run_labels")
+if mode == "Compare Mode" and all_runs and run_labels_state and len(all_runs) >= 2:
+    runs = all_runs
+    run_labels_list = run_labels_state
+else:
+    runB = st.session_state.get("runB")
+    runs = [runA] if runB is None else [runA, runB]
+    run_labels_list = ["A"] if len(runs) == 1 else ["A", "B"]
 
 
 def list_parquets_in_run(run_path) -> List[str]:
@@ -32,24 +41,26 @@ def list_parquets_in_run(run_path) -> List[str]:
 
 
 # Parquet files from the run(s) designated on Overview
-parquet_list_a = list_parquets_in_run(runA["path"])
-if not parquet_list_a:
-    st.error(
-        f"No parquet files found in run directory: {path_display(runA['path'])}. "
-        "Add a .parquet file or generate one from the Download page."
-    )
-    st.stop()
+parquet_lists = [list_parquets_in_run(r["path"]) for r in runs]
+for i, (r, pl) in enumerate(zip(runs, parquet_lists)):
+    if not pl:
+        lbl = run_labels_list[i] if i < len(run_labels_list) else str(i)
+        st.error(
+            f"No parquet files in run ({lbl}): {path_display(r['path'])}. "
+            "Add a .parquet file or generate one from the Download page."
+        )
+        st.stop()
 
-parquet_list_b = list_parquets_in_run(runB["path"]) if runB else []
-has_b = bool(runB and parquet_list_b)
+multi_run = len(runs) >= 2
 
 # ----------------------------
 # Loaded Runs (from Overview)
 # ----------------------------
 st.subheader("Loaded Runs")
-st.markdown(f"**Baseline (A):** `{path_display(runA['path'])}`")
-if has_b:
-    st.markdown(f"**Candidate (B):** `{path_display(runB['path'])}`")
+for i, r in enumerate(runs):
+    lbl = run_labels_list[i] if i < len(run_labels_list) else str(i)
+    prefix = "Baseline (A):" if lbl == "A" else f"Candidate ({lbl}):"
+    st.markdown(f"**{prefix}** `{path_display(r['path'])}`")
 
 # ----------------------------
 # Sidebar (Filters)
@@ -57,45 +68,38 @@ if has_b:
 with st.sidebar:
     st.header("Filters")
 
-    # Show A only / B only / Both (when B is available)
-    if has_b:
-        show_which = st.radio(
-            "Show",
-            options=["A only", "B only", "Both"],
-            key="bbox_viewer_show_which",
+    if multi_run:
+        runs_to_show = st.multiselect(
+            "Runs to show",
+            run_labels_list,
+            default=run_labels_list,
+            key="bbox_viewer_runs_to_show",
         )
-        show_a = show_which in ("A only", "Both")
-        show_b = show_which in ("B only", "Both")
+        if not runs_to_show:
+            st.warning("Select at least one run.")
+            st.stop()
     else:
-        show_a = True
-        show_b = False
+        runs_to_show = run_labels_list
 
-    # Parquet file selection (from run directory/ies)
-    if len(parquet_list_a) == 1:
-        selected_file_a = parquet_list_a[0]
-    else:
-        selected_file_a = st.selectbox(
-            "Target File (Baseline A)",
-            parquet_list_a,
-            format_func=os.path.basename,
-            key="bbox_viewer_target_file_a",
-        ) if show_a else parquet_list_a[0]
-
-    if show_b:
-        if len(parquet_list_b) == 1:
-            selected_file_b = parquet_list_b[0]
+    # Parquet file selection per run (only for runs that are shown)
+    selected_files = {}
+    for i, lbl in enumerate(run_labels_list):
+        if lbl not in runs_to_show:
+            continue
+        pl = parquet_lists[i]
+        if len(pl) == 1:
+            selected_files[lbl] = pl[0]
         else:
-            selected_file_b = st.selectbox(
-                "Target File (Candidate B)",
-                parquet_list_b,
+            selected_files[lbl] = st.selectbox(
+                f"File (Run {lbl})",
+                pl,
                 format_func=os.path.basename,
-                key="bbox_viewer_target_file_b",
+                key=f"bbox_viewer_file_{lbl}",
             )
-    else:
-        selected_file_b = None
 
     # Primary file for building filter options (suite, scenario, topic, labels)
-    filter_file = selected_file_a if show_a else selected_file_b
+    first_shown = runs_to_show[0] if runs_to_show else run_labels_list[0]
+    filter_file = selected_files.get(first_shown) or parquet_lists[run_labels_list.index(first_shown)][0]
 
 # DuckDB connection (no cache = 安定優先)
 con = duckdb.connect()
@@ -260,11 +264,7 @@ ORDER BY frame_index
 """
 
 # Build list of (file, run_label) to load
-files_to_load: List[Tuple[str, str]] = []
-if show_a:
-    files_to_load.append((selected_file_a, "A"))
-if show_b:
-    files_to_load.append((selected_file_b, "B"))
+files_to_load: List[Tuple[str, str]] = [(selected_files[lbl], lbl) for lbl in runs_to_show if lbl in selected_files]
 
 # Base params after the file (suite, scenario, topic, labels, visibility)
 base_params = scene_params[1:] + [selected_topic] + list(selected_labels)
@@ -310,14 +310,10 @@ def get_color(source, status): return color_map.get((source, status), "#999999")
 # ----------------------------
 # Currently showing
 # ----------------------------
-if not has_b:
-    st.info("**Currently showing:** A only")
-elif show_a and show_b:
-    st.info("**Currently showing:** Both (A and B side by side)")
-elif show_b:
-    st.info("**Currently showing:** B only")
+if len(files_to_load) == 1:
+    st.info(f"**Currently showing:** Run {files_to_load[0][1]} only")
 else:
-    st.info("**Currently showing:** A only")
+    st.info(f"**Currently showing:** Runs {', '.join(f[1] for f in files_to_load)} (side by side)")
 
 # ----------------------------
 # Frame slider
@@ -441,30 +437,21 @@ def _build_one_bev_figure(df_fr: pd.DataFrame, plot_title: str, show_inv: bool) 
 
 
 # ----------------------------
-# Plot (single or side-by-side when Both)
+# Plot (single or side-by-side for multiple runs)
 # ----------------------------
-if show_a and show_b:
-    # Both: two BEV plots side by side
-    df_frame_a = df_frame[df_frame["run"] == "A"]
-    df_frame_b = df_frame[df_frame["run"] == "B"]
-    total_a = len(df_frame_a)
-    valid_a = int(((df_frame_a["length"] > 0) & (df_frame_a["width"] > 0)).sum()) if not df_frame_a.empty else 0
-    total_b = len(df_frame_b)
-    valid_b = int(((df_frame_b["length"] > 0) & (df_frame_b["width"] > 0)).sum()) if not df_frame_b.empty else 0
-    title_a = f"Baseline (A) — {selected_scenario}<br>Frame {frame} | Total {total_a:,}, Valid {valid_a:,}"
-    title_b = f"Candidate (B) — {selected_scenario}<br>Frame {frame} | Total {total_b:,}, Valid {valid_b:,}"
-    fig_a = _build_one_bev_figure(df_frame_a, title_a, show_invalid)
-    fig_b = _build_one_bev_figure(df_frame_b, title_b, show_invalid)
-    col1, col2 = st.columns(2)
-    with col1:
-        st.plotly_chart(fig_a, use_container_width=True)
-    with col2:
-        st.plotly_chart(fig_b, use_container_width=True)
+if len(files_to_load) > 1:
+    cols_bev = st.columns(len(files_to_load))
+    for col, (_, run_lbl) in zip(cols_bev, files_to_load):
+        df_fr = df_frame[df_frame["run"] == run_lbl]
+        total_n = len(df_fr)
+        valid_n = int(((df_fr["length"] > 0) & (df_fr["width"] > 0)).sum()) if not df_fr.empty else 0
+        title = f"Run {run_lbl} — {selected_scenario or 'Scene'}<br>Frame {frame} | Total {total_n:,}, Valid {valid_n:,}"
+        with col:
+            st.plotly_chart(_build_one_bev_figure(df_fr, title, show_invalid), use_container_width=True)
 else:
-    # Single run: one BEV plot
     fig = _build_one_bev_figure(
         df_frame,
-        f"{selected_scenario} <br>Frame {frame} | Total {total_records:,}, Valid {valid_records:,}",
+        f"{selected_scenario or 'Scene'} <br>Frame {frame} | Total {total_records:,}, Valid {valid_records:,}",
         show_invalid,
     )
     st.plotly_chart(fig, width="stretch")
@@ -508,7 +495,7 @@ if "run" in frame_stats_melt.columns:
         y="Count",
         color="run",
         line_dash="Status",
-        title="TP / FN Counts per Frame (A vs B)",
+        title="TP / FN Counts per Frame (by run)",
         labels={"Count": "Count", "frame_index": "Frame Index"},
     )
 else:
@@ -539,7 +526,7 @@ if "run" in frame_stats.columns:
         x="frame_index",
         y="TPR",
         color="run",
-        title="True Positive Rate (TPR) per Frame (A vs B)",
+        title="True Positive Rate (TPR) per Frame (by run)",
         labels={"TPR": "True Positive Rate", "frame_index": "Frame Index"},
     )
 else:
@@ -586,27 +573,32 @@ uuid_perf = uuid_perf[uuid_perf["total"] > 0]
 # FN率でソート
 uuid_perf_sorted = uuid_perf.sort_values("FN_rate", ascending=False)
 
-# 表示 (side by side when both runs)
+# 表示 (per run when multiple runs)
 if not uuid_perf_sorted.empty:
     display_cols = ["uuid", "label", "TP", "FN", "total", "FN_rate"]
     if "run" not in uuid_perf_sorted.columns:
         display_cols = [c for c in display_cols if c != "run"]
     if len(files_to_load) > 1 and "run" in uuid_perf_sorted.columns:
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.markdown("**Run A**")
-            df_a = uuid_perf_sorted[uuid_perf_sorted["run"] == "A"].head(30)
-            if not df_a.empty:
-                st.dataframe(df_a[display_cols].style.format({"FN_rate": "{:.2%}"}))
-            else:
-                st.info("No data for run A.")
-        with col_b:
-            st.markdown("**Run B**")
-            df_b = uuid_perf_sorted[uuid_perf_sorted["run"] == "B"].head(30)
-            if not df_b.empty:
-                st.dataframe(df_b[display_cols].style.format({"FN_rate": "{:.2%}"}))
-            else:
-                st.info("No data for run B.")
+        n_cols = min(len(files_to_load), 4)
+        cols_disp = st.columns(n_cols)
+        for idx, (col, (_, run_lbl)) in enumerate(zip(cols_disp, files_to_load)):
+            if idx >= n_cols:
+                break
+            with col:
+                st.markdown(f"**Run {run_lbl}**")
+                df_r = uuid_perf_sorted[uuid_perf_sorted["run"] == run_lbl].head(30)
+                if not df_r.empty:
+                    st.dataframe(df_r[display_cols].style.format({"FN_rate": "{:.2%}"}))
+                else:
+                    st.info(f"No data for run {run_lbl}.")
+        if len(files_to_load) > n_cols:
+            for run_lbl in [f[1] for f in files_to_load[n_cols:]]:
+                with st.expander(f"Run {run_lbl}"):
+                    df_r = uuid_perf_sorted[uuid_perf_sorted["run"] == run_lbl].head(30)
+                    if not df_r.empty:
+                        st.dataframe(df_r[display_cols].style.format({"FN_rate": "{:.2%}"}))
+                    else:
+                        st.info(f"No data for run {run_lbl}.")
     else:
         st.dataframe(
             uuid_perf_sorted[display_cols]
@@ -666,22 +658,28 @@ def _draw_trajectory_figure(traj: pd.DataFrame, title: str) -> go.Figure:
     return fig_traj
 
 if not uuid_traj.empty:
-    show_both_runs = len(files_to_load) > 1 and "run" in uuid_traj.columns
-    if show_both_runs:
-        col_ta, col_tb = st.columns(2)
+    show_multi_runs = len(files_to_load) > 1 and "run" in uuid_traj.columns
+    if show_multi_runs:
         label_str = uuid_traj["label"].iloc[0]
-        with col_ta:
-            traj_a = uuid_traj[uuid_traj["run"] == "A"]
-            if not traj_a.empty:
-                st.plotly_chart(_draw_trajectory_figure(traj_a, f"Run A: UUID {bad_uuid} ({label_str})"), use_container_width=True)
+        n_traj_cols = min(len(files_to_load), 4)
+        traj_cols = st.columns(n_traj_cols)
+        for idx, (col, (_, run_lbl)) in enumerate(zip(traj_cols, files_to_load)):
+            if idx >= n_traj_cols:
+                break
+            with col:
+                traj_r = uuid_traj[uuid_traj["run"] == run_lbl]
+                if not traj_r.empty:
+                    st.plotly_chart(_draw_trajectory_figure(traj_r, f"Run {run_lbl}: UUID {bad_uuid} ({label_str})"), use_container_width=True)
+                else:
+                    st.info(f"No trajectory for this UUID in run {run_lbl}.")
+        for run_lbl in [f[1] for f in files_to_load[n_traj_cols:]]:
+            traj_r = uuid_traj[uuid_traj["run"] == run_lbl]
+            if not traj_r.empty:
+                with st.expander(f"Run {run_lbl}: UUID {bad_uuid}"):
+                    st.plotly_chart(_draw_trajectory_figure(traj_r, f"Run {run_lbl}: UUID {bad_uuid} ({label_str})"), use_container_width=True)
             else:
-                st.info("No trajectory for this UUID in run A.")
-        with col_tb:
-            traj_b = uuid_traj[uuid_traj["run"] == "B"]
-            if not traj_b.empty:
-                st.plotly_chart(_draw_trajectory_figure(traj_b, f"Run B: UUID {bad_uuid} ({label_str})"), use_container_width=True)
-            else:
-                st.info("No trajectory for this UUID in run B.")
+                with st.expander(f"Run {run_lbl}: UUID {bad_uuid}"):
+                    st.info(f"No trajectory for this UUID in run {run_lbl}.")
     else:
         st.plotly_chart(_draw_trajectory_figure(uuid_traj, f"Trajectory of UUID {bad_uuid} ({uuid_traj['label'].iloc[0]})"), width="stretch")
 else:
