@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import os
 from pathlib import Path
-from typing import Tuple, List
+from typing import Any, List, Tuple
 
 from lib.path_utils import path_display
 
@@ -106,14 +106,7 @@ has_visibility = "visibility" in cols
 has_suite_name = "suite_name" in cols
 has_scenario_name = "scenario_name" in cols
 has_t4dataset_name = "t4dataset_name" in cols
-# Only offer t4dataset_name filter when column exists and has more than one distinct value
-t4dataset_list: List[str] = []
-if has_t4dataset_name:
-    t4dataset_list = con.execute(
-        "SELECT DISTINCT t4dataset_name AS v FROM parquet_scan(?) WHERE t4dataset_name IS NOT NULL ORDER BY v",
-        [filter_file],
-    ).df()["v"].dropna().astype(str).tolist()
-has_multiple_t4dataset = len(t4dataset_list) > 1
+
 
 # --- Scene selection: one suite + one scenario (when columns exist)
 scene_where = "1=1"
@@ -153,6 +146,24 @@ with st.sidebar:
                 scenario_list,
                 key="bbox_viewer_scenario",
             )
+    # Only offer t4dataset_name filter when column exists and has more than one distinct value
+    # Filter t4dataset options by selected_suite and selected_scenario when set
+    t4dataset_list: List[str] = []
+    if has_t4dataset_name:
+        t4_where_parts = ["t4dataset_name IS NOT NULL"]
+        t4_params: List[Any] = [filter_file]
+        if selected_suite is not None:
+            t4_where_parts.insert(0, "suite_name = ?")
+            t4_params.append(selected_suite)
+        if selected_scenario is not None:
+            t4_where_parts.insert(0, "scenario_name = ?")
+            t4_params.insert(1, selected_scenario)
+        t4_where = " AND ".join(t4_where_parts)
+        t4dataset_list = con.execute(
+            f"SELECT DISTINCT t4dataset_name AS v FROM parquet_scan(?) WHERE {t4_where} ORDER BY v",
+            t4_params,
+        ).df()["v"].dropna().astype(str).tolist()
+    has_multiple_t4dataset = len(t4dataset_list) > 1
     selected_t4dataset = None
     if has_multiple_t4dataset and t4dataset_list:
         selected_t4dataset = st.selectbox(

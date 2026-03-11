@@ -691,7 +691,7 @@ elif file_type == "Parquet":
     st.subheader("Preview rows")
     preview_mode = st.radio(
         "Show",
-        ["First N rows", "Last N rows", "First and last N rows"],
+        ["First N rows", "Last N rows", "First and last N rows", "Search"],
         horizontal=True,
         key="pq_preview_mode",
     )
@@ -711,12 +711,46 @@ elif file_type == "Parquet":
             [path, limit],
         ).df()
 
+    def run_search(path: str, query: str, limit: int, case_sensitive: bool) -> pd.DataFrame:
+        """Return rows where any column contains query (substring match)."""
+        if not query or not query.strip():
+            return run_preview(path, limit, from_end=False)
+        columns = schema_df["column_name"].tolist()
+        like_op = "LIKE" if case_sensitive else "ILIKE"
+        # One condition per column: CAST to VARCHAR so numbers/dates are searchable
+        conditions = []
+        for col in columns:
+            safe = f'"{col}"' if not col.isidentifier() else col
+            conditions.append(f"CAST({safe} AS VARCHAR) {like_op} CONCAT('%', ?, '%')")
+        where_clause = " OR ".join(conditions)
+        params = [path] + [query.strip()] * len(columns) + [int(limit)]
+        return con.execute(
+            f"SELECT * FROM read_parquet(?) WHERE ({where_clause}) LIMIT ?",
+            params,
+        ).df()
+
     if preview_mode == "First N rows":
         preview_df = run_preview(target_file, n_rows, from_end=False)
         st.dataframe(preview_df, width='stretch')
     elif preview_mode == "Last N rows":
         preview_df = run_preview(target_file, n_rows, from_end=True)
         st.dataframe(preview_df, width='stretch')
+    elif preview_mode == "Search":
+        search_query = st.text_input(
+            "Search for (substring in any column)",
+            placeholder="e.g. car, 0.5, or a label name",
+            key="pq_search_query",
+        )
+        case_sensitive = st.checkbox("Case sensitive", value=False, key="pq_search_case")
+        if search_query.strip():
+            search_df = run_search(target_file, search_query.strip(), n_rows, case_sensitive)
+            st.caption(f"Showing up to {n_rows} rows matching « {search_query.strip()} »")
+            st.dataframe(search_df, width='stretch')
+            if search_df.empty:
+                st.info("No rows matched your search.")
+        else:
+            st.caption("Enter a search term to filter rows by any column. Showing first N rows until you search.")
+            st.dataframe(run_preview(target_file, n_rows, from_end=False), width='stretch')
     else:
         c1, c2 = st.columns(2)
         with c1:
