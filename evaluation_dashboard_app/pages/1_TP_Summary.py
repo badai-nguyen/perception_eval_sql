@@ -14,6 +14,9 @@ if "runA" not in st.session_state:
 mode = st.session_state.get("mode", "Single Run")
 
 runA = st.session_state["runA"]
+if runA.get("summary") is None:
+    st.warning("This run has no **Summary.csv**. Load a run that includes Summary.csv for this page. Detection Stats and Bounding Box Viewer work with parquet-only runs.")
+    st.stop()
 df_a = runA["summary"]
 df_b = df_cmp = None
 if mode == "Compare Mode":

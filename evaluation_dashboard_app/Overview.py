@@ -73,10 +73,12 @@ def _safe_default(default_lst, options_lst):
     return safe
 
 def create_filter_widgets(all_runs_data):
-    # Collect and sort unique labels, taking care of possible missing or empty labels
+    # Collect and sort unique labels from runs that have Summary.csv
     pl, prodl = set(), set()
     for run in all_runs_data:
-        summary = run["summary"]
+        summary = run.get("summary")
+        if summary is None:
+            continue
         # Guard against completely missing columns or all-na
         if "perception_label" in summary.columns:
             pl.update(
@@ -117,7 +119,9 @@ def create_filter_widgets(all_runs_data):
     }
 
 def apply_filters(run_data, filters):
-    s = run_data["summary"]
+    s = run_data.get("summary")
+    if s is None:
+        return run_data
     if filters["perception_labels"] and "perception_label" in s.columns:
         s = s[s["perception_label"].notna() & (s["perception_label"].astype(str).str.strip() != "")]
         s = s[s["perception_label"].isin(filters["perception_labels"])]
@@ -360,11 +364,14 @@ if mode == "Compare Mode" and compare_run_dirs:
     filters = create_filter_widgets(all_runs)
     all_runs = [apply_filters(r, filters) for r in all_runs]
     runA = all_runs[0]
+    df_cmp = None
+    if len(all_runs) >= 2 and all_runs[0].get("summary") is not None and all_runs[1].get("summary") is not None:
+        df_cmp = build_summary_delta(all_runs[0]["summary"], all_runs[1]["summary"])
     st.session_state.update({
         "runA": runA,
         "all_runs": all_runs,
         "run_labels": run_labels,
-        "df_cmp": build_summary_delta(all_runs[0]["summary"], all_runs[1]["summary"]) if len(all_runs) >= 2 else None,
+        "df_cmp": df_cmp,
     })
     # For backward compat, runB = second run when present
     if len(all_runs) >= 2:
@@ -396,6 +403,13 @@ if mode == "Compare Mode" and compare_run_names:
 st.caption(f"Share this view: append `?{share_q}` to your server URL (e.g. from Data Management page).")
 
 st.subheader("Summary")
+if runA.get("summary") is None:
+    st.info(
+        "**Summary.csv** not found for this run. "
+        "Detection Stats and Bounding Box Viewer work with parquet-only runs. "
+        "TP Summary and Criteria-based Score pages require Summary.csv / Score.csv."
+    )
+
 def show_tp_mean_by_label(df, label_col, label_jp_map=None, run_name=None):
     if label_col not in df.columns or df.empty:
         return
@@ -467,35 +481,42 @@ def show_tp_mean_by_label_compare(df_list, run_labels, label_col, label_jp_map=N
 if mode == "Compare Mode" and compare_run_dirs:
     all_runs = st.session_state["all_runs"]
     run_labels = st.session_state["run_labels"]
-    summaries = [r["summary"] for r in all_runs]
-    df_a = summaries[0]
-    # TP mean: show baseline and each candidate with delta vs A
-    n_runs = len(summaries)
-    tp_means = [s["TP"].mean() for s in summaries]
-    st.metric("TP mean (baseline A)", f"{tp_means[0]:.2f}")
-    if n_runs > 1:
-        comp_cols = st.columns(min(n_runs - 1, 5))
-        for i, c in enumerate(comp_cols):
-            if i + 1 < n_runs:
-                with c:
-                    st.metric(f"TP mean ({run_labels[i + 1]})", f"{tp_means[i + 1]:.2f}",
-                              delta=f"{tp_means[i + 1] - tp_means[0]:+.2f}")
-    cols = st.columns(4)
-    metrics = [("XRMS", "xrms"), ("YRMS", "yrms"), ("XSTD", "xstd"), ("YSTD", "ystd")]
-    for c, (n, col) in zip(cols, metrics):
-        with c:
-            if n_runs == 2:
-                display_metric_with_stats(n, df_a[col], summaries[1][col])
-            else:
-                st.markdown(f"**{n}**")
-                for i, (s, lbl) in enumerate(zip(summaries, run_labels)):
-                    st.caption(f"{lbl}: mean {s[col].mean():.4f}" + (f" (Δ vs A: {s[col].mean() - df_a[col].mean():+.4f})" if i > 0 else ""))
-    show_tp_mean_by_label_compare(summaries, run_labels, "perception_label")
-    show_tp_mean_by_label_compare(summaries, run_labels, "product_label", PRODUCT_LABEL_JA)
-    with st.expander("Show metric breakdowns by label", expanded=False):
-        show_grouped_metrics_plot_multi(summaries, run_labels, group_col="perception_label")
-        show_grouped_metrics_plot_multi(summaries, run_labels, group_col="product_label", label_map=PRODUCT_LABEL_JA)
-else:
+    if any(r.get("summary") is None for r in all_runs):
+        st.info(
+            "One or more runs do not have Summary.csv (parquet-only). "
+            "Detection Stats and Bounding Box Viewer work with parquet. "
+            "Summary metrics here and TP Summary / Criteria Score pages require Summary.csv."
+        )
+    else:
+        summaries = [r["summary"] for r in all_runs]
+        df_a = summaries[0]
+        # TP mean: show baseline and each candidate with delta vs A
+        n_runs = len(summaries)
+        tp_means = [s["TP"].mean() for s in summaries]
+        st.metric("TP mean (baseline A)", f"{tp_means[0]:.2f}")
+        if n_runs > 1:
+            comp_cols = st.columns(min(n_runs - 1, 5))
+            for i, c in enumerate(comp_cols):
+                if i + 1 < n_runs:
+                    with c:
+                        st.metric(f"TP mean ({run_labels[i + 1]})", f"{tp_means[i + 1]:.2f}",
+                                  delta=f"{tp_means[i + 1] - tp_means[0]:+.2f}")
+        cols = st.columns(4)
+        metrics = [("XRMS", "xrms"), ("YRMS", "yrms"), ("XSTD", "xstd"), ("YSTD", "ystd")]
+        for c, (n, col) in zip(cols, metrics):
+            with c:
+                if n_runs == 2:
+                    display_metric_with_stats(n, df_a[col], summaries[1][col])
+                else:
+                    st.markdown(f"**{n}**")
+                    for i, (s, lbl) in enumerate(zip(summaries, run_labels)):
+                        st.caption(f"{lbl}: mean {s[col].mean():.4f}" + (f" (Δ vs A: {s[col].mean() - df_a[col].mean():+.4f})" if i > 0 else ""))
+        show_tp_mean_by_label_compare(summaries, run_labels, "perception_label")
+        show_tp_mean_by_label_compare(summaries, run_labels, "product_label", PRODUCT_LABEL_JA)
+        with st.expander("Show metric breakdowns by label", expanded=False):
+            show_grouped_metrics_plot_multi(summaries, run_labels, group_col="perception_label")
+            show_grouped_metrics_plot_multi(summaries, run_labels, group_col="product_label", label_map=PRODUCT_LABEL_JA)
+elif runA.get("summary") is not None:
     df_summary = runA["summary"]
     st.metric("TP mean", f"{df_summary['TP'].mean():.2f}")
     cols = st.columns(4)

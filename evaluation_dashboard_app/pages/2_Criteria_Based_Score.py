@@ -16,7 +16,10 @@ if "runA" not in st.session_state:
 mode = st.session_state.get("mode", "Single Run")
 
 runA = st.session_state["runA"]
-df_raw_A = runA["score"]
+df_raw_A = runA.get("score")
+if df_raw_A is None:
+    st.warning("This run has no **Score.csv**. Load a run that includes Score.csv for this page. Detection Stats and Bounding Box Viewer work with parquet-only runs.")
+    st.stop()
 
 runB = st.session_state.get("runB")
 df_raw_B = runB["score"] if runB else None

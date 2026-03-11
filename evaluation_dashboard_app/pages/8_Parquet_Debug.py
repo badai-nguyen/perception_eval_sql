@@ -701,9 +701,10 @@ elif file_type == "Parquet":
         if from_end:
             total = con.execute("SELECT COUNT(*) AS c FROM read_parquet(?)", [path]).df().at[0, "c"]
             offset = max(0, total - limit)
+            # Ensure limit and offset are standard Python ints (not NumPy types)
             return con.execute(
                 "SELECT * FROM read_parquet(?) LIMIT ? OFFSET ?",
-                [path, limit, offset],
+                [path, int(limit), int(offset)],
             ).df()
         return con.execute(
             "SELECT * FROM read_parquet(?) LIMIT ?",
