@@ -291,7 +291,11 @@ if len(files_to_load) == 1:
 
 # frame_index を int に（比較安定化）
 if "frame_index" in df.columns and not np.issubdtype(df["frame_index"].dtype, np.integer):
-    df["frame_index"] = df["frame_index"].astype("Int64").fillna(0).astype(int)
+    df["frame_index"] = (
+        pd.to_numeric(df["frame_index"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+    )
 
 # Use full df for stats; when both runs are shown, stats are computed per run and displayed side by side
 df_stats = df
