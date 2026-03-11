@@ -105,6 +105,15 @@ cols = con.execute("DESCRIBE SELECT * FROM parquet_scan(?)", [filter_file]).df()
 has_visibility = "visibility" in cols
 has_suite_name = "suite_name" in cols
 has_scenario_name = "scenario_name" in cols
+has_t4dataset_name = "t4dataset_name" in cols
+# Only offer t4dataset_name filter when column exists and has more than one distinct value
+t4dataset_list: List[str] = []
+if has_t4dataset_name:
+    t4dataset_list = con.execute(
+        "SELECT DISTINCT t4dataset_name AS v FROM parquet_scan(?) WHERE t4dataset_name IS NOT NULL ORDER BY v",
+        [filter_file],
+    ).df()["v"].dropna().astype(str).tolist()
+has_multiple_t4dataset = len(t4dataset_list) > 1
 
 # --- Scene selection: one suite + one scenario (when columns exist)
 scene_where = "1=1"
@@ -144,6 +153,13 @@ with st.sidebar:
                 scenario_list,
                 key="bbox_viewer_scenario",
             )
+    selected_t4dataset = None
+    if has_multiple_t4dataset and t4dataset_list:
+        selected_t4dataset = st.selectbox(
+            "t4dataset_name",
+            t4dataset_list,
+            key="bbox_viewer_t4dataset",
+        )
 
 # Build scene filter for queries (one scene = one suite + one scenario)
 if selected_suite is not None:
@@ -152,6 +168,9 @@ if selected_suite is not None:
 if selected_scenario is not None:
     scene_where = scene_where + " AND scenario_name = ?" if scene_where != "1=1" else "scenario_name = ?"
     scene_params = scene_params + [selected_scenario]
+if selected_t4dataset is not None:
+    scene_where = scene_where + " AND t4dataset_name = ?" if scene_where != "1=1" else "t4dataset_name = ?"
+    scene_params = scene_params + [selected_t4dataset]
 if scene_where == "1=1":
     scene_params = [filter_file]
 
@@ -427,9 +446,9 @@ if show_a and show_b:
     fig_b = _build_one_bev_figure(df_frame_b, title_b, show_invalid)
     col1, col2 = st.columns(2)
     with col1:
-        st.plotly_chart(fig_a, width='stretch')
+        st.plotly_chart(fig_a, use_container_width=True)
     with col2:
-        st.plotly_chart(fig_b, width='stretch')
+        st.plotly_chart(fig_b, use_container_width=True)
 else:
     # Single run: one BEV plot
     fig = _build_one_bev_figure(
@@ -643,13 +662,13 @@ if not uuid_traj.empty:
         with col_ta:
             traj_a = uuid_traj[uuid_traj["run"] == "A"]
             if not traj_a.empty:
-                st.plotly_chart(_draw_trajectory_figure(traj_a, f"Run A: UUID {bad_uuid} ({label_str})"), width='stretch')
+                st.plotly_chart(_draw_trajectory_figure(traj_a, f"Run A: UUID {bad_uuid} ({label_str})"), use_container_width=True)
             else:
                 st.info("No trajectory for this UUID in run A.")
         with col_tb:
             traj_b = uuid_traj[uuid_traj["run"] == "B"]
             if not traj_b.empty:
-                st.plotly_chart(_draw_trajectory_figure(traj_b, f"Run B: UUID {bad_uuid} ({label_str})"), width='stretch')
+                st.plotly_chart(_draw_trajectory_figure(traj_b, f"Run B: UUID {bad_uuid} ({label_str})"), use_container_width=True)
             else:
                 st.info("No trajectory for this UUID in run B.")
     else:
