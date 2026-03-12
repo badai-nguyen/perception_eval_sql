@@ -238,6 +238,18 @@ if not selected_labels:
 with st.sidebar:
     show_invalid = st.checkbox("Show invalid (zero-size) objects", value=False)
 
+# --- Comparison view mode (when multiple runs) ---
+compare_view_mode = "side_by_side"
+if multi_run and len(runs_to_show) >= 2:
+    compare_view_mode = st.sidebar.radio(
+        "Comparison view",
+        ["Side by side", "Overlay (both runs on one BEV)"],
+        index=0,
+        key="bbox_compare_view_mode",
+        help="Side by side: two BEV plots for direct comparison. Overlay: single BEV with both runs drawn together to see differences at a glance.",
+    )
+    compare_view_mode = "overlay" if "Overlay" in compare_view_mode else "side_by_side"
+
 
 # ----------------------------
 # Build query safely & load data
@@ -312,12 +324,23 @@ color_map = {
 def get_color(source, status): return color_map.get((source, status), "#999999")
 
 # ----------------------------
-# Currently showing
+# Currently showing & comparison hint
 # ----------------------------
 if len(files_to_load) == 1:
     st.info(f"**Currently showing:** Run {files_to_load[0][1]} only")
 else:
-    st.info(f"**Currently showing:** Runs {', '.join(f[1] for f in files_to_load)} (side by side)")
+    run_names = [f[1] for f in files_to_load]
+    st.info(f"**Currently showing:** Runs {', '.join(run_names)}")
+    if compare_view_mode == "side_by_side":
+        left_lbl = run_names[0]
+        right_lbl = run_names[1] if len(run_names) > 1 else ""
+        hint = f"**Comparison:** Left = **Run {left_lbl}** (baseline), Right = **Run {right_lbl}** (candidate). Same frame and scale — compare object counts and positions."
+        if len(run_names) > 2:
+            hint = f"**Comparison:** Columns from left to right = **Run {', '.join(run_names)}**. Same frame and scale — compare object counts and positions."
+        st.markdown(f":information_source: {hint}")
+    else:
+        line_legend = " — ".join(f"**{s}** = Run {run_names[i]}" for i, s in enumerate(["solid", "dashed", "dot", "dashdot"][: len(run_names)]))
+        st.markdown(f":information_source: **Overlay view:** All runs on one BEV: {line_legend}. Differences show where detections disagree.")
 
 # ----------------------------
 # Frame slider
@@ -332,6 +355,25 @@ df_frame = df[df.frame_index == frame]
 
 total_records = len(df_frame)
 valid_records = int(((df_frame["length"] > 0) & (df_frame["width"] > 0)).sum())
+
+# ----------------------------
+# Quick view: switch between "All (comparison)" and single-run view
+# ----------------------------
+solo_run: str | None = None
+if len(files_to_load) > 1:
+    run_names = [f[1] for f in files_to_load]
+    quick_options = ["All (comparison)"] + [f"Run {lbl} only" for lbl in run_names]
+    quick_view = st.radio(
+        "**Quick view** — switch which run(s) are shown:",
+        quick_options,
+        key="bbox_quick_view",
+        horizontal=True,
+        help="Choose one run to see it alone in a single BEV, or 'All' to see side-by-side or overlay comparison.",
+    )
+    if quick_view != "All (comparison)":
+        solo_run = quick_view.replace("Run ", "").replace(" only", "").strip()
+    if solo_run is not None:
+        st.caption(f"Showing **Run {solo_run}** only. Select *All (comparison)* above to compare runs again.")
 
 # ----------------------------
 # Geometry (yaw補正: x前方, y左方 → +π/2)
@@ -379,8 +421,14 @@ def rotated_rect(
     return xs, ys
 
 
-def _build_one_bev_figure(df_fr: pd.DataFrame, plot_title: str, show_inv: bool) -> go.Figure:
-    """Build one BEV figure from a single run's frame data (no run suffix in legend)."""
+def _build_one_bev_figure(
+    df_fr: pd.DataFrame,
+    plot_title: str,
+    show_inv: bool,
+    x_range: Tuple[float, float] | None = None,
+    y_range: Tuple[float, float] | None = None,
+) -> go.Figure:
+    """Build one BEV figure from a single run's frame data. Optional x_range, y_range for consistent side-by-side scale."""
     fig = go.Figure()
     shown = set()
     hovertemplate = (
@@ -430,12 +478,129 @@ def _build_one_bev_figure(df_fr: pd.DataFrame, plot_title: str, show_inv: bool) 
         mode="lines", fill="toself",
         line=dict(color="black", width=2), fillcolor="gray", name="Ego Vehicle", showlegend=True
     ))
+    layout_kw: dict = {
+        "title": plot_title,
+        "xaxis": dict(scaleanchor="y", scaleratio=1, title="X [m]"),
+        "yaxis": dict(scaleanchor="x", scaleratio=1, title="Y [m]"),
+        "legend": dict(groupclick="togglegroup", title="Source / Status"),
+        "height": 900,
+    }
+    if x_range is not None:
+        layout_kw["xaxis"]["range"] = list(x_range)
+    if y_range is not None:
+        layout_kw["yaxis"]["range"] = list(y_range)
+    fig.update_layout(**layout_kw)
+    return fig
+
+
+def _bev_axis_range_from_df(df_fr: pd.DataFrame, padding: float = 5.0) -> Tuple[Tuple[float, float], Tuple[float, float]] | None:
+    """Compute (x_range, y_range) from frame data for consistent BEV scale. Returns None if no valid points."""
+    if df_fr.empty:
+        return None
+    xs = df_fr["x"].dropna()
+    ys = df_fr["y"].dropna()
+    if xs.empty and ys.empty:
+        return None
+    x_min, x_max = float(xs.min()) - padding, float(xs.max()) + padding
+    y_min, y_max = float(ys.min()) - padding, float(ys.max()) + padding
+    x_min = min(x_min, -padding)
+    x_max = max(x_max, padding)
+    y_min = min(y_min, -padding)
+    y_max = max(y_max, padding)
+    return (x_min, x_max), (y_min, y_max)
+
+
+def _build_overlay_bev_figure(
+    df_frame: pd.DataFrame,
+    run_order: List[str],
+    plot_title: str,
+    show_inv: bool,
+) -> go.Figure:
+    """Build one BEV with all runs overlaid. Legend = run only (toggle by run). Line style = run."""
+    fig = go.Figure()
+    dash_styles = ["solid", "dash", "dot", "dashdot"]
+    hovertemplate = (
+        "Run: %{customdata[0]}<br>X: %{x}<br>Y: %{y}<br>Label: %{customdata[1]}<br>"
+        "Status: %{customdata[4]}<br>size: %{customdata[2]:.2f} x %{customdata[3]:.2f}<br>"
+    )
+    for run_idx, run_lbl in enumerate(run_order):
+        dash = dash_styles[run_idx % len(dash_styles)]
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None], mode="lines",
+            line=dict(color="#555555", width=4, dash=dash),
+            name=f"Run {run_lbl}",
+            legendgroup=run_lbl,
+            showlegend=True,
+        ))
+    for run_idx, run_lbl in enumerate(run_order):
+        df_fr = df_frame[df_frame["run"] == run_lbl]
+        if df_fr.empty:
+            continue
+        dash = dash_styles[run_idx % len(dash_styles)]
+        mask_both_invalid = (df_fr["length"] <= 0) & (df_fr["width"] <= 0)
+        mask_one_invalid = ((df_fr["length"] <= 0) | (df_fr["width"] <= 0)) & ~mask_both_invalid
+        mask_valid = (df_fr["length"] > 0) & (df_fr["width"] > 0)
+
+        if show_inv and not df_fr[mask_both_invalid].empty:
+            d = df_fr[mask_both_invalid]
+            fig.add_trace(go.Scatter(
+                x=d["x"], y=d["y"], mode="markers",
+                marker=dict(
+                    symbol="x", size=8,
+                    color=d.apply(lambda row: get_color(row.source, row.status), axis=1),
+                    line=dict(width=2, color="white"),
+                ),
+                opacity=0.9, legendgroup=run_lbl, showlegend=False,
+                hovertemplate=hovertemplate,
+                customdata=np.column_stack([
+                    np.full(len(d), run_lbl), d["label"].values, d["length"].values, d["width"].values,
+                    (d["source"] + "/" + d["status"]).values,
+                ]),
+            ))
+        if not df_fr[mask_one_invalid].empty:
+            d = df_fr[mask_one_invalid].copy()
+            d["status_str"] = d["source"] + "/" + d["status"]
+            for _, group in d.groupby("status_str"):
+                status_str = group["status_str"].iloc[0]
+                fig.add_trace(go.Scatter(
+                    x=group["x"], y=group["y"], mode="markers",
+                    marker=dict(
+                        symbol="circle", size=group[["length", "width"]].max(axis=1),
+                        color=group.apply(lambda row: get_color(row.source, row.status), axis=1),
+                        line=dict(width=2, color="white"),
+                    ),
+                    opacity=0.7, legendgroup=run_lbl, showlegend=False,
+                    hovertemplate=hovertemplate,
+                    customdata=np.column_stack([
+                        np.full(len(group), run_lbl), group["label"].values,
+                        group["length"].values, group["width"].values,
+                        np.full(len(group), status_str),
+                    ]),
+                ))
+        if not df_fr[mask_valid].empty:
+            d = df_fr[mask_valid].copy()
+            d["status_str"] = d["source"] + "/" + d["status"]
+            for _, row in d.iterrows():
+                x_poly, y_poly = rotated_rect(row.x, row.y, row.length, row.width, row.yaw)
+                status_str = row["source"] + "/" + row["status"]
+                fig.add_trace(go.Scatter(
+                    x=x_poly, y=y_poly, mode="lines", fill="toself", opacity=0.5,
+                    line=dict(color=get_color(row.source, row.status), width=2, dash=dash),
+                    legendgroup=run_lbl, showlegend=False,
+                    hovertemplate=hovertemplate,
+                    customdata=[[run_lbl, row.label, row.length, row.width, status_str]],
+                ))
+    fig.add_trace(go.Scatter(
+        x=[0, -1.5, -1.5, 0], y=[0, -1, 1, 0],
+        mode="lines", fill="toself",
+        line=dict(color="black", width=2), fillcolor="gray", name="Ego Vehicle", showlegend=True
+    ))
     fig.update_layout(
         title=plot_title,
         xaxis=dict(scaleanchor="y", scaleratio=1, title="X [m]"),
         yaxis=dict(scaleanchor="x", scaleratio=1, title="Y [m]"),
-        legend=dict(groupclick="togglegroup", title="Source / Status"),
-        height=900
+        legend=dict(groupclick="togglegroup", title="Run (click to show/hide)"),
+        height=900,
     )
     return fig
 
@@ -443,7 +608,44 @@ def _build_one_bev_figure(df_fr: pd.DataFrame, plot_title: str, show_inv: bool) 
 # ----------------------------
 # Plot (single or side-by-side for multiple runs)
 # ----------------------------
-if len(files_to_load) > 1:
+if solo_run is not None:
+    # Quick view: single run only (full-width BEV)
+    df_solo = df_frame[df_frame["run"] == solo_run]
+    total_n = len(df_solo)
+    valid_n = int(((df_solo["length"] > 0) & (df_solo["width"] > 0)).sum()) if not df_solo.empty else 0
+    title = f"Run {solo_run} only — {selected_scenario or 'Scene'}<br>Frame {frame} | Total {total_n:,}, Valid {valid_n:,}"
+    st.plotly_chart(
+        _build_one_bev_figure(df_solo, title, show_invalid),
+        use_container_width=True,
+    )
+elif len(files_to_load) > 1 and compare_view_mode == "overlay":
+    run_lbls = [f[1] for f in files_to_load]
+    line_names = ["——— solid", "- - - dashed", "· · · dot", "-·-· dashdot"]
+    line_parts = [f"<strong>{run_lbls[i]}</strong> {line_names[i]}" for i in range(min(4, len(run_lbls)))]
+    line_hint = " &nbsp;|&nbsp; ".join(line_parts)
+    color_ref = (
+        '<div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; '
+        "margin-bottom:10px; padding:10px 14px; background:#f0f2f6; border-radius:8px; font-size:0.9em; "
+        "border:1px solid #e0e0e0;\">"
+        '<span style="font-weight:700;">Line = Run:</span> '
+        f'<span>{line_hint}</span>'
+        ' &nbsp;&nbsp; '
+        '<span style="font-weight:700;">Color = Status:</span> '
+        '<span style="background:#00cc66;color:#000;padding:2px 8px;border-radius:4px;">GT/TP</span> '
+        '<span style="background:#ff9933;color:#000;padding:2px 8px;border-radius:4px;">GT/FN</span> '
+        '<span style="background:#66b3ff;color:#000;padding:2px 8px;border-radius:4px;">EST/TP</span> '
+        '<span style="background:#ff6666;color:#fff;padding:2px 8px;border-radius:4px;">EST/FP</span>'
+        "</div>"
+    )
+    st.markdown(color_ref, unsafe_allow_html=True)
+    title = f"Overlay: {selected_scenario or 'Scene'} — Frame {frame}"
+    st.plotly_chart(
+        _build_overlay_bev_figure(df_frame, [f[1] for f in files_to_load], title, show_invalid),
+        use_container_width=True,
+    )
+elif len(files_to_load) > 1:
+    shared_range = _bev_axis_range_from_df(df_frame)
+    x_range, y_range = (shared_range[0], shared_range[1]) if shared_range else (None, None)
     cols_bev = st.columns(len(files_to_load))
     for col, (_, run_lbl) in zip(cols_bev, files_to_load):
         df_fr = df_frame[df_frame["run"] == run_lbl]
@@ -451,7 +653,10 @@ if len(files_to_load) > 1:
         valid_n = int(((df_fr["length"] > 0) & (df_fr["width"] > 0)).sum()) if not df_fr.empty else 0
         title = f"Run {run_lbl} — {selected_scenario or 'Scene'}<br>Frame {frame} | Total {total_n:,}, Valid {valid_n:,}"
         with col:
-            st.plotly_chart(_build_one_bev_figure(df_fr, title, show_invalid), use_container_width=True)
+            st.plotly_chart(
+                _build_one_bev_figure(df_fr, title, show_invalid, x_range=x_range, y_range=y_range),
+                use_container_width=True,
+            )
 else:
     fig = _build_one_bev_figure(
         df_frame,
