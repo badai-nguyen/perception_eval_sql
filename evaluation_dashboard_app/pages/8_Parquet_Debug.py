@@ -691,11 +691,25 @@ elif file_type == "Parquet":
     st.subheader("Preview rows")
     preview_mode = st.radio(
         "Show",
-        ["First N rows", "Last N rows", "First and last N rows", "Search"],
+        ["First N rows", "Last N rows", "First and last N rows", "Search", "Filter by columns"],
         horizontal=True,
         key="pq_preview_mode",
     )
     n_rows = st.slider("Number of rows (N)", 5, 500, 50, key="pq_n_rows")
+
+    columns = schema_df["column_name"].tolist()
+    # DuckDB DESCRIBE may use 'column_type' or 'Type'; normalize for filter UI
+    schema_col_types = {}
+    if "column_type" in schema_df.columns:
+        schema_col_types = dict(zip(schema_df["column_name"], schema_df["column_type"]))
+    elif "Type" in schema_df.columns:
+        schema_col_types = dict(zip(schema_df["column_name"], schema_df["Type"]))
+
+    def _is_numeric_type(ct: str) -> bool:
+        if not ct or not isinstance(ct, str):
+            return False
+        ct = ct.upper()
+        return "INT" in ct or "BIGINT" in ct or "DOUBLE" in ct or "FLOAT" in ct or "DECIMAL" in ct or "NUMERIC" in ct
 
     def run_preview(path: str, limit: int, from_end: bool) -> pd.DataFrame:
         if from_end:
@@ -715,7 +729,6 @@ elif file_type == "Parquet":
         """Return rows where any column contains query (substring match)."""
         if not query or not query.strip():
             return run_preview(path, limit, from_end=False)
-        columns = schema_df["column_name"].tolist()
         like_op = "LIKE" if case_sensitive else "ILIKE"
         # One condition per column: CAST to VARCHAR so numbers/dates are searchable
         conditions = []
@@ -726,6 +739,70 @@ elif file_type == "Parquet":
         params = [path] + [query.strip()] * len(columns) + [int(limit)]
         return con.execute(
             f"SELECT * FROM read_parquet(?) WHERE ({where_clause}) LIMIT ?",
+            params,
+        ).df()
+
+    def run_filter(
+        path: str,
+        filters: List[Tuple[str, str, Any]],
+        limit: int,
+    ) -> pd.DataFrame:
+        """Return rows matching all given (column, operator, value) conditions. Empty value = skip."""
+        where_parts = []
+        params: List[Any] = [path]
+        for col, op, val in filters:
+            if val is None or (isinstance(val, str) and not val.strip()):
+                continue
+            safe = f'"{col}"' if not col.isidentifier() else col
+            ct = schema_col_types.get(col, "")
+            is_num = _is_numeric_type(str(ct))
+            if is_num:
+                try:
+                    num_val = int(val) if "." not in str(val).strip() else float(val)
+                except (ValueError, TypeError):
+                    num_val = val
+                if op == "=":
+                    where_parts.append(f"({safe} = ?)")
+                    params.append(num_val)
+                elif op == "!=":
+                    where_parts.append(f"({safe} != ?)")
+                    params.append(num_val)
+                elif op == "<":
+                    where_parts.append(f"({safe} < ?)")
+                    params.append(num_val)
+                elif op == "<=":
+                    where_parts.append(f"({safe} <= ?)")
+                    params.append(num_val)
+                elif op == ">":
+                    where_parts.append(f"({safe} > ?)")
+                    params.append(num_val)
+                elif op == ">=":
+                    where_parts.append(f"({safe} >= ?)")
+                    params.append(num_val)
+                else:
+                    where_parts.append(f"({safe} = ?)")
+                    params.append(num_val)
+            else:
+                # string: equals, not equals, contains
+                str_val = str(val).strip()
+                if op == "equals" or op == "=":
+                    where_parts.append(f"(CAST({safe} AS VARCHAR) = ?)")
+                    params.append(str_val)
+                elif op == "not equals" or op == "!=":
+                    where_parts.append(f"(CAST({safe} AS VARCHAR) != ?)")
+                    params.append(str_val)
+                elif op == "contains":
+                    where_parts.append(f"(CAST({safe} AS VARCHAR) ILIKE CONCAT('%', ?, '%'))")
+                    params.append(str_val)
+                else:
+                    where_parts.append(f"(CAST({safe} AS VARCHAR) = ?)")
+                    params.append(str_val)
+        if not where_parts:
+            return run_preview(path, limit, from_end=False)
+        where_clause = " AND ".join(where_parts)
+        params.append(int(limit))
+        return con.execute(
+            f"SELECT * FROM read_parquet(?) WHERE {where_clause} LIMIT ?",
             params,
         ).df()
 
@@ -750,6 +827,84 @@ elif file_type == "Parquet":
                 st.info("No rows matched your search.")
         else:
             st.caption("Enter a search term to filter rows by any column. Showing first N rows until you search.")
+            st.dataframe(run_preview(target_file, n_rows, from_end=False), width='stretch')
+    elif preview_mode == "Filter by columns":
+        st.caption("Filter by specific columns (e.g. scenario name, frame index). All non-empty conditions are ANDed.")
+        has_scenario = "scenario_name" in columns
+        has_frame = "frame_index" in columns or "frame" in columns
+        frame_col = "frame_index" if "frame_index" in columns else ("frame" if "frame" in columns else None)
+        quick_filters: List[Tuple[str, str, Any]] = []
+        with st.expander("Quick filters (scenario & frame)", expanded=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                scenario_val = st.text_input(
+                    "Scenario name (exact)",
+                    placeholder="e.g. scenario_01 or leave empty",
+                    key="pq_filter_scenario",
+                    help="Filter by scenario_name; leave empty to skip.",
+                )
+                if has_scenario and scenario_val.strip():
+                    quick_filters.append(("scenario_name", "equals", scenario_val.strip()))
+            with c2:
+                frame_val_str = st.text_input(
+                    "Frame index",
+                    placeholder="e.g. 10 (leave empty for all)",
+                    key="pq_filter_frame",
+                    help="Filter by frame index; leave empty to show all frames.",
+                )
+                if frame_col is not None and frame_val_str.strip():
+                    try:
+                        frame_val = int(frame_val_str.strip())
+                        quick_filters.append((frame_col, "=", frame_val))
+                    except ValueError:
+                        pass
+        st.markdown("**Structured filters** — add more conditions (column, operator, value):")
+        num_structured = 4
+        for i in range(num_structured):
+            col_choice = st.selectbox(
+                f"Column {i + 1}",
+                options=["(none)"] + columns,
+                key=f"pq_filter_col_{i}",
+            )
+            if col_choice and col_choice != "(none)":
+                ct = schema_col_types.get(col_choice, "")
+                is_num = _is_numeric_type(str(ct))
+                if is_num:
+                    op_choice = st.selectbox(
+                        f"Operator {i + 1}",
+                        ["=", "!=", "<", "<=", ">", ">="],
+                        key=f"pq_filter_op_{i}",
+                    )
+                    val_choice = st.text_input(
+                        f"Value {i + 1} (number)",
+                        placeholder="e.g. 10",
+                        key=f"pq_filter_val_{i}",
+                    )
+                else:
+                    op_choice = st.selectbox(
+                        f"Operator {i + 1}",
+                        ["equals", "not equals", "contains"],
+                        key=f"pq_filter_op_{i}",
+                    )
+                    val_choice = st.text_input(
+                        f"Value {i + 1}",
+                        placeholder="e.g. scenario_01",
+                        key=f"pq_filter_val_{i}",
+                    )
+                if val_choice.strip():
+                    quick_filters.append((col_choice, op_choice, val_choice.strip() if not is_num else val_choice))
+        all_filters = quick_filters
+        if all_filters:
+            filter_df = run_filter(target_file, all_filters, n_rows)
+            desc = " and ".join(
+                f"{c}={v!r}" for (c, _op, v) in all_filters
+            )
+            st.caption(f"Showing up to {n_rows} rows where {desc}")
+            st.dataframe(filter_df, width='stretch')
+            if filter_df.empty:
+                st.info("No rows matched the filters.")
+        else:
+            st.caption("Set at least one quick filter (scenario name or frame index) or a structured filter above. Showing first N rows until then.")
             st.dataframe(run_preview(target_file, n_rows, from_end=False), width='stretch')
     else:
         c1, c2 = st.columns(2)
