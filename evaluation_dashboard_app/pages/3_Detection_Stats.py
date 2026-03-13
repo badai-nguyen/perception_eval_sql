@@ -96,7 +96,10 @@ def create_view_eval_flat(con, target_file: str, view_name: str = "view_eval_fla
     WITH src AS (
         SELECT * FROM parquet_scan('{target_file}')
         UNION BY NAME
-        SELECT CAST(NULL AS VARCHAR) AS visibility, CAST(NULL AS VARCHAR) AS suite_name
+        SELECT CAST(NULL AS VARCHAR) AS visibility,
+               CAST(NULL AS VARCHAR) AS suite_name,
+               CAST(NULL AS VARCHAR) AS scenario_name,
+               CAST(NULL AS VARCHAR) AS t4dataset_name
         WHERE FALSE
     ),
     base AS (
@@ -684,7 +687,10 @@ if not single_mode:
                     t4dataset_id,
                     frame_index,
                     uuid AS gt_uuid,
-                    COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_base
+                    COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_base,
+                    COALESCE(MAX(try_cast(suite_name AS VARCHAR)), '') AS suite_name,
+                    COALESCE(MAX(try_cast(scenario_name AS VARCHAR)), '') AS scenario_name,
+                    COALESCE(MAX(try_cast(t4dataset_name AS VARCHAR)), '') AS t4dataset_name
                 FROM view_eval_flat
                 WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL
                     AND {filter_clause_base}
@@ -695,7 +701,10 @@ if not single_mode:
                     t4dataset_id,
                     frame_index,
                     uuid AS gt_uuid,
-                    COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_comp
+                    COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_comp,
+                    COALESCE(MAX(try_cast(suite_name AS VARCHAR)), '') AS suite_name,
+                    COALESCE(MAX(try_cast(scenario_name AS VARCHAR)), '') AS scenario_name,
+                    COALESCE(MAX(try_cast(t4dataset_name AS VARCHAR)), '') AS t4dataset_name
                 FROM {comp_flat}
                 WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL
                     AND {filter_clause_comp_p5}
@@ -707,7 +716,10 @@ if not single_mode:
                     COALESCE(CAST(b.frame_index AS VARCHAR), CAST(c.frame_index AS VARCHAR)) AS frame_index,
                     COALESCE(b.gt_uuid, c.gt_uuid) AS gt_uuid,
                     COALESCE(b.tp_base, FALSE) AS tp_base,
-                    COALESCE(c.tp_comp, FALSE) AS tp_comp
+                    COALESCE(c.tp_comp, FALSE) AS tp_comp,
+                    COALESCE(b.suite_name, c.suite_name, '') AS suite_name,
+                    COALESCE(b.scenario_name, c.scenario_name, '') AS scenario_name,
+                    COALESCE(b.t4dataset_name, c.t4dataset_name, '') AS t4dataset_name
                 FROM base_gt b
                 FULL OUTER JOIN comp_gt c
                     ON b.t4dataset_id = c.t4dataset_id
@@ -721,9 +733,12 @@ if not single_mode:
                 CAST(COUNT(*) FILTER (WHERE tp_base AND NOT tp_comp) AS DOUBLE) AS degraded_cnt,
                 CAST(COUNT(*) FILTER (WHERE tp_base AND tp_comp) AS DOUBLE) AS both_tp_cnt,
                 CAST(COUNT(*) FILTER (WHERE NOT tp_base AND NOT tp_comp) AS DOUBLE) AS both_fn_cnt,
-                CAST(SUM((CASE WHEN tp_comp THEN 1 ELSE 0 END) - (CASE WHEN tp_base THEN 1 ELSE 0 END)) AS DOUBLE) AS net_tp_delta
+                CAST(SUM((CASE WHEN tp_comp THEN 1 ELSE 0 END) - (CASE WHEN tp_base THEN 1 ELSE 0 END)) AS DOUBLE) AS net_tp_delta,
+                suite_name,
+                scenario_name,
+                t4dataset_name
             FROM joined
-            GROUP BY 1
+            GROUP BY t4dataset_id, suite_name, scenario_name, t4dataset_name
             ORDER BY net_tp_delta DESC
             """
             df_improved = con.execute(query).df()
