@@ -10,12 +10,6 @@ from typing import Any, List, Tuple
 from lib.path_utils import path_display
 
 st.set_page_config(layout="wide")
-
-# ====== URL query params (suite_name, scenario_name, t4dataset_name) for shareable links ======
-_bbox_params = st.query_params
-_url_suite = _bbox_params.get("suite_name")
-_url_scenario = _bbox_params.get("scenario_name")
-_url_t4dataset = _bbox_params.get("t4dataset_name")
 st.title("Bounding Box Viewer")
 
 # =============================
@@ -133,19 +127,12 @@ else:
 with st.sidebar:
     selected_suite = None
     selected_scenario = None
-    selected_t4dataset = None
-
-    # --- Suite: initial index from URL if valid
     if suite_list:
-        suite_index = suite_list.index(_url_suite) if _url_suite in suite_list else 0
         selected_suite = st.selectbox(
             "Suite name",
             suite_list,
-            index=suite_index,
             key="bbox_viewer_suite",
         )
-
-    # --- Scenario list (depends on selected_suite)
     if has_scenario_name:
         if selected_suite is not None:
             scenario_list = con.execute(
@@ -158,17 +145,13 @@ with st.sidebar:
                 [filter_file]
             ).df()["v"].dropna().astype(str).tolist()
         if scenario_list:
-            scenario_index = scenario_list.index(_url_scenario) if _url_scenario in scenario_list else 0
             selected_scenario = st.selectbox(
                 "Scenario name",
                 scenario_list,
-                index=scenario_index,
                 key="bbox_viewer_scenario",
             )
-    else:
-        scenario_list = []
-
-    # --- t4dataset options (filtered by suite + scenario)
+    # Only offer t4dataset_name filter when column exists and has more than one distinct value
+    # Filter t4dataset options by selected_suite and selected_scenario when set
     t4dataset_list: List[str] = []
     if has_t4dataset_name:
         t4_where_parts = ["t4dataset_name IS NOT NULL"]
@@ -185,24 +168,13 @@ with st.sidebar:
             t4_params,
         ).df()["v"].dropna().astype(str).tolist()
     has_multiple_t4dataset = len(t4dataset_list) > 1
+    selected_t4dataset = None
     if has_multiple_t4dataset and t4dataset_list:
-        t4dataset_index = t4dataset_list.index(_url_t4dataset) if _url_t4dataset in t4dataset_list else 0
         selected_t4dataset = st.selectbox(
             "t4dataset_name",
             t4dataset_list,
-            index=t4dataset_index,
             key="bbox_viewer_t4dataset",
         )
-
-    # Sync URL with current selection (shareable link)
-    _query = {}
-    if selected_suite is not None:
-        _query["suite_name"] = selected_suite
-    if selected_scenario is not None:
-        _query["scenario_name"] = selected_scenario
-    if selected_t4dataset is not None:
-        _query["t4dataset_name"] = selected_t4dataset
-    st.query_params.update(_query)
 
 # Build scene filter for queries (one scene = one suite + one scenario)
 if selected_suite is not None:
