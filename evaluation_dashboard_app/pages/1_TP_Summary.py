@@ -289,7 +289,15 @@ if mode == "Compare Mode" and use_delta and "id" in df_cmp.columns:
         key="tp_scen_sort"
     )
     scenario_delta_disp = scenario_delta.copy()
-    n_scen = st.number_input("Top N scenarios to show", min_value=5, max_value=len(scenario_delta), value=20, key="delta_topN")
+    max_n_scen = max(5, len(scenario_delta))
+    default_n = min(20, max_n_scen)
+    n_scen = st.number_input(
+        "Top N scenarios to show",
+        min_value=5,
+        max_value=max_n_scen,
+        value=default_n,
+        key="delta_topN"
+    )
     if scen_sort == "Most Improved (Highest ΔTP)":
         scenario_delta_disp = scenario_delta.sort_values("mean_TP_delta", ascending=False).head(int(n_scen))
     elif scen_sort == "Most Degraded (Lowest ΔTP)":
