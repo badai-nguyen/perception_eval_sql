@@ -260,14 +260,6 @@ flowchart LR
 - **起動**: `cd deploy && cp .env.example .env` で環境を用意し、`docker-compose up -d`。初回は `docker-compose run --rm init_db` で DB を初期化。
 - 詳細は [docs/PRODUCTION_DEPLOYMENT.md](docs/PRODUCTION_DEPLOYMENT.md) を参照してください。
 
-### 認証（会社認証・WebAutoAuth）とタスクの紐付け
-
-社内認証（[WebAutoAuth](https://github.com/tier4/WebAutoAuth) 等）を有効にすると、**自分のタスクだけ**を確認できます。
-
-- **動作**: 認証プロキシや WebAutoAuth がリクエストにユーザ識別子（メールや ID）をヘッダで付与し、アプリがそのヘッダを読み取ります。タスク作成時に `session_id` として保存し、「Recent tasks」ではそのユーザのタスクのみ表示します。
-- **設定**: 環境変数 `AUTH_USER_HEADER` に、認証プロキシが設定するヘッダ名を指定（例: `X-Forwarded-User`, `X-Auth-User`）。開発時は `AUTH_DEFAULT_USER=dev@example.com` で固定ユーザにすることも可能です。
-- **注意**: ダウンロード API 用の認証（`webauto-auth-py`）はサーバ側 credential 用です。上記は **アプリ利用者ごとのログイン** とタスク表示の紐付け用です。
-
 ### 起動とデータマウント（単体コンテナ）
 
 データを永続化・可視化するため、`data/` ディレクトリを必ずマウントしてください。

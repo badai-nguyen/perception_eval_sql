@@ -12,6 +12,7 @@ import traceback
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+from collections import Counter
 from typing import Text, Optional, List, Dict, Any
 
 # JST for task time display (UTC+9)
@@ -281,6 +282,7 @@ class JobResult:
         log_dicts = self.get_case_simlation_log_info()
 
         st.write(f"Found {len(log_dicts)} logs")
+        scenario_name_counts = Counter(log_info["scenario_name"] for log_info in log_dicts)
         remain_list = []
         download_rows = []
         suite_output_paths = set()
@@ -306,6 +308,7 @@ class JobResult:
                             skip_large_file=skip_large_file,
                             large_file_mb=large_file_mb,
                             keep_zip_files=keep_zip_files,
+                            scenario_name_counts=scenario_name_counts,
                         )
                         status = "downloaded" if ok else "failed"
                         detail = "ok" if ok else "download failed"
@@ -345,6 +348,7 @@ class JobResult:
     def download_result_json(self):
         log_dicts = self.get_case_simlation_log_info()
         st.write(f"Found {len(log_dicts)} result JSON files")
+        scenario_name_counts = Counter(log_info["scenario_name"] for log_info in log_dicts)
         suite_output_paths = set()
         
         for i, log_info in enumerate(log_dicts):
@@ -354,7 +358,10 @@ class JobResult:
             with st.spinner(f"Downloading JSON {i+1}/{len(log_dicts)}: {log_info['scenario_name']}"):
                 output_dir = self._get_output_path_for_log(log_info)
                 suite_output_paths.add(output_dir)
-                self.download_archive_log(log_info, "result_json_id", "json", output_path=output_dir)
+                self.download_archive_log(
+                    log_info, "result_json_id", "json", output_path=output_dir,
+                    scenario_name_counts=scenario_name_counts,
+                )
         
         with st.spinner("Organizing files..."):
             for output_dir in sorted(suite_output_paths):
@@ -436,7 +443,8 @@ class JobResult:
         output_path: Optional[str] = None,
         skip_large_file=False,
         large_file_mb=50.0,
-        keep_zip_files=False
+        keep_zip_files=False,
+        scenario_name_counts: Optional[Dict[str, int]] = None,
     ) -> bool:
         url = (
             self.__api_base_url
@@ -447,13 +455,17 @@ class JobResult:
             + "/download"
         )
         
-        # Use unique ID suffix when multiple logs share the same scenario_name to avoid overwriting.
-        # Prefer t4_dataset_id (meaningful per-dataset id) when present, else archive_id/result_json_id.
-        t4_id = log_info.get("t4_dataset_id", "") or ""
-        fallback_id = log_info.get(type, "") or ""
-        unique_id = (t4_id[:8] if t4_id else "") or (fallback_id[:8] if fallback_id else "")
+        # Add unique ID suffix only when this scenario_name appears more than once in the batch (avoid overwriting).
+        # When only one occurrence, keep clean name e.g. scenario_name.zip.
         safe_scenario = self._safe_path_component(log_info["scenario_name"])
-        dl_filename = f"{safe_scenario}_{unique_id}.{format}" if unique_id else f"{safe_scenario}.{format}"
+        need_suffix = scenario_name_counts is None or scenario_name_counts.get(log_info["scenario_name"], 0) > 1
+        if need_suffix:
+            t4_id = log_info.get("t4_dataset_id", "") or ""
+            fallback_id = log_info.get(type, "") or ""
+            unique_id = (t4_id[:8] if t4_id else "") or (fallback_id[:8] if fallback_id else "")
+            dl_filename = f"{safe_scenario}_{unique_id}.{format}" if unique_id else f"{safe_scenario}.{format}"
+        else:
+            dl_filename = f"{safe_scenario}.{format}"
         post_obj = {
             "expiration_time": 600,
             "filename": "suite_log.zip",
