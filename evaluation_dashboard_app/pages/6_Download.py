@@ -279,7 +279,7 @@ class JobResult:
         return os.path.join(self.__output_path, suite_dir)
 
     def download_archive_and_unzip(self, phase, skip_large_file=False, large_file_mb=50.0, keep_zip_files=False):
-        log_dicts = self.get_case_simlation_log_info()
+        log_dicts = self.get_case_simulation_log_info()
 
         st.write(f"Found {len(log_dicts)} logs")
         scenario_name_counts = Counter(log_info["scenario_name"] for log_info in log_dicts)
@@ -346,7 +346,7 @@ class JobResult:
         return remain_list
 
     def download_result_json(self):
-        log_dicts = self.get_case_simlation_log_info()
+        log_dicts = self.get_case_simulation_log_info()
         st.write(f"Found {len(log_dicts)} result JSON files")
         scenario_name_counts = Counter(log_info["scenario_name"] for log_info in log_dicts)
         suite_output_paths = set()
@@ -368,7 +368,7 @@ class JobResult:
                 self.organize_files_into_directories(output_dir)
         return log_dicts
 
-    def get_case_simlation_log_info(self) -> list:
+    def get_case_simulation_log_info(self) -> list:
         simlation_archive_log_info = []
         next_token = ""
         url = (
@@ -651,7 +651,7 @@ class JobResult:
         Returns:
             List of downloaded scenario information
         """
-        log_dicts = self.get_case_simlation_log_info()
+        log_dicts = self.get_case_simulation_log_info()
         downloaded_scenarios = []
         
         # Create output directory
@@ -1257,7 +1257,7 @@ with st.sidebar:
                             suite_ids=None,
                             output_path=str(_resolved)
                         )
-                        log_dicts = job_result.get_case_simlation_log_info()
+                        log_dicts = job_result.get_case_simulation_log_info()
                     suite_map = {}
                     for log_info in log_dicts:
                         sid = log_info.get("suite_id", "")
@@ -1397,7 +1397,7 @@ with tab1:
                 suite_ids=selected_suite_ids,
                 output_path=str(_resolved)
             )
-            log_dicts = job_result.get_case_simlation_log_info()
+            log_dicts = job_result.get_case_simulation_log_info()
             st.subheader("Simulation Logs Info")
             if log_dicts:
                 display_keys = [
