@@ -36,7 +36,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 from lib.WebAPI import scenarioAPI
 from lib.user_config import UserConfig
-from lib.path_utils import get_data_root, resolve_under_data_root
+from lib.path_utils import get_data_root, resolve_under_data_root, to_data_relative
 from lib.eval_summary import find_eval_result_dirs, run_eval_result_for_dir, generate_summary_and_score_csv
 from lib.db import is_task_queue_enabled, create_task, list_recent_tasks, get_task, delete_task
 from lib.auth import get_current_user_id, is_auth_enabled
@@ -1228,11 +1228,13 @@ with st.sidebar:
     suite_id = st.session_state.suite_id
     set_config_value("suite_id", suite_id)
 
-    _default_output = str(get_data_root() / "download")
+    _default_output = "download"
+    _stored = get_config_value("output_path", _default_output)
+    _display_output = to_data_relative(_stored) if _stored else _default_output
     output_path = st.text_input(
         "Output Path",
-        value=get_config_value("output_path", _default_output),
-        help="Path where files will be saved (must be under the server data root)"
+        value=_display_output,
+        help="Folder under the data directory (e.g. download or v4.3.1_test4). Path is limited to the server data root."
     )
     set_config_value("output_path", output_path)
 
@@ -1241,32 +1243,36 @@ with st.sidebar:
         if not all([project_id, st.session_state.job_id]):
             st.error("Please fill in Project ID and Job ID before fetching suites.")
         else:
-            try:
-                with st.spinner("Fetching suites..."):
-                    job_result = JobResult(
-                        environment=environment,
-                        project_id=project_id,
-                        job_id=st.session_state.job_id,
-                        suite_id="",
-                        suite_ids=None,
-                        output_path=output_path
-                    )
-                    log_dicts = job_result.get_case_simlation_log_info()
-                suite_map = {}
-                for log_info in log_dicts:
-                    sid = log_info.get("suite_id", "")
-                    sname = log_info.get("suite_name", "")
-                    if sid:
-                        suite_map[sid] = sname or sid
-                st.session_state.suite_options = [
-                    {"id": sid, "name": suite_map[sid]} for sid in sorted(suite_map, key=lambda s: suite_map[s].lower())
-                ]
-                if st.session_state.suite_options:
-                    st.success(f"Found {len(st.session_state.suite_options)} suites.")
-                else:
-                    st.info("No suites found for this job.")
-            except Exception as e:
-                st.error(f"Failed to fetch suites: {str(e)}")
+            _resolved, _err = resolve_under_data_root(output_path, allow_create=True)
+            if _err:
+                st.error(f"Output path is invalid: {_err}.")
+            else:
+                try:
+                    with st.spinner("Fetching suites..."):
+                        job_result = JobResult(
+                            environment=environment,
+                            project_id=project_id,
+                            job_id=st.session_state.job_id,
+                            suite_id="",
+                            suite_ids=None,
+                            output_path=str(_resolved)
+                        )
+                        log_dicts = job_result.get_case_simlation_log_info()
+                    suite_map = {}
+                    for log_info in log_dicts:
+                        sid = log_info.get("suite_id", "")
+                        sname = log_info.get("suite_name", "")
+                        if sid:
+                            suite_map[sid] = sname or sid
+                    st.session_state.suite_options = [
+                        {"id": sid, "name": suite_map[sid]} for sid in sorted(suite_map, key=lambda s: suite_map[s].lower())
+                    ]
+                    if st.session_state.suite_options:
+                        st.success(f"Found {len(st.session_state.suite_options)} suites.")
+                    else:
+                        st.info("No suites found for this job.")
+                except Exception as e:
+                    st.error(f"Failed to fetch suites: {str(e)}")
 
     suite_options = st.session_state.suite_options
     suite_id_map = {f"{opt['name']} ({opt['id']})": opt["id"] for opt in suite_options}
@@ -1346,9 +1352,10 @@ with tab1:
     import platform
     if open_folder_col.button("Open Output Folder", key="open_folder_btn"):
         import subprocess
-        folder_path = os.path.abspath(output_path)
-        if not os.path.isdir(folder_path):
-            st.warning(f"Output folder does not exist yet: `{folder_path}`. Run a download first to create it.")
+        _resolved, _err = resolve_under_data_root(output_path, allow_create=False, allow_missing=True)
+        folder_path = str(_resolved) if _resolved else None
+        if _err or not folder_path or not os.path.isdir(folder_path):
+            st.warning(f"Output folder does not exist yet: `{output_path}`. Run a download first to create it.")
         else:
             try:
                 if platform.system() == "Windows":
@@ -1376,6 +1383,10 @@ with tab1:
         if not all([project_id, st.session_state.job_id]):
             st.error("Please fill in all required fields: Project ID and Job ID")
             st.stop()
+        _resolved, _err = resolve_under_data_root(output_path, allow_create=True)
+        if _err:
+            st.error(f"Output path is invalid: {_err}.")
+            st.stop()
         try:
             # Initialize JobResult
             job_result = JobResult(
@@ -1384,7 +1395,7 @@ with tab1:
                 job_id=st.session_state.job_id,
                 suite_id=suite_id,
                 suite_ids=selected_suite_ids,
-                output_path=output_path
+                output_path=str(_resolved)
             )
             log_dicts = job_result.get_case_simlation_log_info()
             st.subheader("Simulation Logs Info")
@@ -1419,14 +1430,13 @@ with tab1:
         if path_err:
             st.error(f"Output path is invalid: {path_err}. Use a path under the server data root.")
             st.stop()
-        output_path = str(resolved_output)
-        set_config_value("output_path", output_path)
+        resolved_path_str = str(resolved_output)
+        set_config_value("output_path", to_data_relative(resolved_output))
         set_config_value("environment", environment)
         set_config_value("project_id", project_id)
         set_config_value("job_id", st.session_state.job_id)
         set_config_value("suite_id", suite_id)
         set_config_value("suite_ids", selected_suite_ids)
-        set_config_value("output_path", output_path)
         set_config_value("download_type", download_type)
         if download_type == "Archives (ZIP)":
             set_config_value("phase", phase)
@@ -1436,7 +1446,7 @@ with tab1:
 
         if is_task_queue_enabled():
             params = {
-                "output_path": output_path,
+                "output_path": resolved_path_str,
                 "project_id": project_id,
                 "job_id": st.session_state.job_id,
                 "suite_id": suite_id or "",
@@ -1452,7 +1462,7 @@ with tab1:
             st.stop()
 
         # Create output directory (inline path)
-        os.makedirs(output_path, exist_ok=True)
+        os.makedirs(resolved_path_str, exist_ok=True)
         try:
             job_result = JobResult(
                 environment=environment,
@@ -1460,7 +1470,7 @@ with tab1:
                 job_id=st.session_state.job_id,
                 suite_id=suite_id,
                 suite_ids=selected_suite_ids,
-                output_path=output_path,
+                output_path=resolved_path_str,
             )
             download_successful = False
             if download_type == "Archives (ZIP)":
@@ -1475,7 +1485,7 @@ with tab1:
                     download_successful = len(remain_list) > 0
                     st.subheader("📊 Summary")
                     st.write(f"- Total scenarios processed: {len(remain_list)}")
-                    st.write(f"- Output directory: `{output_path}`")
+                    st.write(f"- Output directory: `{to_data_relative(resolved_path_str)}`")
             else:  # Result JSON only
                 with st.expander("Downloading Result JSON", expanded=True):
                     log_dicts = job_result.download_result_json()
@@ -1483,13 +1493,12 @@ with tab1:
                     download_successful = len(log_dicts) > 0
                     # Show summary
                     st.subheader("📊 Summary")
-                    st.write(f"- Total JSON files: {len(log_dicts)}")
-                    st.write(f"- Output directory: `{output_path}`")
+                    st.write(f"- Output directory: `{to_data_relative(resolved_path_str)}`")
             
             # Show file tree
             with st.expander("📁 File Structure"):
-                for root, dirs, files in os.walk(output_path):
-                    level = root.replace(output_path, '').count(os.sep)
+                for root, dirs, files in os.walk(resolved_path_str):
+                    level = root.replace(resolved_path_str, '').count(os.sep)
                     indent = ' ' * 4 * level
                     st.text(f"{indent}{os.path.basename(root)}/")
                     subindent = ' ' * 4 * (level + 1)
@@ -1593,11 +1602,11 @@ with tab2:
                 job_id=st.session_state.job_id,
                 suite_id=suite_id,
                 suite_ids=selected_suite_ids,
-                output_path=output_path
+                output_path=out_path
             )
             with st.expander("Downloading Scenarios", expanded=True):
                 downloaded = job_result.download_scenarios(
-                    output_dir=output_path,
+                    output_dir=out_path,
                     scenario_name_filter=scenario_filter,
                     overwrite=overwrite,
                     selected_ids=selected_ids
@@ -1626,8 +1635,9 @@ with tab2:
 
 with tab3:
     st.header("View Downloaded Content")
-    
-    if not os.path.exists(output_path):
+    _tab3_resolved, _tab3_err = resolve_under_data_root(output_path, allow_missing=True)
+    _tab3_output = str(_tab3_resolved) if _tab3_resolved else None
+    if _tab3_err or not _tab3_output or not os.path.exists(_tab3_output):
         st.info("No downloads yet. Use the other tabs to download content first.")
     else:
         # Show directory structure
@@ -1636,8 +1646,8 @@ with tab3:
         # Let user browse directories
         selected_dir = st.selectbox(
             "Browse directory",
-            [output_path] + [os.path.join(output_path, d) for d in os.listdir(output_path) 
-                            if os.path.isdir(os.path.join(output_path, d))]
+            [_tab3_output] + [os.path.join(_tab3_output, d) for d in os.listdir(_tab3_output) 
+                            if os.path.isdir(os.path.join(_tab3_output, d))]
         )
         
         if os.path.exists(selected_dir):
@@ -1687,11 +1697,13 @@ with tab4:
     try:
         _default_eval_root = str(output_path)
     except NameError:
-        _default_eval_root = get_config_value("eval_root", str(get_data_root() / "download"))
+        _default_eval_root = "download"
+    _stored_eval = get_config_value("eval_root", _default_eval_root)
+    _display_eval = to_data_relative(_stored_eval) if _stored_eval else _default_eval_root
     eval_root = st.text_input(
         "Root directory to evaluate",
-        value=get_config_value("eval_root", _default_eval_root),
-        help="Directory containing downloaded scenario results (must be under the server data root). Uploaded files are also saved here.",
+        value=_display_eval,
+        help="Folder under the data directory (e.g. download or a run name). Path is limited to the server data root. Uploaded files are also saved here.",
     )
     set_config_value("eval_root", eval_root)
 
@@ -1735,7 +1747,7 @@ with tab4:
                             with open(out_path, "wb") as f:
                                 f.write(up.getvalue())
                             saved.append(out_name)
-                        st.success(f"Saved {len(saved)} file(s) to **{target_dir}**: {', '.join(saved)}. You can use this run in Overview and other pages.")
+                        st.success(f"Saved {len(saved)} file(s) to **{to_data_relative(target_dir)}**: {', '.join(saved)}. You can use this run in Overview and other pages.")
                     except Exception as e:
                         st.error(f"Failed to save: {e}")
                         st.exception(e)
@@ -1847,7 +1859,7 @@ with tab4:
             st.error(f"Eval root is invalid: {eval_err}. Use a path under the server data root.")
         else:
             eval_path = str(resolved_eval)
-            set_config_value("eval_root", eval_path)
+            set_config_value("eval_root", to_data_relative(resolved_eval))
             enqueued = []
             if generate_parquet_clicked or generate_both_clicked:
                 if CATALOG_IO_AVAILABLE:
@@ -1952,20 +1964,21 @@ with tab4:
         if eval_path_err:
             st.error(f"Eval root path is invalid: {eval_path_err}. Use a path under the server data root.")
             st.stop()
-        eval_root = str(resolved_eval_root)
-        set_config_value("eval_root", eval_root)
+        eval_root_resolved = str(resolved_eval_root)
+        eval_root_display = to_data_relative(resolved_eval_root)
+        set_config_value("eval_root", eval_root_display)
 
         if only_generate_summary:
             with st.spinner("Generating Summary.csv and Score.csv..."):
                 try:
-                    csv_info = generate_summary_and_score_csv(eval_root)
+                    csv_info = generate_summary_and_score_csv(eval_root_resolved)
                     st.success(
                         f"Generated Summary.csv ({csv_info['summary_rows']} rows) and "
-                        f"Score.csv ({csv_info['score_rows']} rows) in `{eval_root}`"
+                        f"Score.csv ({csv_info['score_rows']} rows) in `{eval_root_display}`"
                     )
                     if notify_when_done:
                         _emit_eval_finished_notification(
-                            f"Summary.csv ({csv_info['summary_rows']} rows) and Score.csv ({csv_info['score_rows']} rows) in {eval_root}"
+                            f"Summary.csv ({csv_info['summary_rows']} rows) and Score.csv ({csv_info['score_rows']} rows) in {eval_root_display}"
                         )
                 except Exception as e:
                     st.error(f"Failed to generate CSV files: {e}")
@@ -1973,7 +1986,7 @@ with tab4:
                         _emit_eval_finished_notification(f"Summary/Score CSV generation failed: {e}")
         else:
             with st.spinner("Searching for result directories..."):
-                target_dirs = find_eval_result_dirs(eval_root, recursive=eval_recursive)
+                target_dirs = find_eval_result_dirs(eval_root_resolved, recursive=eval_recursive)
                 print("target_dirs", target_dirs)
 
             if not target_dirs:
@@ -2058,15 +2071,15 @@ with tab4:
             # Generate summary CSVs at the eval_root level
             with st.spinner("Generating Summary.csv and Score.csv..."):
                 try:
-                    csv_info = generate_summary_and_score_csv(eval_root)
+                    csv_info = generate_summary_and_score_csv(eval_root_resolved)
                     st.success(
                         f"Generated Summary.csv ({csv_info['summary_rows']} rows) and "
-                        f"Score.csv ({csv_info['score_rows']} rows) in `{eval_root}`"
+                        f"Score.csv ({csv_info['score_rows']} rows) in `{eval_root_display}`"
                     )
                     if notify_when_done:
                         _emit_eval_finished_notification(
                             f"Eval done. Success: {success_count}, Skipped: {skipped_count}, Failed: {failed_count}. "
-                            f"Summary.csv and Score.csv in {eval_root}"
+                            f"Summary.csv and Score.csv in {eval_root_display}"
                         )
                 except Exception as e:
                     st.error(f"Failed to generate CSV files: {e}")

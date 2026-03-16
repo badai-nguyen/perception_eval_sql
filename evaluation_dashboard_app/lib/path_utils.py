@@ -55,6 +55,27 @@ def path_display(path: Path) -> str:
         return path.name or str(path)
 
 
+def to_data_relative(path: str | Path) -> str:
+    """
+    Return the path relative to the data root for display/config.
+    If the path is under the data root, returns e.g. 'download' or 'v4.3.1_test4'.
+    Otherwise returns the path as a string (e.g. for invalid or legacy absolute paths).
+    """
+    if path is None or (isinstance(path, str) and not str(path).strip()):
+        return ""
+    root = get_data_root()
+    try:
+        p = Path(path) if not isinstance(path, Path) else path
+        if not p.is_absolute():
+            p = (root / p).resolve()
+        else:
+            p = p.resolve()
+        rel = p.relative_to(root)
+        return str(rel).replace("\\", "/")
+    except (ValueError, OSError):
+        return str(path).strip()
+
+
 def resolve_under_data_root(
     user_path: str,
     allow_create: bool = False,
@@ -73,7 +94,8 @@ def resolve_under_data_root(
     try:
         p = Path(user_path.strip())
         if not p.is_absolute():
-            p = (Path.cwd() / p).resolve()
+            # Treat relative paths as under the data root (no absolute path exposed to user)
+            p = (root / p).resolve()
         else:
             p = p.resolve()
         # Ensure it is under root (use resolve() for both for consistent comparison)

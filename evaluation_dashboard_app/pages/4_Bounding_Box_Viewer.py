@@ -433,6 +433,7 @@ def _build_one_bev_figure(
     shown = set()
     hovertemplate = (
         "X: %{x}<br>Y: %{y}<br>Label: %{customdata[0]}<br>size: %{customdata[1]:.2f} x %{customdata[2]:.2f}<br>"
+        "UUID: %{customdata[3]}<extra></extra>"
     )
     mask_both_invalid = (df_fr["length"] <= 0) & (df_fr["width"] <= 0)
     mask_one_invalid = ((df_fr["length"] <= 0) | (df_fr["width"] <= 0)) & ~mask_both_invalid
@@ -444,7 +445,8 @@ def _build_one_bev_figure(
             x=d["x"], y=d["y"], mode="markers",
             marker=dict(symbol="x", size=8, color=d.apply(lambda row: get_color(row.source, row.status), axis=1)),
             opacity=0.9, showlegend=False, hovertemplate=hovertemplate,
-            customdata=d[["label", "length", "width"]].values, name="invalid"
+            customdata=np.column_stack([d["label"].values, d["length"].values, d["width"].values, d["uuid"].values]),
+            name="invalid"
         ))
     if not df_fr[mask_one_invalid].empty:
         d = df_fr[mask_one_invalid].copy()
@@ -455,7 +457,8 @@ def _build_one_bev_figure(
                 marker=dict(symbol="circle", size=group[["length", "width"]].max(axis=1),
                            color=get_color(group.iloc[0].source, group.iloc[0].status)),
                 opacity=0.6, name=name, legendgroup=name, showlegend=name not in shown,
-                hovertemplate=hovertemplate, customdata=group[["label", "length", "width"]].values
+                hovertemplate=hovertemplate,
+                customdata=np.column_stack([group["label"].values, group["length"].values, group["width"].values, group["uuid"].values])
             ))
             shown.add(name)
     if not df_fr[mask_valid].empty:
@@ -469,7 +472,7 @@ def _build_one_bev_figure(
                     x=x_poly, y=y_poly, mode="lines", fill="toself", opacity=0.6,
                     line=dict(color=get_color(row.source, row.status)),
                     name=name, legendgroup=name, showlegend=show, hovertemplate=hovertemplate,
-                    customdata=[[row.label, row.length, row.width]]
+                    customdata=[[row.label, row.length, row.width, row.uuid]]
                 ))
                 show = False
             shown.add(name)
@@ -522,6 +525,7 @@ def _build_overlay_bev_figure(
     hovertemplate = (
         "Run: %{customdata[0]}<br>X: %{x}<br>Y: %{y}<br>Label: %{customdata[1]}<br>"
         "Status: %{customdata[4]}<br>size: %{customdata[2]:.2f} x %{customdata[3]:.2f}<br>"
+        "UUID: %{customdata[5]}<extra></extra>"
     )
     for run_idx, run_lbl in enumerate(run_order):
         dash = dash_styles[run_idx % len(dash_styles)]
@@ -554,7 +558,7 @@ def _build_overlay_bev_figure(
                 hovertemplate=hovertemplate,
                 customdata=np.column_stack([
                     np.full(len(d), run_lbl), d["label"].values, d["length"].values, d["width"].values,
-                    (d["source"] + "/" + d["status"]).values,
+                    (d["source"] + "/" + d["status"]).values, d["uuid"].values,
                 ]),
             ))
         if not df_fr[mask_one_invalid].empty:
@@ -574,7 +578,7 @@ def _build_overlay_bev_figure(
                     customdata=np.column_stack([
                         np.full(len(group), run_lbl), group["label"].values,
                         group["length"].values, group["width"].values,
-                        np.full(len(group), status_str),
+                        np.full(len(group), status_str), group["uuid"].values,
                     ]),
                 ))
         if not df_fr[mask_valid].empty:
@@ -588,7 +592,7 @@ def _build_overlay_bev_figure(
                     line=dict(color=get_color(row.source, row.status), width=2, dash=dash),
                     legendgroup=run_lbl, showlegend=False,
                     hovertemplate=hovertemplate,
-                    customdata=[[run_lbl, row.label, row.length, row.width, status_str]],
+                    customdata=[[run_lbl, row.label, row.length, row.width, status_str, row.uuid]],
                 ))
     fig.add_trace(go.Scatter(
         x=[0, -1.5, -1.5, 0], y=[0, -1, 1, 0],
@@ -782,8 +786,13 @@ uuid_perf = uuid_perf[uuid_perf["total"] > 0]
 # FN率でソート
 uuid_perf_sorted = uuid_perf.sort_values("FN_rate", ascending=False)
 
+# All GT UUIDs in current data (for "inspect any object" use case)
+all_gt_uuids = df_stats[df_stats["source"] == "GT"]["uuid"].dropna().unique().tolist()
+
 # 表示 (per run when multiple runs)
 if not uuid_perf_sorted.empty:
+    total_objects = len(uuid_perf_sorted)
+    st.caption(f"Showing top 30 by FN rate ({total_objects} GT objects with TP/FN in this scene).")
     display_cols = ["uuid", "label", "TP", "FN", "total", "FN_rate"]
     if "run" not in uuid_perf_sorted.columns:
         display_cols = [c for c in display_cols if c != "run"]
@@ -819,11 +828,43 @@ else:
 
 st.markdown("### 🔍 Inspect a Specific GT Object")
 
-if not uuid_perf_sorted.empty:
-    uuid_options = uuid_perf_sorted["uuid"].drop_duplicates().head(50).tolist()
-    bad_uuid = st.selectbox("Select UUID to visualize", uuid_options)
-else:
-    bad_uuid = None
+st.caption("Pick an object from the high-FN list below to view its trajectory. To inspect a different object, open **Inspect another object**.")
+
+# Default path: dropdown from high-FN list (only when no custom UUID is used)
+bad_uuid: str | None = None
+custom_uuid_input = ""
+
+with st.expander("Inspect another object (browse all or enter UUID)"):
+    st.caption("Use this when the object you want is not in the high-FN table. Hover on the BEV chart to see a UUID, or browse the table and copy one.")
+    custom_uuid_input = st.text_input(
+        "Enter UUID",
+        value="",
+        key="bbox_inspect_custom_uuid",
+        placeholder="Paste or type a UUID from this scene",
+        help="Must exist in the current scene/topic/labels.",
+    )
+    gt_for_browse = df_stats[df_stats["source"] == "GT"][["uuid", "label"] + (["run"] if "run" in df_stats.columns else [])].drop_duplicates()
+    gt_for_browse = gt_for_browse.sort_values(["label", "uuid"]).reset_index(drop=True)
+    st.caption("All GT UUIDs in this scene (select a cell to copy):")
+    st.dataframe(gt_for_browse, use_container_width=True, hide_index=True)
+
+if custom_uuid_input and str(custom_uuid_input).strip():
+    candidate = str(custom_uuid_input).strip()
+    if candidate in all_gt_uuids:
+        bad_uuid = candidate
+    else:
+        st.warning(
+            f"UUID `{candidate}` was not found in the current data. "
+            "Check that it belongs to the selected scene, topic, and labels."
+        )
+if bad_uuid is None and not uuid_perf_sorted.empty:
+    uuid_options = uuid_perf_sorted["uuid"].drop_duplicates().head(100).tolist()
+    bad_uuid = st.selectbox(
+        "Select UUID to visualize",
+        options=uuid_options,
+        key="bbox_inspect_uuid_select",
+        help="Top 100 by FN rate. To inspect another object, open the expander above.",
+    )
 
 if bad_uuid is not None:
     uuid_traj = (
@@ -892,4 +933,7 @@ if not uuid_traj.empty:
     else:
         st.plotly_chart(_draw_trajectory_figure(uuid_traj, f"Trajectory of UUID {bad_uuid} ({uuid_traj['label'].iloc[0]})"), width="stretch")
 else:
-    st.info("No GT trajectory data for the selected UUID.")
+    if bad_uuid is None:
+        st.info("Select a UUID from the list above to view its trajectory, or open **Inspect another object** to browse all or enter a UUID.")
+    else:
+        st.info("No GT trajectory data for the selected UUID.")
