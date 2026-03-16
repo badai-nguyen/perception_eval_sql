@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import gc
 import glob
+import json
 import os
 import pickle
 from pathlib import Path
@@ -180,6 +181,33 @@ def _get_metadata_from_frame(frame: Any) -> dict:
     return out
 
 
+def _load_t4_metadata_sidecar(pkl_file: str | Path | None) -> dict:
+    """
+    If a t4_metadata.json sidecar exists next to the pkl (written at download time from API),
+    load it and return dict with t4_dataset_id / t4_dataset_version_id (keys normalized to t4dataset_*).
+    Otherwise return {}.
+    """
+    if not pkl_file:
+        return {}
+    pkl_path = Path(pkl_file)
+    if not pkl_path.is_absolute():
+        pkl_path = pkl_path.resolve()
+    sidecar = pkl_path.parent / "t4_metadata.json"
+    if not sidecar.is_file():
+        return {}
+    try:
+        with open(sidecar, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        out = {}
+        if data.get("t4_dataset_id"):
+            out["t4dataset_id"] = data["t4_dataset_id"]
+        if data.get("t4_dataset_version_id"):
+            out["t4dataset_version_id"] = data.get("t4_dataset_version_id")
+        return out
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
 def _normalize_loaded_pkl(
     data: Any,
     *,
@@ -203,6 +231,10 @@ def _normalize_loaded_pkl(
         first = data[0]
         if hasattr(first, "pass_fail_result"):
             meta = _get_metadata_from_frame(first)
+            # Use t4_metadata.json sidecar (written at download when API provides t4_dataset_id) if pkl has no id
+            sidecar = _load_t4_metadata_sidecar(pkl_file)
+            if sidecar:
+                meta = {**meta, **sidecar}
             scenario_name = meta.get("scenario_name") or ""
             suite_name = meta.get("suite_name") or ""
             if pkl_file:

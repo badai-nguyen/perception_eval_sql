@@ -321,6 +321,7 @@ class JobResult:
                         "scenario_name": log_info["scenario_name"],
                         "scenario_id": log_info["scenario_id"],
                         "scenario_ver": log_info["scenario_ver"],
+                        "t4_dataset_id": log_info.get("t4_dataset_id", ""),
                         "status": status,
                         "detail": detail,
                     }
@@ -391,6 +392,7 @@ class JobResult:
             
             next_token = data.get("next_token", "")
             
+            print(data)
             for report in data["reports"]:
                 suite_info = report.get("suite", {})
                 suite_id = suite_info.get("id", "")
@@ -401,6 +403,7 @@ class JobResult:
                 elif self.__suite_id and suite_id != self.__suite_id:
                     continue
                 if "simulation_archive" in report["logs"]:
+                    scenario_params = report.get("scenario_parameters") or {}
                     simlation_archive_log_info.append(
                         {
                             "suite_id": suite_id,
@@ -410,6 +413,8 @@ class JobResult:
                             "scenario_name": report["scenario"]["display_name"],
                             "scenario_id": report["scenario"]["id"],
                             "scenario_ver": report["scenario"]["version_id"],
+                            "t4_dataset_id": scenario_params.get("t4_dataset_id", ""),
+                            "t4_dataset_version_id": scenario_params.get("t4_dataset_version_id", ""),
                         }
                     )
             
@@ -442,7 +447,13 @@ class JobResult:
             + "/download"
         )
         
-        dl_filename = log_info["scenario_name"] + "." + format
+        # Use unique ID suffix when multiple logs share the same scenario_name to avoid overwriting.
+        # Prefer t4_dataset_id (meaningful per-dataset id) when present, else archive_id/result_json_id.
+        t4_id = log_info.get("t4_dataset_id", "") or ""
+        fallback_id = log_info.get(type, "") or ""
+        unique_id = (t4_id[:8] if t4_id else "") or (fallback_id[:8] if fallback_id else "")
+        safe_scenario = self._safe_path_component(log_info["scenario_name"])
+        dl_filename = f"{safe_scenario}_{unique_id}.{format}" if unique_id else f"{safe_scenario}.{format}"
         post_obj = {
             "expiration_time": 600,
             "filename": "suite_log.zip",
@@ -464,6 +475,25 @@ class JobResult:
         except Exception as e:
             st.error(f"Failed to download {dl_filename}: {e}")
             return False
+        # When downloading a zip, write t4_metadata.json into the dir where the zip will be extracted,
+        # so parquet generation can use t4_dataset_id when the pkl itself has no t4dataset metadata.
+        if type == "archive_id" and log_info.get("t4_dataset_id"):
+            stem = Path(dl_filename).stem
+            try:
+                sidecar_dir = Path(output_dir) / stem
+                sidecar_dir.mkdir(parents=True, exist_ok=True)
+                sidecar_path = sidecar_dir / "t4_metadata.json"
+                with open(sidecar_path, "w", encoding="utf-8") as f:
+                    json.dump(
+                        {
+                            "t4_dataset_id": log_info.get("t4_dataset_id", ""),
+                            "t4_dataset_version_id": log_info.get("t4_dataset_version_id", ""),
+                        },
+                        f,
+                        indent=0,
+                    )
+            except Exception as e:
+                st.warning(f"Could not write t4_metadata.json for {stem}: {e}")
         st.success(f"Downloaded: {dl_filename}")
         return True
 
