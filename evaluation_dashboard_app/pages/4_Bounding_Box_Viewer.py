@@ -616,7 +616,7 @@ if solo_run is not None:
     title = f"Run {solo_run} only — {selected_scenario or 'Scene'}<br>Frame {frame} | Total {total_n:,}, Valid {valid_n:,}"
     st.plotly_chart(
         _build_one_bev_figure(df_solo, title, show_invalid),
-        use_container_width=True,
+        width='stretch',
     )
 elif len(files_to_load) > 1 and compare_view_mode == "overlay":
     run_lbls = [f[1] for f in files_to_load]
@@ -641,7 +641,7 @@ elif len(files_to_load) > 1 and compare_view_mode == "overlay":
     title = f"Overlay: {selected_scenario or 'Scene'} — Frame {frame}"
     st.plotly_chart(
         _build_overlay_bev_figure(df_frame, [f[1] for f in files_to_load], title, show_invalid),
-        use_container_width=True,
+        width='stretch',
     )
 elif len(files_to_load) > 1:
     shared_range = _bev_axis_range_from_df(df_frame)
@@ -655,7 +655,7 @@ elif len(files_to_load) > 1:
         with col:
             st.plotly_chart(
                 _build_one_bev_figure(df_fr, title, show_invalid, x_range=x_range, y_range=y_range),
-                use_container_width=True,
+                width='stretch',
             )
 else:
     fig = _build_one_bev_figure(
@@ -878,14 +878,14 @@ if not uuid_traj.empty:
             with col:
                 traj_r = uuid_traj[uuid_traj["run"] == run_lbl]
                 if not traj_r.empty:
-                    st.plotly_chart(_draw_trajectory_figure(traj_r, f"Run {run_lbl}: UUID {bad_uuid} ({label_str})"), use_container_width=True)
+                    st.plotly_chart(_draw_trajectory_figure(traj_r, f"Run {run_lbl}: UUID {bad_uuid} ({label_str})"), width='stretch')
                 else:
                     st.info(f"No trajectory for this UUID in run {run_lbl}.")
         for run_lbl in [f[1] for f in files_to_load[n_traj_cols:]]:
             traj_r = uuid_traj[uuid_traj["run"] == run_lbl]
             if not traj_r.empty:
                 with st.expander(f"Run {run_lbl}: UUID {bad_uuid}"):
-                    st.plotly_chart(_draw_trajectory_figure(traj_r, f"Run {run_lbl}: UUID {bad_uuid} ({label_str})"), use_container_width=True)
+                    st.plotly_chart(_draw_trajectory_figure(traj_r, f"Run {run_lbl}: UUID {bad_uuid} ({label_str})"), width='stretch')
             else:
                 with st.expander(f"Run {run_lbl}: UUID {bad_uuid}"):
                     st.info(f"No trajectory for this UUID in run {run_lbl}.")
