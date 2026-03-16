@@ -386,6 +386,9 @@ else:
     filters = create_filter_widgets([runA])
     runA = apply_filters(runA, filters)
     st.session_state["runA"] = runA
+    # Clear compare-related state so other pages (e.g. Bounding Box Viewer) show single mode
+    for key in ("all_runs", "run_labels", "runB", "df_cmp"):
+        st.session_state.pop(key, None)
 
 # ====== MAIN PAGE METRICS & CHARTS ======
 st.subheader("Loaded Runs")

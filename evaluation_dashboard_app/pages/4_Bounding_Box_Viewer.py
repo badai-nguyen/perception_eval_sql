@@ -21,15 +21,20 @@ if "runA" not in st.session_state:
 
 runA = st.session_state["runA"]
 mode = st.session_state.get("mode", "Single Mode")
-all_runs = st.session_state.get("all_runs")
-run_labels_state = st.session_state.get("run_labels")
-if mode == "Compare Mode" and all_runs and run_labels_state and len(all_runs) >= 2:
-    runs = all_runs
-    run_labels_list = run_labels_state
+# Respect mode: in Single Mode always show one run; only use compare state when explicitly in Compare Mode
+if mode == "Compare Mode":
+    all_runs = st.session_state.get("all_runs")
+    run_labels_state = st.session_state.get("run_labels")
+    if all_runs and run_labels_state and len(all_runs) >= 2:
+        runs = all_runs
+        run_labels_list = run_labels_state
+    else:
+        runB = st.session_state.get("runB")
+        runs = [runA] if runB is None else [runA, runB]
+        run_labels_list = ["A"] if len(runs) == 1 else ["A", "B"]
 else:
-    runB = st.session_state.get("runB")
-    runs = [runA] if runB is None else [runA, runB]
-    run_labels_list = ["A"] if len(runs) == 1 else ["A", "B"]
+    runs = [runA]
+    run_labels_list = ["A"]
 
 
 def list_parquets_in_run(run_path) -> List[str]:
