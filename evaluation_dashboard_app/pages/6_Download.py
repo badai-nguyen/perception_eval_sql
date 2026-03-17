@@ -49,8 +49,14 @@ except ImportError:
     CATALOG_IO_AVAILABLE = False
 
 
-def _enqueue_task(task_type: str, parameters: Dict[str, Any]) -> Optional[str]:
-    """Create task in Postgres and enqueue to RQ. Returns task_id or None on failure."""
+def _enqueue_task(
+    task_type: str,
+    parameters: Dict[str, Any],
+    job_timeout: Optional[int] = None,
+) -> Optional[str]:
+    """Create task in Postgres and enqueue to RQ. Returns task_id or None on failure.
+    job_timeout: optional timeout in seconds (e.g. 3600 for 1h). Used for long-running tasks like downloads.
+    """
     session_id = get_current_user_id() if is_auth_enabled() else None
     task_id = create_task(task_type, parameters, session_id=session_id)
     if not task_id:
@@ -62,7 +68,10 @@ def _enqueue_task(task_type: str, parameters: Dict[str, Any]) -> Optional[str]:
         redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
         conn = Redis.from_url(redis_url)
         queue = Queue(os.environ.get("RQ_QUEUE", "default"), connection=conn)
-        queue.enqueue(run_job, task_id, task_type, parameters)
+        enqueue_kw = {}
+        if job_timeout is not None:
+            enqueue_kw["job_timeout"] = job_timeout
+        queue.enqueue(run_job, task_id, task_type, parameters, **enqueue_kw)
         return task_id
     except Exception:
         return None
@@ -1303,7 +1312,7 @@ with tab1:
                 "large_file_mb": large_file_mb,
                 "keep_zip_files": keep_zip_files,
             }
-            task_id = _enqueue_task("download_results", params)
+            task_id = _enqueue_task("download_results", params, job_timeout=3600)
             if task_id:
                 st.success("Task queued. It will appear in the **Task status** section below; the list updates automatically.")
             else:

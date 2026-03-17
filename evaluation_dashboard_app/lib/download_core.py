@@ -276,12 +276,33 @@ def download_archive_log(
         return False
 
 
-def extract_archives(phase: str, output_path: str, keep_zip_files: bool = False) -> None:
-    """Extract zip archives under output_path, keep only the given phase and scene_result.pkl."""
+def extract_archives(
+    phase: str,
+    output_path: str,
+    keep_zip_files: bool = False,
+    *,
+    on_warning: Optional[Callable[[str], None]] = None,
+) -> None:
+    """Extract zip archives under output_path, keep only the given phase and scene_result.pkl.
+    Skips corrupt or incomplete zip files (e.g. from interrupted download) so one bad file
+    does not fail the whole job.
+    """
     archive_paths = glob.glob(os.path.join(output_path, "*.zip"))
     for archive_path in archive_paths:
         dir_path = archive_path.replace(".zip", "")
-        shutil.unpack_archive(archive_path, dir_path)
+        try:
+            shutil.unpack_archive(archive_path, dir_path)
+        except (shutil.ReadError, ValueError, OSError) as e:
+            msg = f"Skipping corrupt or incomplete archive {os.path.basename(archive_path)}: {e}"
+            logger.warning("%s", msg)
+            if on_warning:
+                on_warning(msg)
+            if not keep_zip_files:
+                try:
+                    os.remove(archive_path)
+                except OSError:
+                    pass
+            continue
         if not keep_zip_files:
             os.remove(archive_path)
         if not os.path.isdir(dir_path) or not os.listdir(dir_path):
@@ -358,7 +379,6 @@ def run_download_results(
             continue
         total_attempted += 1
         out_dir = _get_output_path_for_log(output_path, log_info, suite_id, suite_ids)
-        suite_output_paths.add(out_dir)
         if download_type == "archives":
             ok = download_archive_log(
                 auth_session,
@@ -387,6 +407,8 @@ def run_download_results(
                 scenario_name_counts=scenario_name_counts,
                 on_warning=on_warning,
             )
+        if ok:
+            suite_output_paths.add(out_dir)
         status = "success" if ok else "failed"
         if not ok:
             failure_count += 1
@@ -399,7 +421,7 @@ def run_download_results(
         on_progress("Extracting archives..." if download_type == "archives" else "Organizing files...")
     for out_dir in sorted(suite_output_paths):
         if download_type == "archives":
-            extract_archives(phase, out_dir, keep_zip_files=keep_zip_files)
+            extract_archives(phase, out_dir, keep_zip_files=keep_zip_files, on_warning=on_warning)
         else:
             organize_files_into_directories(out_dir)
     return (failure_count, total_attempted, rows)
