@@ -39,6 +39,7 @@ from lib.user_config import UserConfig
 from lib.path_utils import get_data_root, resolve_under_data_root, to_data_relative
 from lib.eval_summary import find_eval_result_dirs, run_eval_result_for_dir, generate_summary_and_score_csv
 from lib.db import is_task_queue_enabled, create_task, list_recent_tasks, get_task, delete_task
+from lib import download_core
 from lib.auth import get_current_user_id, is_auth_enabled
 
 try:
@@ -259,28 +260,19 @@ class JobResult:
         self.__api_base_url = "https://evaluation.ci.web.auto/v3"
         if self.__environment in ["dev", "stg"]:
             self.__api_base_url = "https://scenario.ci." + self.__environment + ".web.auto/v3"
-
-        # web resource
-        self.__auth_session = AuthcliHelper(self.__environment)
+        self.__session, self.__presigned = download_core.get_evaluator_session(environment)
 
     def _safe_path_component(self, value: str) -> str:
-        cleaned = value.replace(os.sep, "_").replace("/", "_").strip()
-        return cleaned if cleaned else "unknown"
+        return download_core._safe_path_component(value)
 
     def _get_output_path_for_log(self, log_info: Dict[str, Any]) -> str:
-        if self.__suite_id and not self.__suite_ids:
-            return self.__output_path
-        suite_id = log_info.get("suite_id", "unknown")
-        suite_name = log_info.get("suite_name", "")
-        if suite_name:
-            suite_dir = f"{self._safe_path_component(suite_name)}_{self._safe_path_component(suite_id)}"
-        else:
-            suite_dir = self._safe_path_component(suite_id)
-        return os.path.join(self.__output_path, suite_dir)
+        return download_core._get_output_path_for_log(
+            self.__output_path, log_info, self.__suite_id or "", self.__suite_ids
+        )
 
     def download_archive_and_unzip(self, phase, skip_large_file=False, large_file_mb=50.0, keep_zip_files=False):
         log_dicts = self.get_case_simulation_log_info()
-
+        log_dicts = [log for log in log_dicts if "second" not in log.get("scenario_name", "")]
         st.write(f"Found {len(log_dicts)} logs")
         scenario_name_counts = Counter(log_info["scenario_name"] for log_info in log_dicts)
         remain_list = []
@@ -290,31 +282,25 @@ class JobResult:
             if st.session_state.get("stop_downloads"):
                 st.warning("Download stopped by user.")
                 break
-            # Show progress in Streamlit
             with st.spinner(f"Downloading {i+1}/{len(log_dicts)}: {log_info['scenario_name']}"):
-                # Add a condition to skip if necessary
-                if "second" in log_info["scenario_name"]:
-                    status = "skipped"
-                    detail = "matched skip rule"
-                else:
-                    try:
-                        output_dir = self._get_output_path_for_log(log_info)
-                        suite_output_paths.add(output_dir)
-                        ok = self.download_archive_log(
-                            log_info,
-                            "archive_id",
-                            "zip",
-                            output_path=output_dir,
-                            skip_large_file=skip_large_file,
-                            large_file_mb=large_file_mb,
-                            keep_zip_files=keep_zip_files,
-                            scenario_name_counts=scenario_name_counts,
-                        )
-                        status = "downloaded" if ok else "failed"
-                        detail = "ok" if ok else "download failed"
-                    except Exception as e:
-                        status = "failed"
-                        detail = str(e)
+                try:
+                    output_dir = self._get_output_path_for_log(log_info)
+                    suite_output_paths.add(output_dir)
+                    ok = self.download_archive_log(
+                        log_info,
+                        "archive_id",
+                        "zip",
+                        output_path=output_dir,
+                        skip_large_file=skip_large_file,
+                        large_file_mb=large_file_mb,
+                        keep_zip_files=keep_zip_files,
+                        scenario_name_counts=scenario_name_counts,
+                    )
+                    status = "downloaded" if ok else "failed"
+                    detail = "ok" if ok else "download failed"
+                except Exception as e:
+                    status = "failed"
+                    detail = str(e)
                 download_rows.append(
                     {
                         "suite_name": log_info.get("suite_name", ""),
@@ -369,71 +355,20 @@ class JobResult:
         return log_dicts
 
     def get_case_simulation_log_info(self) -> list:
-        simlation_archive_log_info = []
-        next_token = ""
-        url = (
-            self.__api_base_url
-            + "/projects/"
-            + self.__project_id
-            + "/jobs/"
-            + self.__job_id
-            + "/test/case/reports"
-        )
-        
         progress_bar = st.progress(0)
-        page_count = 0
-        
-        while True:
-            page_count += 1
-            st.write(f"Fetching page {page_count}...")
-            
-            params = {
-                "next_token": next_token,
-                "size": 100,
-            }
-            
-            if next_token != "":
-                data = self.__auth_session.get(f"{url}?{urllib.parse.urlencode(params)}")
-            else:
-                data = self.__auth_session.get(url)
-            
-            next_token = data.get("next_token", "")
-            
-            print(data)
-            for report in data["reports"]:
-                suite_info = report.get("suite", {})
-                suite_id = suite_info.get("id", "")
-                suite_name = suite_info.get("display_name", "")
-                if self.__suite_ids:
-                    if suite_id not in self.__suite_ids:
-                        continue
-                elif self.__suite_id and suite_id != self.__suite_id:
-                    continue
-                if "simulation_archive" in report["logs"]:
-                    scenario_params = report.get("scenario_parameters") or {}
-                    simlation_archive_log_info.append(
-                        {
-                            "suite_id": suite_id,
-                            "suite_name": suite_name,
-                            "archive_id": report["logs"]["simulation_archive"]["id"],
-                            "result_json_id": report["logs"]["simulation_result_json"]["id"],
-                            "scenario_name": report["scenario"]["display_name"],
-                            "scenario_id": report["scenario"]["id"],
-                            "scenario_ver": report["scenario"]["version_id"],
-                            "t4_dataset_id": scenario_params.get("t4_dataset_id", ""),
-                            "t4_dataset_version_id": scenario_params.get("t4_dataset_version_id", ""),
-                        }
-                    )
-            
-            # Update progress
-            if next_token:
-                progress_bar.progress(0.5)
-            else:
-                progress_bar.progress(1.0)
-                break
-        
-        progress_bar.empty()
-        return simlation_archive_log_info
+        st.write("Fetching log info...")
+        try:
+            result = download_core.get_case_simulation_log_info(
+                self.__session,
+                self.__api_base_url,
+                self.__project_id,
+                self.__job_id,
+                suite_id=self.__suite_id or "",
+                suite_ids=self.__suite_ids or None,
+            )
+        finally:
+            progress_bar.empty()
+        return result
 
     def download_archive_log(
         self,
@@ -446,155 +381,66 @@ class JobResult:
         keep_zip_files=False,
         scenario_name_counts: Optional[Dict[str, int]] = None,
     ) -> bool:
-        url = (
-            self.__api_base_url
-            + "/projects/"
-            + self.__project_id
-            + "/logs/"
-            + log_info[type]
-            + "/download"
-        )
-        
-        # Add unique ID suffix only when this scenario_name appears more than once in the batch (avoid overwriting).
-        # When only one occurrence, keep clean name e.g. scenario_name.zip.
-        safe_scenario = self._safe_path_component(log_info["scenario_name"])
-        need_suffix = scenario_name_counts is None or scenario_name_counts.get(log_info["scenario_name"], 0) > 1
-        if need_suffix:
-            t4_id = log_info.get("t4_dataset_id", "") or ""
-            fallback_id = log_info.get(type, "") or ""
-            unique_id = (t4_id[:8] if t4_id else "") or (fallback_id[:8] if fallback_id else "")
-            dl_filename = f"{safe_scenario}_{unique_id}.{format}" if unique_id else f"{safe_scenario}.{format}"
-        else:
-            dl_filename = f"{safe_scenario}.{format}"
-        post_obj = {
-            "expiration_time": 600,
-            "filename": "suite_log.zip",
-        }
-
-        try:
-            content = self.__auth_session.post(url, data=post_obj)
-        except Exception as e:
-            st.error(f"Can not get log_id {log_info[type]}: {str(e)}")
-            return False
-
-        # Create output directory if it doesn't exist
         output_dir = output_path or self.__output_path
-        os.makedirs(output_dir, exist_ok=True)
-        
-        output_file = os.path.join(output_dir, dl_filename)
-        try:
-            download_file(content["url"], output_file, skip_large_file=skip_large_file, large_file_mb=large_file_mb)
-        except Exception as e:
-            st.error(f"Failed to download {dl_filename}: {e}")
-            return False
-        # When downloading a zip, write t4_metadata.json into the dir where the zip will be extracted,
-        # so parquet generation can use t4_dataset_id when the pkl itself has no t4dataset metadata.
-        if type == "archive_id" and log_info.get("t4_dataset_id"):
-            stem = Path(dl_filename).stem
-            try:
-                sidecar_dir = Path(output_dir) / stem
-                sidecar_dir.mkdir(parents=True, exist_ok=True)
-                sidecar_path = sidecar_dir / "t4_metadata.json"
-                with open(sidecar_path, "w", encoding="utf-8") as f:
-                    json.dump(
-                        {
-                            "t4_dataset_id": log_info.get("t4_dataset_id", ""),
-                            "t4_dataset_version_id": log_info.get("t4_dataset_version_id", ""),
-                        },
-                        f,
-                        indent=0,
-                    )
-            except Exception as e:
-                st.warning(f"Could not write t4_metadata.json for {stem}: {e}")
-        st.success(f"Downloaded: {dl_filename}")
-        return True
+
+        def on_warning(msg: str) -> None:
+            st.warning(msg)
+
+        ok = download_core.download_archive_log(
+            self.__session,
+            self.__presigned,
+            self.__api_base_url,
+            self.__project_id,
+            log_info,
+            type,
+            format,
+            output_dir,
+            skip_large_file=skip_large_file,
+            large_file_mb=large_file_mb,
+            scenario_name_counts=scenario_name_counts,
+            on_warning=on_warning,
+        )
+        if ok:
+            st.success(f"Downloaded: {log_info.get('scenario_name', '')}.{format}")
+        return ok
 
     def extract_archives(self, phase, output_path: str, keep_zip_files=False):
         archive_paths = glob.glob(os.path.join(output_path, "*.zip"))
         st.write(f"Found {len(archive_paths)} archives to extract")
-        
-        progress_bar = st.progress(0)
-        for i, archive_path in enumerate(archive_paths):
-            progress_bar.progress(i / len(archive_paths))
-            
-            dir_path = archive_path.replace(".zip", "")
-            shutil.unpack_archive(archive_path, dir_path)
-            if not keep_zip_files:
-                os.remove(archive_path)
-
-            # It is possible the zip file is empty, so handle that case gracefully
-            if not os.path.isdir(dir_path) or not os.listdir(dir_path):
-                # Empty extraction directory, skip further processing
-                st.warning(f"No files found after extracting {os.path.basename(archive_path)}")
-            else:
-                for sub_dir_path in os.listdir(dir_path):
-                    if Path(sub_dir_path).name == "scenario.yaml":
-                        continue
-                    full_path = os.path.join(dir_path, sub_dir_path)
-                    if not Path(sub_dir_path).name == phase:
-                        if os.path.isdir(full_path):
-                            shutil.rmtree(full_path)
-                    else:
-                        result_file = os.path.join(full_path, "scene_result.pkl")
-                        if os.path.exists(result_file):
-                            shutil.move(
-                                result_file,
-                                os.path.join(dir_path, "scene_result.pkl"),
-                            )
-                        shutil.rmtree(full_path)
-        
-        progress_bar.progress(1.0)
+        with st.spinner("Extracting archives..."):
+            download_core.extract_archives(phase, output_path, keep_zip_files=keep_zip_files)
         st.success("Extraction complete!")
 
     def organize_files_into_directories(self, folder_path):
-        """
-        Scan all files in the given folder, create a directory for each file,
-        and move the file into its corresponding directory.
-        """
+        """Scan all files in the given folder, create a directory per file, move file into it as result.json."""
         files = [f for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))]
         st.write(f"Organizing {len(files)} files into directories...")
-        
-        progress_bar = st.progress(0)
-        for i, filename in enumerate(files):
-            progress_bar.progress(i / len(files))
-            
-            file_path = os.path.join(folder_path, filename)
-            if os.path.isfile(file_path):
-                # Create a new directory with the same name as the file (without extension)
-                new_dir_name = os.path.splitext(filename)[0]
-                new_dir_path = os.path.join(folder_path, new_dir_name)
-                os.makedirs(new_dir_path, exist_ok=True)
-
-                # Move the file into the new directory
-                new_file_path = os.path.join(new_dir_path, "result.json")
-                shutil.move(file_path, new_file_path)
-        
-        progress_bar.progress(1.0)
+        with st.spinner("Organizing files..."):
+            download_core.organize_files_into_directories(folder_path)
         st.success("File organization complete!")
 
     def _download_scenario_file(self, url: str, output_path: str) -> bool:
-        """Download a single scenario file"""
+        """Download a single scenario file (internal API or direct URL)."""
         try:
-            # Handle both direct URLs and API endpoints
-            if url.startswith(("http://", "https://")):
-                if self.__auth_session._AuthcliHelper__is_internal_url(url):
-                    # This is an API endpoint that needs authentication
-                    try:
-                        content = self.__auth_session.post(url, data={"expiration_time": 600})
-                        if "url" in content:
-                            return download_file(content["url"], output_path)
-                        else:
-                            st.error(f"Unexpected response format for URL: {url}")
-                            return False
-                    except Exception as e:
-                        st.error(f"API error for {url}: {str(e)}")
-                        return False
-                else:
-                    # Direct URL
-                    return download_file(url, output_path)
-            else:
+            if not url.startswith(("http://", "https://")):
                 st.error(f"Invalid URL format: {url}")
                 return False
+            if download_core._is_internal_url(url):
+                headers = {"Content-Type": "application/json", "accept": "application/json"}
+                resp = self.__session.post(
+                    url,
+                    headers=headers,
+                    data=json.dumps({"expiration_time": 600}).encode("utf-8"),
+                )
+                if getattr(resp, "status_code", None) != 200:
+                    st.error(f"API error for {url}: {getattr(resp, 'status_code', 'unknown')}")
+                    return False
+                content = json.loads(resp.content)
+                if "url" in content:
+                    return download_file(content["url"], output_path)
+                st.error(f"Unexpected response format for URL: {url}")
+                return False
+            return download_file(url, output_path)
         except Exception as e:
             st.error(f"Download error for {url}: {str(e)}")
             return False
@@ -1453,6 +1299,9 @@ with tab1:
                 "suite_ids": selected_suite_ids or None,
                 "download_type": "archives" if download_type == "Archives (ZIP)" else "result_json",
                 "phase": phase if download_type == "Archives (ZIP)" else "",
+                "skip_large_file": skip_large_file,
+                "large_file_mb": large_file_mb,
+                "keep_zip_files": keep_zip_files,
             }
             task_id = _enqueue_task("download_results", params)
             if task_id:
@@ -1578,6 +1427,7 @@ with tab2:
                 "project_id": project_id,
                 "job_id": st.session_state.job_id,
                 "suite_id": suite_id or "",
+                "suite_ids": selected_suite_ids or None,
                 "overwrite": overwrite,
                 "scenario_name_filter": scenario_filter or None,
                 "selected_ids": selected_ids,

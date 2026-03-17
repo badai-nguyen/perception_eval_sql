@@ -10,6 +10,7 @@ import os
 import shutil
 import urllib.parse
 from pathlib import Path
+from collections import Counter
 from typing import Any, Callable, Dict, List, Optional
 
 import requests
@@ -37,6 +38,12 @@ def _make_evaluator_session(environment: str = DEFAULT_ENVIRONMENT):
     presigned.mount("http://", HTTPAdapter(max_retries=retries))
     presigned.mount("https://", HTTPAdapter(max_retries=retries))
     return session, presigned
+
+
+def get_evaluator_session(environment: str = DEFAULT_ENVIRONMENT):
+    """Public API: same session as worker. Returns (session, presigned) for the given environment."""
+    os.environ["AUTH_PROFILE"] = environment
+    return _make_evaluator_session(environment)
 
 
 def _is_internal_url(url: str) -> bool:
@@ -137,6 +144,7 @@ def get_case_simulation_log_info(
                 continue
             if "simulation_archive" not in report.get("logs", {}):
                 continue
+            scenario_params = report.get("scenario_parameters") or {}
             result.append({
                 "suite_id": sid,
                 "suite_name": sname,
@@ -145,6 +153,8 @@ def get_case_simulation_log_info(
                 "scenario_name": report["scenario"]["display_name"],
                 "scenario_id": report["scenario"]["id"],
                 "scenario_ver": report["scenario"]["version_id"],
+                "t4_dataset_id": scenario_params.get("t4_dataset_id", ""),
+                "t4_dataset_version_id": scenario_params.get("t4_dataset_version_id", ""),
             })
         if not next_token:
             break
@@ -185,6 +195,7 @@ def download_archive_log(
     *,
     skip_large_file: bool = False,
     large_file_mb: float = 50.0,
+    scenario_name_counts: Optional[Dict[str, int]] = None,
     on_warning: Optional[Callable[[str], None]] = None,
 ) -> bool:
     """Download one log (archive or result JSON) to output_path. Returns True on success."""
@@ -215,7 +226,18 @@ def download_archive_log(
     if not download_url:
         return False
     os.makedirs(output_path, exist_ok=True)
-    dl_filename = log_info["scenario_name"] + "." + fmt
+    safe_scenario = _safe_path_component(log_info["scenario_name"])
+    need_suffix = (
+        scenario_name_counts is None
+        or scenario_name_counts.get(log_info["scenario_name"], 0) > 1
+    )
+    if need_suffix:
+        t4_id = log_info.get("t4_dataset_id", "") or ""
+        fallback_id = log_info.get(log_type, "") or ""
+        unique_id = (t4_id[:8] if t4_id else "") or (fallback_id[:8] if fallback_id else "")
+        dl_filename = f"{safe_scenario}_{unique_id}.{fmt}" if unique_id else f"{safe_scenario}.{fmt}"
+    else:
+        dl_filename = f"{safe_scenario}.{fmt}"
     output_file = os.path.join(output_path, dl_filename)
     try:
         size = _download_file(
@@ -224,7 +246,28 @@ def download_archive_log(
             skip_large_file=skip_large_file,
             large_file_mb=large_file_mb,
         )
-        return size > 0
+        if size <= 0:
+            return False
+        if log_type == "archive_id" and log_info.get("t4_dataset_id"):
+            stem = Path(dl_filename).stem
+            try:
+                sidecar_dir = Path(output_path) / stem
+                sidecar_dir.mkdir(parents=True, exist_ok=True)
+                sidecar_path = sidecar_dir / "t4_metadata.json"
+                with open(sidecar_path, "w", encoding="utf-8") as f:
+                    json.dump(
+                        {
+                            "t4_dataset_id": log_info.get("t4_dataset_id", ""),
+                            "t4_dataset_version_id": log_info.get("t4_dataset_version_id", ""),
+                        },
+                        f,
+                        indent=0,
+                    )
+            except Exception as e:
+                logger.warning("Could not write t4_metadata.json for %s: %s", stem, e)
+                if on_warning:
+                    on_warning(f"Could not write t4_metadata.json for {stem}: {e}")
+        return True
     except Exception as e:
         msg = f"Download failed {dl_filename}: {e}"
         logger.warning("%s", msg)
@@ -303,6 +346,7 @@ def run_download_results(
     if not log_dicts:
         raise RuntimeError("No case reports found for this job/suite")
     os.makedirs(output_path, exist_ok=True)
+    scenario_name_counts = dict(Counter(log_info["scenario_name"] for log_info in log_dicts))
     suite_output_paths: set = set()
     failure_count = 0
     total_attempted = 0
@@ -327,6 +371,7 @@ def run_download_results(
                 out_dir,
                 skip_large_file=skip_large_file,
                 large_file_mb=large_file_mb,
+                scenario_name_counts=scenario_name_counts,
                 on_warning=on_warning,
             )
         else:
@@ -339,6 +384,7 @@ def run_download_results(
                 "result_json_id",
                 "json",
                 out_dir,
+                scenario_name_counts=scenario_name_counts,
                 on_warning=on_warning,
             )
         status = "success" if ok else "failed"
@@ -368,6 +414,7 @@ def run_download_scenarios(
     *,
     scenario_name_filter: Optional[str] = None,
     selected_ids: Optional[List[str]] = None,
+    suite_ids: Optional[List[str]] = None,
     on_progress: Optional[Callable[[str], None]] = None,
     on_warning: Optional[Callable[[str], None]] = None,
 ) -> tuple:
@@ -387,7 +434,7 @@ def run_download_scenarios(
     auth_session, presigned = _make_evaluator_session(env)
     suite_id = suite_id or ""
     log_dicts = get_case_simulation_log_info(
-        auth_session, base_url, project_id, job_id, suite_id=suite_id, suite_ids=None
+        auth_session, base_url, project_id, job_id, suite_id=suite_id, suite_ids=suite_ids
     )
     if scenario_name_filter or selected_ids:
         filtered = []
@@ -407,7 +454,7 @@ def run_download_scenarios(
         scenario_id = log_info["scenario_id"]
         if on_progress:
             on_progress(f"Downloading scenario {i+1}/{len(log_dicts)}: {scenario_name}")
-        out_dir = _get_output_path_for_log(output_dir, log_info, suite_id, None)
+        out_dir = _get_output_path_for_log(output_dir, log_info, suite_id, suite_ids)
         scenario_dir = os.path.join(out_dir, scenario_name)
         yaml_path = os.path.join(scenario_dir, "scenario.yaml")
         if os.path.exists(yaml_path) and not overwrite:
@@ -429,11 +476,12 @@ def run_download_scenarios(
                 on_warning(msg)
             raise
     # Download result JSON files and organize (same as tab1 "Result JSON only")
-    suite_output_paths = {_get_output_path_for_log(output_dir, log_info, suite_id, None) for log_info in log_dicts}
+    suite_output_paths = {_get_output_path_for_log(output_dir, log_info, suite_id, suite_ids) for log_info in log_dicts}
+    scenario_name_counts = dict(Counter(log_info["scenario_name"] for log_info in log_dicts))
     failure_count = 0
     rows: List[Dict[str, Any]] = []
     for log_info in log_dicts:
-        out_dir = _get_output_path_for_log(output_dir, log_info, suite_id, None)
+        out_dir = _get_output_path_for_log(output_dir, log_info, suite_id, suite_ids)
         ok = download_archive_log(
             auth_session,
             presigned,
@@ -443,6 +491,7 @@ def run_download_scenarios(
             "result_json_id",
             "json",
             out_dir,
+            scenario_name_counts=scenario_name_counts,
             on_warning=on_warning,
         )
         status = "success" if ok else "failed"

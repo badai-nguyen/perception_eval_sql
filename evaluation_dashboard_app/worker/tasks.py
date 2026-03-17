@@ -157,6 +157,9 @@ def job_download_results(task_id: str, parameters: Dict[str, Any]) -> None:
         suite_ids = parameters.get("suite_ids")  # optional list
         download_type = parameters.get("download_type", "archives")  # archives | result_json
         phase = parameters.get("phase", "first")
+        skip_large_file = parameters.get("skip_large_file", False)
+        large_file_mb = float(parameters.get("large_file_mb", 50.0))
+        keep_zip_files = parameters.get("keep_zip_files", False)
         if not all([output_path, project_id, job_id]):
             update_task_status(task_id, "failed", error_message="Missing output_path, project_id, or job_id")
             return
@@ -170,6 +173,9 @@ def job_download_results(task_id: str, parameters: Dict[str, Any]) -> None:
             download_type=download_type,
             phase=phase,
             suite_ids=suite_ids,
+            skip_large_file=skip_large_file,
+            large_file_mb=large_file_mb,
+            keep_zip_files=keep_zip_files,
             on_progress=on_progress,
             on_warning=on_warning,
         )
@@ -213,6 +219,7 @@ def job_download_scenarios(task_id: str, parameters: Dict[str, Any]) -> None:
         project_id = parameters.get("project_id")
         job_id = parameters.get("job_id")
         suite_id = parameters.get("suite_id")
+        suite_ids = parameters.get("suite_ids")
         overwrite = parameters.get("overwrite", False)
         scenario_name_filter = parameters.get("scenario_name_filter")
         selected_ids = parameters.get("selected_ids")
@@ -229,6 +236,7 @@ def job_download_scenarios(task_id: str, parameters: Dict[str, Any]) -> None:
             overwrite=overwrite,
             scenario_name_filter=scenario_name_filter,
             selected_ids=selected_ids,
+            suite_ids=suite_ids,
             on_progress=on_progress,
             on_warning=on_warning,
         )
