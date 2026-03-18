@@ -11,7 +11,6 @@ from typing import Optional, List, Tuple
 from lib.path_utils import path_display
 
 st.set_page_config(layout="wide", page_title="Object Detection")
-st.title("Object Detection Evaluation Dashboard")
 
 # =============================
 # Session state from Overview (mode, run paths)
@@ -19,6 +18,8 @@ st.title("Object Detection Evaluation Dashboard")
 if "runA" not in st.session_state:
     st.warning("Please load data from the **Overview** page first (select mode and run(s)).")
     st.stop()
+
+st.title("Object Detection Evaluation Dashboard")
 
 mode = st.session_state.get("mode", "Single Mode")
 runA = st.session_state["runA"]
@@ -214,6 +215,7 @@ def build_filter_clause(filters: dict,*, enable_dist_h: bool = True) -> str:
         conditions.append(f"dist_h < {filters['max_eval_range']}")
     
     return " AND ".join(conditions) if conditions else "1=1"
+
 
 # =============================
 # Parquet files from run path(s)
@@ -743,6 +745,147 @@ if not single_mode:
             """
             df_improved = con.execute(query).df()
             if not df_improved.empty:
+                query_frame_p5 = f"""
+                        WITH base_gt AS (
+                            SELECT
+                                t4dataset_id,
+                                frame_index,
+                                uuid AS gt_uuid,
+                                COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_base,
+                                COALESCE(MAX(try_cast(suite_name AS VARCHAR)), '') AS suite_name,
+                                COALESCE(MAX(try_cast(scenario_name AS VARCHAR)), '') AS scenario_name,
+                                COALESCE(MAX(try_cast(t4dataset_name AS VARCHAR)), '') AS t4dataset_name
+                            FROM view_eval_flat
+                            WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL
+                                AND {filter_clause_base}
+                            GROUP BY 1, 2, 3
+                        ),
+                        comp_gt AS (
+                            SELECT
+                                t4dataset_id,
+                                frame_index,
+                                uuid AS gt_uuid,
+                                COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_comp,
+                                COALESCE(MAX(try_cast(suite_name AS VARCHAR)), '') AS suite_name,
+                                COALESCE(MAX(try_cast(scenario_name AS VARCHAR)), '') AS scenario_name,
+                                COALESCE(MAX(try_cast(t4dataset_name AS VARCHAR)), '') AS t4dataset_name
+                            FROM {comp_flat}
+                            WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL
+                                AND {filter_clause_comp_p5}
+                            GROUP BY 1, 2, 3
+                        ),
+                        joined AS (
+                            SELECT
+                                COALESCE(CAST(b.t4dataset_id AS VARCHAR), CAST(c.t4dataset_id AS VARCHAR)) AS t4dataset_id,
+                                COALESCE(CAST(b.frame_index AS VARCHAR), CAST(c.frame_index AS VARCHAR)) AS frame_index,
+                                COALESCE(b.gt_uuid, c.gt_uuid) AS gt_uuid,
+                                COALESCE(b.tp_base, FALSE) AS tp_base,
+                                COALESCE(c.tp_comp, FALSE) AS tp_comp,
+                                COALESCE(b.suite_name, c.suite_name, '') AS suite_name,
+                                COALESCE(b.scenario_name, c.scenario_name, '') AS scenario_name,
+                                COALESCE(b.t4dataset_name, c.t4dataset_name, '') AS t4dataset_name
+                            FROM base_gt b
+                            FULL OUTER JOIN comp_gt c
+                                ON b.t4dataset_id = c.t4dataset_id
+                               AND b.frame_index = c.frame_index
+                               AND b.gt_uuid = c.gt_uuid
+                        )
+                        SELECT
+                            t4dataset_id,
+                            frame_index,
+                            scenario_name,
+                            suite_name,
+                            t4dataset_name,
+                            CAST(COUNT(*) FILTER (WHERE TRUE) AS DOUBLE) AS total_gt,
+                            CAST(COUNT(*) FILTER (WHERE NOT tp_base AND tp_comp) AS DOUBLE) AS improved_cnt,
+                            CAST(COUNT(*) FILTER (WHERE tp_base AND NOT tp_comp) AS DOUBLE) AS degraded_cnt,
+                            CAST(COUNT(*) FILTER (WHERE tp_base AND tp_comp) AS DOUBLE) AS both_tp_cnt,
+                            CAST(COUNT(*) FILTER (WHERE NOT tp_base AND NOT tp_comp) AS DOUBLE) AS both_fn_cnt,
+                            CAST(SUM((CASE WHEN tp_comp THEN 1 ELSE 0 END) - (CASE WHEN tp_base THEN 1 ELSE 0 END)) AS DOUBLE) AS net_tp_delta
+                        FROM joined
+                        GROUP BY t4dataset_id, frame_index, suite_name, scenario_name, t4dataset_name
+                        ORDER BY net_tp_delta DESC
+                        """
+                query_object_p5 = f"""
+                        WITH base_gt AS (
+                            SELECT
+                                t4dataset_id,
+                                frame_index,
+                                uuid AS gt_uuid,
+                                COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_base,
+                                COALESCE(MAX(try_cast(scenario_name AS VARCHAR)), '') AS scenario_name
+                            FROM view_eval_flat
+                            WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL
+                                AND {filter_clause_base}
+                            GROUP BY 1, 2, 3
+                        ),
+                        comp_gt AS (
+                            SELECT
+                                t4dataset_id,
+                                frame_index,
+                                uuid AS gt_uuid,
+                                COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_comp,
+                                COALESCE(MAX(try_cast(scenario_name AS VARCHAR)), '') AS scenario_name
+                            FROM {comp_flat}
+                            WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL
+                                AND {filter_clause_comp_p5}
+                            GROUP BY 1, 2, 3
+                        ),
+                        joined AS (
+                            SELECT
+                                COALESCE(CAST(b.t4dataset_id AS VARCHAR), CAST(c.t4dataset_id AS VARCHAR)) AS t4dataset_id,
+                                COALESCE(CAST(b.frame_index AS VARCHAR), CAST(c.frame_index AS VARCHAR)) AS frame_index,
+                                COALESCE(b.gt_uuid, c.gt_uuid) AS gt_uuid,
+                                COALESCE(b.tp_base, FALSE) AS tp_base,
+                                COALESCE(c.tp_comp, FALSE) AS tp_comp,
+                                COALESCE(b.scenario_name, c.scenario_name, '') AS scenario_name
+                            FROM base_gt b
+                            FULL OUTER JOIN comp_gt c
+                                ON b.t4dataset_id = c.t4dataset_id
+                               AND b.frame_index = c.frame_index
+                               AND b.gt_uuid = c.gt_uuid
+                        ),
+                        obj_attrs AS (
+                            SELECT
+                                t4dataset_id,
+                                frame_index,
+                                uuid,
+                                MAX(CAST(label AS VARCHAR)) AS label,
+                                MAX(dist_h) AS dist_h
+                            FROM view_eval_flat
+                            WHERE source = 'GT'
+                            GROUP BY 1, 2, 3
+                        )
+                        SELECT
+                            j.t4dataset_id,
+                            j.frame_index,
+                            j.gt_uuid,
+                            COALESCE(e.label, '') AS label,
+                            COALESCE(e.dist_h, 0.0) AS dist_h,
+                            j.scenario_name,
+                            CASE
+                                WHEN NOT j.tp_base AND j.tp_comp THEN 'improved'
+                                WHEN j.tp_base AND NOT j.tp_comp THEN 'degraded'
+                                WHEN j.tp_base AND j.tp_comp THEN 'both_tp'
+                                ELSE 'both_fn'
+                            END AS change_type,
+                            j.tp_base,
+                            j.tp_comp
+                        FROM joined j
+                        LEFT JOIN obj_attrs e
+                            ON CAST(j.t4dataset_id AS VARCHAR) = CAST(e.t4dataset_id AS VARCHAR)
+                           AND j.frame_index = CAST(e.frame_index AS VARCHAR)
+                           AND j.gt_uuid = e.uuid
+                        ORDER BY change_type, j.t4dataset_id, j.frame_index
+                        """
+                try:
+                    df_by_frame = con.execute(query_frame_p5).df()
+                except Exception:
+                    df_by_frame = pd.DataFrame()
+                try:
+                    df_by_object_full = con.execute(query_object_p5).df()
+                except Exception:
+                    df_by_object_full = pd.DataFrame()
                 with st.expander(f"Run {lbl} vs A", expanded=(len(runs) == 2)):
                     st.dataframe(df_improved, width="stretch")
 
@@ -818,75 +961,10 @@ if not single_mode:
 
                     # By frame: improved/degraded per frame
                     with st.expander("By frame"):
-                        query_frame = f"""
-                        WITH base_gt AS (
-                            SELECT
-                                t4dataset_id,
-                                frame_index,
-                                uuid AS gt_uuid,
-                                COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_base,
-                                COALESCE(MAX(try_cast(suite_name AS VARCHAR)), '') AS suite_name,
-                                COALESCE(MAX(try_cast(scenario_name AS VARCHAR)), '') AS scenario_name,
-                                COALESCE(MAX(try_cast(t4dataset_name AS VARCHAR)), '') AS t4dataset_name
-                            FROM view_eval_flat
-                            WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL
-                                AND {filter_clause_base}
-                            GROUP BY 1, 2, 3
-                        ),
-                        comp_gt AS (
-                            SELECT
-                                t4dataset_id,
-                                frame_index,
-                                uuid AS gt_uuid,
-                                COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_comp,
-                                COALESCE(MAX(try_cast(suite_name AS VARCHAR)), '') AS suite_name,
-                                COALESCE(MAX(try_cast(scenario_name AS VARCHAR)), '') AS scenario_name,
-                                COALESCE(MAX(try_cast(t4dataset_name AS VARCHAR)), '') AS t4dataset_name
-                            FROM {comp_flat}
-                            WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL
-                                AND {filter_clause_comp_p5}
-                            GROUP BY 1, 2, 3
-                        ),
-                        joined AS (
-                            SELECT
-                                COALESCE(CAST(b.t4dataset_id AS VARCHAR), CAST(c.t4dataset_id AS VARCHAR)) AS t4dataset_id,
-                                COALESCE(CAST(b.frame_index AS VARCHAR), CAST(c.frame_index AS VARCHAR)) AS frame_index,
-                                COALESCE(b.gt_uuid, c.gt_uuid) AS gt_uuid,
-                                COALESCE(b.tp_base, FALSE) AS tp_base,
-                                COALESCE(c.tp_comp, FALSE) AS tp_comp,
-                                COALESCE(b.suite_name, c.suite_name, '') AS suite_name,
-                                COALESCE(b.scenario_name, c.scenario_name, '') AS scenario_name,
-                                COALESCE(b.t4dataset_name, c.t4dataset_name, '') AS t4dataset_name
-                            FROM base_gt b
-                            FULL OUTER JOIN comp_gt c
-                                ON b.t4dataset_id = c.t4dataset_id
-                               AND b.frame_index = c.frame_index
-                               AND b.gt_uuid = c.gt_uuid
-                        )
-                        SELECT
-                            t4dataset_id,
-                            frame_index,
-                            scenario_name,
-                            suite_name,
-                            t4dataset_name,
-                            CAST(COUNT(*) FILTER (WHERE TRUE) AS DOUBLE) AS total_gt,
-                            CAST(COUNT(*) FILTER (WHERE NOT tp_base AND tp_comp) AS DOUBLE) AS improved_cnt,
-                            CAST(COUNT(*) FILTER (WHERE tp_base AND NOT tp_comp) AS DOUBLE) AS degraded_cnt,
-                            CAST(COUNT(*) FILTER (WHERE tp_base AND tp_comp) AS DOUBLE) AS both_tp_cnt,
-                            CAST(COUNT(*) FILTER (WHERE NOT tp_base AND NOT tp_comp) AS DOUBLE) AS both_fn_cnt,
-                            CAST(SUM((CASE WHEN tp_comp THEN 1 ELSE 0 END) - (CASE WHEN tp_base THEN 1 ELSE 0 END)) AS DOUBLE) AS net_tp_delta
-                        FROM joined
-                        GROUP BY t4dataset_id, frame_index, suite_name, scenario_name, t4dataset_name
-                        ORDER BY net_tp_delta DESC
-                        """
-                        try:
-                            df_by_frame = con.execute(query_frame).df()
-                            if not df_by_frame.empty:
-                                st.dataframe(df_by_frame, hide_index=True)
-                            else:
-                                st.caption("No frame breakdown.")
-                        except Exception as e_frame:
-                            st.caption(f"By frame: {e_frame}")
+                        if not df_by_frame.empty:
+                            st.dataframe(df_by_frame, hide_index=True)
+                        else:
+                            st.caption("No frame breakdown.")
 
                     # By object: per-object list with change_type, label, dist_h
                     with st.expander("By object"):
@@ -896,91 +974,21 @@ if not single_mode:
                             key=f"change_type_{lbl}_{idx}",
                             help="Filter objects by TP change between runs.",
                         )
-                        query_object = f"""
-                        WITH base_gt AS (
-                            SELECT
-                                t4dataset_id,
-                                frame_index,
-                                uuid AS gt_uuid,
-                                COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_base,
-                                COALESCE(MAX(try_cast(scenario_name AS VARCHAR)), '') AS scenario_name
-                            FROM view_eval_flat
-                            WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL
-                                AND {filter_clause_base}
-                            GROUP BY 1, 2, 3
-                        ),
-                        comp_gt AS (
-                            SELECT
-                                t4dataset_id,
-                                frame_index,
-                                uuid AS gt_uuid,
-                                COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_comp,
-                                COALESCE(MAX(try_cast(scenario_name AS VARCHAR)), '') AS scenario_name
-                            FROM {comp_flat}
-                            WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL
-                                AND {filter_clause_comp_p5}
-                            GROUP BY 1, 2, 3
-                        ),
-                        joined AS (
-                            SELECT
-                                COALESCE(CAST(b.t4dataset_id AS VARCHAR), CAST(c.t4dataset_id AS VARCHAR)) AS t4dataset_id,
-                                COALESCE(CAST(b.frame_index AS VARCHAR), CAST(c.frame_index AS VARCHAR)) AS frame_index,
-                                COALESCE(b.gt_uuid, c.gt_uuid) AS gt_uuid,
-                                COALESCE(b.tp_base, FALSE) AS tp_base,
-                                COALESCE(c.tp_comp, FALSE) AS tp_comp,
-                                COALESCE(b.scenario_name, c.scenario_name, '') AS scenario_name
-                            FROM base_gt b
-                            FULL OUTER JOIN comp_gt c
-                                ON b.t4dataset_id = c.t4dataset_id
-                               AND b.frame_index = c.frame_index
-                               AND b.gt_uuid = c.gt_uuid
-                        ),
-                        obj_attrs AS (
-                            SELECT
-                                t4dataset_id,
-                                frame_index,
-                                uuid,
-                                MAX(CAST(label AS VARCHAR)) AS label,
-                                MAX(dist_h) AS dist_h
-                            FROM view_eval_flat
-                            WHERE source = 'GT'
-                            GROUP BY 1, 2, 3
-                        )
-                        SELECT
-                            j.t4dataset_id,
-                            j.frame_index,
-                            j.gt_uuid,
-                            COALESCE(e.label, '') AS label,
-                            COALESCE(e.dist_h, 0.0) AS dist_h,
-                            j.scenario_name,
-                            CASE
-                                WHEN NOT j.tp_base AND j.tp_comp THEN 'improved'
-                                WHEN j.tp_base AND NOT j.tp_comp THEN 'degraded'
-                                WHEN j.tp_base AND j.tp_comp THEN 'both_tp'
-                                ELSE 'both_fn'
-                            END AS change_type,
-                            j.tp_base,
-                            j.tp_comp
-                        FROM joined j
-                        LEFT JOIN obj_attrs e
-                            ON CAST(j.t4dataset_id AS VARCHAR) = CAST(e.t4dataset_id AS VARCHAR)
-                           AND j.frame_index = CAST(e.frame_index AS VARCHAR)
-                           AND j.gt_uuid = e.uuid
-                        ORDER BY change_type, j.t4dataset_id, j.frame_index
-                        """
-                        try:
-                            df_by_object = con.execute(query_object).df()
-                            if not df_by_object.empty:
-                                if change_type_filter != "all":
-                                    df_by_object = df_by_object[df_by_object["change_type"] == change_type_filter]
-                                if len(df_by_object) > 500:
-                                    st.caption(f"Showing first 500 of {len(df_by_object)} objects.")
-                                    df_by_object = df_by_object.head(500)
-                                st.dataframe(df_by_object, hide_index=True)
+                        if not df_by_object_full.empty:
+                            df_obj_show = df_by_object_full
+                            if change_type_filter != "all":
+                                df_obj_show = df_obj_show[
+                                    df_obj_show["change_type"] == change_type_filter
+                                ]
+                            if len(df_obj_show) > 500:
+                                st.caption(
+                                    f"Showing first 500 of {len(df_obj_show)} objects."
+                                )
+                                st.dataframe(df_obj_show.head(500), hide_index=True)
                             else:
-                                st.caption("No object breakdown.")
-                        except Exception as e_obj:
-                            st.caption(f"By object: {e_obj}")
+                                st.dataframe(df_obj_show, hide_index=True)
+                        else:
+                            st.caption("No object breakdown.")
             else:
                 st.caption(f"Run {lbl} vs A: No data.")
         except Exception as e:
@@ -993,7 +1001,6 @@ if single_mode:
     st.subheader("Frame / Object level: Where are the misses?")
     try:
         with st.expander("FN by frame and by object", expanded=True):
-            # By frame: FN count per (t4dataset_id, frame_index, scenario_name)
             query_fn_frame = f"""
             SELECT
                 t4dataset_id,
@@ -1007,13 +1014,6 @@ if single_mode:
             ORDER BY fn_cnt DESC
             """
             df_fn_frame = con.execute(query_fn_frame).df()
-            if not df_fn_frame.empty:
-                st.markdown("**FN count by frame**")
-                st.dataframe(df_fn_frame, hide_index=True)
-            else:
-                st.caption("No FN by frame.")
-
-            # By object: list of FN objects
             query_fn_object = f"""
             SELECT
                 t4dataset_id,
@@ -1028,6 +1028,11 @@ if single_mode:
             ORDER BY t4dataset_id, frame_index, uuid
             """
             df_fn_object = con.execute(query_fn_object).df()
+            if not df_fn_frame.empty:
+                st.markdown("**FN count by frame**")
+                st.dataframe(df_fn_frame, hide_index=True)
+            else:
+                st.caption("No FN by frame.")
             if not df_fn_object.empty:
                 st.markdown("**FN objects**")
                 if len(df_fn_object) > 500:

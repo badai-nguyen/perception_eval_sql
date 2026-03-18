@@ -200,8 +200,15 @@ topic_names = con.execute(
     scene_params
 ).df()["v"].dropna().tolist()
 if not topic_names:
-    st.warning("No topic_name for selected scene.")
-    st.stop()
+    # Clear scene from link so selectbox falls back to first available (avoids "No topic_name" loop)
+    for key in ("bbox_viewer_scenario", "bbox_viewer_suite"):
+        if key in st.session_state:
+            del st.session_state[key]
+    st.warning(
+        "No topic_name for the selected scene (from Detection Stats link). "
+        "Cleared scene selection; please choose a scene from the sidebar."
+    )
+    st.rerun()
 
 with st.sidebar:
     selected_topic = st.selectbox("topic_name (single)", topic_names)
@@ -348,13 +355,25 @@ else:
         st.markdown(f":information_source: **Overlay view:** All runs on one BEV: {line_legend}. Differences show where detections disagree.")
 
 # ----------------------------
-# Frame slider
+# Frame slider (support pre-set from Detection Stats link)
 # ----------------------------
+if "bbox_viewer_frame_index" in st.session_state:
+    try:
+        requested = int(st.session_state["bbox_viewer_frame_index"])
+        st.session_state["bbox_viewer_frame"] = max(
+            int(df.frame_index.min()),
+            min(int(df.frame_index.max()), requested),
+        )
+    except (TypeError, ValueError):
+        st.session_state["bbox_viewer_frame"] = int(df.frame_index.min())
+    del st.session_state["bbox_viewer_frame_index"]
 frame = st.slider(
     "Frame index",
     int(df.frame_index.min()),
     int(df.frame_index.max()),
+    value=st.session_state.get("bbox_viewer_frame", int(df.frame_index.min())),
     step=1,
+    key="bbox_viewer_frame",
 )
 df_frame = df[df.frame_index == frame]
 
