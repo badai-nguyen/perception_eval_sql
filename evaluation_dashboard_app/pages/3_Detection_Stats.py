@@ -763,6 +763,65 @@ def _baobab_hierarchy_from_objects(
     return out
 
 
+def _comparison_lens_treemap_df(
+    names: pd.Series,
+    improved: pd.Series,
+    degraded: pd.Series,
+    root_title: str,
+) -> pd.DataFrame:
+    """Rows for px.treemap path root → Improved|Degraded → item (area = n)."""
+    rows = []
+    for i in range(len(names)):
+        nm = str(names.iloc[i]).strip() or "—"
+        if len(nm) > 72:
+            nm = nm[:69] + "…"
+        ip = float(improved.iloc[i]) if pd.notna(improved.iloc[i]) else 0.0
+        dg = float(degraded.iloc[i]) if pd.notna(degraded.iloc[i]) else 0.0
+        if ip > 0:
+            rows.append(
+                {"root": root_title, "side": "Improved", "item": nm, "n": ip}
+            )
+        if dg > 0:
+            rows.append(
+                {"root": root_title, "side": "Degraded", "item": nm, "n": dg}
+            )
+    return pd.DataFrame(rows)
+
+
+def _plot_comparison_lens_treemap(
+    tdf: pd.DataFrame,
+    st_key: str,
+) -> None:
+    if tdf is None or tdf.empty:
+        st.caption("_No data for this view._")
+        return
+    fig = px.treemap(
+        tdf,
+        path=["root", "side", "item"],
+        values="n",
+        color="side",
+        color_discrete_map={"Improved": "#1a9850", "Degraded": "#d73027"},
+    )
+    fig.update_traces(
+        textfont_size=12,
+        textinfo="label+value+percent parent",
+        hovertemplate=(
+            "<b>%{label}</b><br>"
+            "GT objects: %{value:.0f}<br>"
+            "% of parent: %{percentParent}<extra></extra>"
+        ),
+        marker_line_width=1.5,
+        marker_line_color="rgba(255,255,255,0.45)",
+        root_color="rgba(240,240,245,0.95)",
+    )
+    fig.update_layout(
+        margin=dict(t=4, l=2, r=2, b=2),
+        height=430,
+        paper_bgcolor="rgba(0,0,0,0)",
+    )
+    st.plotly_chart(fig, use_container_width=True, key=st_key)
+
+
 if not single_mode:
     st.subheader("Perception diff (vs baseline A)")
     st.caption(
@@ -986,56 +1045,6 @@ if not single_mode:
                     df_by_object_full = con.execute(query_object_p5).df()
                 except Exception:
                     df_by_object_full = pd.DataFrame()
-                query_scenario_label = f"""
-                    WITH base_gt AS (
-                        SELECT
-                            t4dataset_id,
-                            frame_index,
-                            uuid AS gt_uuid,
-                            COALESCE(MAX(try_cast(label AS VARCHAR)), '') AS label,
-                            COALESCE(MAX(try_cast(scenario_name AS VARCHAR)), '') AS scenario_name,
-                            COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_base
-                        FROM view_eval_flat
-                        WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL
-                            AND {filter_clause_base}
-                        GROUP BY 1, 2, 3
-                    ),
-                    comp_gt AS (
-                        SELECT
-                            t4dataset_id,
-                            frame_index,
-                            uuid AS gt_uuid,
-                            COALESCE(MAX(try_cast(label AS VARCHAR)), '') AS label,
-                            COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_comp
-                        FROM {comp_flat}
-                        WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL
-                            AND {filter_clause_comp_p5}
-                        GROUP BY 1, 2, 3
-                    ),
-                    joined AS (
-                        SELECT
-                            COALESCE(b.scenario_name, c.scenario_name, '') AS scenario_name,
-                            COALESCE(b.label, c.label) AS label,
-                            COALESCE(b.tp_base, FALSE) AS tp_base,
-                            COALESCE(c.tp_comp, FALSE) AS tp_comp
-                        FROM base_gt b
-                        FULL OUTER JOIN comp_gt c
-                            ON b.t4dataset_id = c.t4dataset_id
-                           AND b.frame_index = c.frame_index
-                           AND b.gt_uuid = c.gt_uuid
-                    )
-                    SELECT
-                        scenario_name,
-                        label,
-                        CAST(SUM(CASE WHEN NOT tp_base AND tp_comp THEN 1 ELSE 0 END) AS DOUBLE) AS improved_cnt,
-                        CAST(SUM(CASE WHEN tp_base AND NOT tp_comp THEN 1 ELSE 0 END) AS DOUBLE) AS degraded_cnt
-                    FROM joined
-                    GROUP BY scenario_name, label
-                    """
-                try:
-                    df_scenario_label = con.execute(query_scenario_label).df()
-                except Exception:
-                    df_scenario_label = pd.DataFrame()
 
                 tot_imp = float(df_improved["improved_cnt"].sum())
                 tot_deg = float(df_improved["degraded_cnt"].sum())
@@ -1175,8 +1184,7 @@ if not single_mode:
                                 else:
                                     st.caption(f"No **{ct}** objects to chart.")
 
-                    # --- By label: stacked improved vs degraded + net delta ---
-                    st.markdown("**By label** (improved vs degraded)")
+                    # --- Comparison lens: label / scenario / frame (treemap trio, Baobab-aligned) ---
                     query_label = f"""
                     WITH base_gt AS (
                         SELECT
@@ -1225,54 +1233,13 @@ if not single_mode:
                     GROUP BY label
                     ORDER BY net_tp_delta DESC
                     """
+                    df_by_label = pd.DataFrame()
                     try:
                         df_by_label = con.execute(query_label).df()
-                        if not df_by_label.empty:
-                            fig_stack = go.Figure()
-                            fig_stack.add_trace(
-                                go.Bar(
-                                    name="Degraded",
-                                    x=df_by_label["label"],
-                                    y=df_by_label["degraded_cnt"],
-                                    marker_color="#cc4444",
-                                )
-                            )
-                            fig_stack.add_trace(
-                                go.Bar(
-                                    name="Improved",
-                                    x=df_by_label["label"],
-                                    y=df_by_label["improved_cnt"],
-                                    marker_color="#44aa44",
-                                )
-                            )
-                            fig_stack.update_layout(
-                                barmode="group",
-                                title=f"Improved vs degraded by label ({lbl} vs A)",
-                                xaxis_title="Label",
-                                yaxis_title="Count (GT objects)",
-                                legend=dict(orientation="h", yanchor="bottom", y=1.02),
-                            )
-                            st.plotly_chart(fig_stack, use_container_width=True)
-                            with st.expander("Label table (full)"):
-                                st.dataframe(df_by_label, hide_index=True)
-                            fig_label = px.bar(
-                                df_by_label,
-                                x="label",
-                                y="net_tp_delta",
-                                title=f"Net TP delta by label ({lbl} vs A)",
-                                labels={"label": "Label", "net_tp_delta": "Net TP delta"},
-                                color="net_tp_delta",
-                                color_continuous_scale="RdYlGn",
-                                color_continuous_midpoint=0,
-                            )
-                            st.plotly_chart(fig_label, use_container_width=True)
-                        else:
-                            st.caption("No label breakdown.")
                     except Exception as e_label:
-                        st.caption(f"By label: {e_label}")
+                        st.caption(f"Label query: {e_label}")
 
-                    # --- Top scenarios (degraded-first) ---
-                    st.markdown("**Hotspots: scenarios** (by degraded count)")
+                    scen_agg = pd.DataFrame()
                     if not df_improved.empty:
                         scen_agg = (
                             df_improved.groupby("scenario_name", dropna=False)
@@ -1282,125 +1249,111 @@ if not single_mode:
                             )
                             .reset_index()
                         )
-                        scen_agg["net_tp_delta"] = (
-                            scen_agg["improved_cnt"] - scen_agg["degraded_cnt"]
-                        )
                         scen_agg = scen_agg.sort_values(
                             by=["degraded_cnt", "improved_cnt"],
                             ascending=[False, True],
                         )
-                        top_scen_n = min(20, len(scen_agg))
-                        scen_top = scen_agg.head(top_scen_n)
-                        fig_scen = go.Figure()
-                        fig_scen.add_trace(
-                            go.Bar(
-                                y=scen_top["scenario_name"].astype(str),
-                                x=scen_top["degraded_cnt"],
-                                name="Degraded",
-                                orientation="h",
-                                marker_color="#cc4444",
-                            )
-                        )
-                        fig_scen.add_trace(
-                            go.Bar(
-                                y=scen_top["scenario_name"].astype(str),
-                                x=scen_top["improved_cnt"],
-                                name="Improved",
-                                orientation="h",
-                                marker_color="#44aa44",
-                            )
-                        )
-                        fig_scen.update_layout(
-                            barmode="group",
-                            title=f"Top {top_scen_n} scenarios by degraded ({lbl} vs A)",
-                            xaxis_title="Count",
-                            yaxis_title="scenario_name",
-                            height=max(280, 24 * top_scen_n),
-                            legend=dict(orientation="h", yanchor="bottom", y=1.02),
-                        )
-                        st.plotly_chart(fig_scen, use_container_width=True)
-                        with st.expander("All scenarios (table)"):
-                            st.dataframe(scen_agg, hide_index=True, width="stretch")
-                    else:
-                        st.caption("No scenario aggregates.")
 
-                    # --- Top frames by degraded ---
-                    st.markdown("**Hotspots: frames** (sorted by degraded)")
                     df_frame_sorted = pd.DataFrame()
                     if not df_by_frame.empty:
                         df_frame_sorted = df_by_frame.sort_values(
                             by=["degraded_cnt", "improved_cnt"],
                             ascending=[False, True],
                         ).reset_index(drop=True)
-                        top_f = df_frame_sorted.head(20)
-                        # Use scenario_name (not suite_name) for frame labels
-                        lbl_f = (
-                            top_f["scenario_name"].astype(str).str.slice(0, 40)
-                            + " | f"
-                            + top_f["frame_index"].astype(str)
-                        )
-                        fig_fr = go.Figure()
-                        fig_fr.add_trace(
-                            go.Bar(
-                                y=lbl_f,
-                                x=top_f["degraded_cnt"],
-                                name="Degraded",
-                                orientation="h",
-                                marker_color="#cc4444",
-                            )
-                        )
-                        fig_fr.add_trace(
-                            go.Bar(
-                                y=lbl_f,
-                                x=top_f["improved_cnt"],
-                                name="Improved",
-                                orientation="h",
-                                marker_color="#44aa44",
-                            )
-                        )
-                        fig_fr.update_layout(
-                            barmode="group",
-                            title="Top 20 frames by degraded count (scenario | frame)",
-                            xaxis_title="Count",
-                            yaxis_title="Scenario name | frame index",
-                            height=max(320, 22 * len(top_f)),
-                            legend=dict(orientation="h", yanchor="bottom", y=1.02),
-                        )
-                        st.plotly_chart(fig_fr, use_container_width=True)
-                    else:
-                        st.caption("No per-frame breakdown for this comparison.")
 
-                    # --- Heatmap scenario × label (degraded), capped scenarios ---
-                    if not df_scenario_label.empty and df_scenario_label["degraded_cnt"].sum() > 0:
-                        st.markdown("**Heatmap: scenario × label (degraded)**")
-                        scen_deg = (
-                            df_scenario_label.groupby("scenario_name")["degraded_cnt"]
-                            .sum()
-                            .sort_values(ascending=False)
-                        )
-                        cap = 25
-                        top_scenarios = list(scen_deg.head(cap).index)
-                        sl = df_scenario_label[
-                            df_scenario_label["scenario_name"].isin(top_scenarios)
-                        ]
-                        if len(sl) > 0:
-                            pivot = sl.pivot_table(
-                                index="scenario_name",
-                                columns="label",
-                                values="degraded_cnt",
-                                aggfunc="sum",
-                                fill_value=0,
+                    root_lens = f"{lbl} vs A"
+                    st.divider()
+                    st.markdown("##### Comparison lens")
+                    st.caption(
+                        "Same encoding as the hierarchical view above: **tile area ∝ GT count**, "
+                        "**green = improved**, **red = degraded**. "
+                        "Three zoom levels — **class**, **scenario**, **frame**."
+                    )
+                    lc1, lc2, lc3 = st.columns(3, gap="small")
+                    with lc1:
+                        st.markdown("**By class**")
+                        if not df_by_label.empty:
+                            tdf_l = _comparison_lens_treemap_df(
+                                df_by_label["label"],
+                                df_by_label["improved_cnt"],
+                                df_by_label["degraded_cnt"],
+                                root_lens,
                             )
-                            fig_hm = px.imshow(
-                                pivot.values,
-                                x=list(pivot.columns),
-                                y=list(pivot.index),
-                                labels=dict(x="Label", y="Scenario", color="Degraded"),
-                                title=f"Degraded counts (top {len(pivot)} scenarios)",
-                                color_continuous_scale="Reds",
-                                aspect="auto",
+                            _plot_comparison_lens_treemap(
+                                tdf_l, f"p5_lens_lab_{lbl}_{idx}"
                             )
-                            st.plotly_chart(fig_hm, use_container_width=True)
+                        else:
+                            st.caption("_No label data._")
+                    with lc2:
+                        st.markdown("**By scenario**")
+                        if not scen_agg.empty:
+                            tdf_s = _comparison_lens_treemap_df(
+                                scen_agg["scenario_name"].astype(str),
+                                scen_agg["improved_cnt"],
+                                scen_agg["degraded_cnt"],
+                                root_lens,
+                            )
+                            _plot_comparison_lens_treemap(
+                                tdf_s, f"p5_lens_scen_{lbl}_{idx}"
+                            )
+                        else:
+                            st.caption("_No scenario data._")
+                    with lc3:
+                        st.markdown("**By frame**")
+                        if not df_frame_sorted.empty:
+                            fr_cap = 36
+                            fr_top = df_frame_sorted.head(fr_cap).copy()
+                            nms = (
+                                fr_top["scenario_name"].astype(str).str.slice(0, 26)
+                                + "\n· f"
+                                + fr_top["frame_index"].astype(str)
+                            ).tolist()
+                            ims = fr_top["improved_cnt"].astype(float).tolist()
+                            dgs = fr_top["degraded_cnt"].astype(float).tolist()
+                            rest = df_frame_sorted.iloc[fr_cap:]
+                            if not rest.empty:
+                                io = float(rest["improved_cnt"].sum())
+                                do = float(rest["degraded_cnt"].sum())
+                                if io > 0 or do > 0:
+                                    nms.append(
+                                        f"Other frames\n({len(rest)} frames)"
+                                    )
+                                    ims.append(io)
+                                    dgs.append(do)
+                            tdf_f = _comparison_lens_treemap_df(
+                                pd.Series(nms),
+                                pd.Series(ims),
+                                pd.Series(dgs),
+                                root_lens,
+                            )
+                            _plot_comparison_lens_treemap(
+                                tdf_f, f"p5_lens_fr_{lbl}_{idx}"
+                            )
+                            st.caption(
+                                f"Top **{fr_cap}** frames by degraded, plus **Other frames** "
+                                f"so totals match **By class** / **By scenario**."
+                            )
+                        else:
+                            st.caption("_No frame data._")
+
+                    with st.expander("Tables behind the lens (label / scenario / frame)"):
+                        if not df_by_label.empty:
+                            st.markdown("**Per label**")
+                            st.dataframe(
+                                df_by_label,
+                                hide_index=True,
+                                width="stretch",
+                            )
+                        if not scen_agg.empty:
+                            st.markdown("**Per scenario**")
+                            st.dataframe(scen_agg, hide_index=True, width="stretch")
+                        if not df_frame_sorted.empty:
+                            st.markdown("**Per frame** (sorted by degraded)")
+                            st.dataframe(
+                                df_frame_sorted.head(200),
+                                hide_index=True,
+                                width="stretch",
+                            )
 
                     with st.expander("Full dataset breakdown (per t4dataset_id row)"):
                         st.dataframe(df_improved, width="stretch")
