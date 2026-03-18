@@ -674,10 +674,33 @@ except Exception as e:
     st.error(f"Error: {e}")
 
 # =============================
-# Panel 5: Improved and Degraded Count (compare mode only, each candidate vs A)
+# Panel 5: Perception diff vs baseline A (compare mode only)
 # =============================
+_DIST_BIN_CASE = """CASE
+  WHEN dist_h >= 0 AND dist_h < 10 THEN '[0,10)'
+  WHEN dist_h >= 10 AND dist_h < 20 THEN '[10,20)'
+  WHEN dist_h >= 20 AND dist_h < 30 THEN '[20,30)'
+  WHEN dist_h >= 30 AND dist_h < 40 THEN '[30,40)'
+  WHEN dist_h >= 40 AND dist_h < 50 THEN '[40,50)'
+  WHEN dist_h >= 50 AND dist_h < 60 THEN '[50,60)'
+  WHEN dist_h >= 60 AND dist_h < 70 THEN '[60,70)'
+  WHEN dist_h >= 70 AND dist_h < 80 THEN '[70,80)'
+  WHEN dist_h >= 80 AND dist_h < 90 THEN '[80,90)'
+  WHEN dist_h >= 90 AND dist_h < 100 THEN '[90,100)'
+  WHEN dist_h >= 100 AND dist_h < 110 THEN '[100,110)'
+  WHEN dist_h >= 110 AND dist_h < 120 THEN '[110,120)'
+  WHEN dist_h >= 120 AND dist_h < 130 THEN '[120,130)'
+  WHEN dist_h >= 130 AND dist_h < 140 THEN '[130,140)'
+  WHEN dist_h >= 140 AND dist_h < 150 THEN '[140,150)'
+  WHEN dist_h >= 150 THEN '[150,inf)'
+  ELSE '[unknown]' END"""
+
 if not single_mode:
-    st.subheader("Improved and Degraded count by objects (each run vs Baseline A)")
+    st.subheader("Perception diff (vs baseline A)")
+    st.caption(
+        "Per-GT-object comparison vs baseline A: **degraded** = was TP on A and FN on candidate; "
+        "**improved** = was FN on A and TP on candidate. Hotspots prioritize regressions."
+    )
     for idx in range(1, len(runs)):
         lbl = run_labels_list[idx]
         try:
@@ -813,7 +836,9 @@ if not single_mode:
                                 frame_index,
                                 uuid AS gt_uuid,
                                 COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_base,
-                                COALESCE(MAX(try_cast(scenario_name AS VARCHAR)), '') AS scenario_name
+                                COALESCE(MAX(try_cast(suite_name AS VARCHAR)), '') AS suite_name,
+                                COALESCE(MAX(try_cast(scenario_name AS VARCHAR)), '') AS scenario_name,
+                                COALESCE(MAX(try_cast(t4dataset_name AS VARCHAR)), '') AS t4dataset_name
                             FROM view_eval_flat
                             WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL
                                 AND {filter_clause_base}
@@ -825,7 +850,9 @@ if not single_mode:
                                 frame_index,
                                 uuid AS gt_uuid,
                                 COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_comp,
-                                COALESCE(MAX(try_cast(scenario_name AS VARCHAR)), '') AS scenario_name
+                                COALESCE(MAX(try_cast(suite_name AS VARCHAR)), '') AS suite_name,
+                                COALESCE(MAX(try_cast(scenario_name AS VARCHAR)), '') AS scenario_name,
+                                COALESCE(MAX(try_cast(t4dataset_name AS VARCHAR)), '') AS t4dataset_name
                             FROM {comp_flat}
                             WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL
                                 AND {filter_clause_comp_p5}
@@ -838,7 +865,9 @@ if not single_mode:
                                 COALESCE(b.gt_uuid, c.gt_uuid) AS gt_uuid,
                                 COALESCE(b.tp_base, FALSE) AS tp_base,
                                 COALESCE(c.tp_comp, FALSE) AS tp_comp,
-                                COALESCE(b.scenario_name, c.scenario_name, '') AS scenario_name
+                                COALESCE(b.suite_name, c.suite_name, '') AS suite_name,
+                                COALESCE(b.scenario_name, c.scenario_name, '') AS scenario_name,
+                                COALESCE(b.t4dataset_name, c.t4dataset_name, '') AS t4dataset_name
                             FROM base_gt b
                             FULL OUTER JOIN comp_gt c
                                 ON b.t4dataset_id = c.t4dataset_id
@@ -862,7 +891,10 @@ if not single_mode:
                             j.gt_uuid,
                             COALESCE(e.label, '') AS label,
                             COALESCE(e.dist_h, 0.0) AS dist_h,
+                            {_DIST_BIN_CASE.replace("dist_h", "COALESCE(e.dist_h, 0.0)")} AS distance_bin,
+                            j.suite_name,
                             j.scenario_name,
+                            j.t4dataset_name,
                             CASE
                                 WHEN NOT j.tp_base AND j.tp_comp THEN 'improved'
                                 WHEN j.tp_base AND NOT j.tp_comp THEN 'degraded'
@@ -886,11 +918,75 @@ if not single_mode:
                     df_by_object_full = con.execute(query_object_p5).df()
                 except Exception:
                     df_by_object_full = pd.DataFrame()
-                with st.expander(f"Run {lbl} vs A", expanded=(len(runs) == 2)):
-                    st.dataframe(df_improved, width="stretch")
+                query_scenario_label = f"""
+                    WITH base_gt AS (
+                        SELECT
+                            t4dataset_id,
+                            frame_index,
+                            uuid AS gt_uuid,
+                            COALESCE(MAX(try_cast(label AS VARCHAR)), '') AS label,
+                            COALESCE(MAX(try_cast(scenario_name AS VARCHAR)), '') AS scenario_name,
+                            COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_base
+                        FROM view_eval_flat
+                        WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL
+                            AND {filter_clause_base}
+                        GROUP BY 1, 2, 3
+                    ),
+                    comp_gt AS (
+                        SELECT
+                            t4dataset_id,
+                            frame_index,
+                            uuid AS gt_uuid,
+                            COALESCE(MAX(try_cast(label AS VARCHAR)), '') AS label,
+                            COUNT(*) FILTER (WHERE status = 'TP') > 0 AS tp_comp
+                        FROM {comp_flat}
+                        WHERE source = 'GT' AND uuid IS NOT NULL AND frame_index IS NOT NULL
+                            AND {filter_clause_comp_p5}
+                        GROUP BY 1, 2, 3
+                    ),
+                    joined AS (
+                        SELECT
+                            COALESCE(b.scenario_name, c.scenario_name, '') AS scenario_name,
+                            COALESCE(b.label, c.label) AS label,
+                            COALESCE(b.tp_base, FALSE) AS tp_base,
+                            COALESCE(c.tp_comp, FALSE) AS tp_comp
+                        FROM base_gt b
+                        FULL OUTER JOIN comp_gt c
+                            ON b.t4dataset_id = c.t4dataset_id
+                           AND b.frame_index = c.frame_index
+                           AND b.gt_uuid = c.gt_uuid
+                    )
+                    SELECT
+                        scenario_name,
+                        label,
+                        CAST(SUM(CASE WHEN NOT tp_base AND tp_comp THEN 1 ELSE 0 END) AS DOUBLE) AS improved_cnt,
+                        CAST(SUM(CASE WHEN tp_base AND NOT tp_comp THEN 1 ELSE 0 END) AS DOUBLE) AS degraded_cnt
+                    FROM joined
+                    GROUP BY scenario_name, label
+                    """
+                try:
+                    df_scenario_label = con.execute(query_scenario_label).df()
+                except Exception:
+                    df_scenario_label = pd.DataFrame()
 
-                    # By label: improved/degraded counts per object class
-                    st.markdown("**By label**")
+                tot_imp = float(df_improved["improved_cnt"].sum())
+                tot_deg = float(df_improved["degraded_cnt"].sum())
+                tot_net = tot_imp - tot_deg
+                net_s = f"+{int(tot_net)}" if tot_net > 0 else str(int(tot_net))
+
+                with st.expander(f"Run {lbl} vs A", expanded=(len(runs) == 2)):
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Improved (FN→TP)", int(tot_imp))
+                    c2.metric("Degraded (TP→FN)", int(tot_deg))
+                    c3.metric("Net TP delta", net_s)
+                    c4.caption("Start with scenarios and frames with the most **degraded** counts.")
+                    st.markdown(
+                        f"**Summary:** Net **{net_s}** TP vs baseline A — "
+                        f"**{int(tot_deg)}** degraded vs **{int(tot_imp)}** improved."
+                    )
+
+                    # --- By label: stacked improved vs degraded + net delta ---
+                    st.markdown("**By label** (improved vs degraded)")
                     query_label = f"""
                     WITH base_gt AS (
                         SELECT
@@ -942,7 +1038,33 @@ if not single_mode:
                     try:
                         df_by_label = con.execute(query_label).df()
                         if not df_by_label.empty:
-                            st.dataframe(df_by_label, hide_index=True)
+                            fig_stack = go.Figure()
+                            fig_stack.add_trace(
+                                go.Bar(
+                                    name="Degraded",
+                                    x=df_by_label["label"],
+                                    y=df_by_label["degraded_cnt"],
+                                    marker_color="#cc4444",
+                                )
+                            )
+                            fig_stack.add_trace(
+                                go.Bar(
+                                    name="Improved",
+                                    x=df_by_label["label"],
+                                    y=df_by_label["improved_cnt"],
+                                    marker_color="#44aa44",
+                                )
+                            )
+                            fig_stack.update_layout(
+                                barmode="group",
+                                title=f"Improved vs degraded by label ({lbl} vs A)",
+                                xaxis_title="Label",
+                                yaxis_title="Count (GT objects)",
+                                legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                            )
+                            st.plotly_chart(fig_stack, use_container_width=True)
+                            with st.expander("Label table (full)"):
+                                st.dataframe(df_by_label, hide_index=True)
                             fig_label = px.bar(
                                 df_by_label,
                                 x="label",
@@ -959,36 +1081,351 @@ if not single_mode:
                     except Exception as e_label:
                         st.caption(f"By label: {e_label}")
 
-                    # By frame: improved/degraded per frame
-                    with st.expander("By frame"):
-                        if not df_by_frame.empty:
-                            st.dataframe(df_by_frame, hide_index=True)
+                    # --- Top scenarios (degraded-first) ---
+                    st.markdown("**Hotspots: scenarios** (by degraded count)")
+                    if not df_improved.empty:
+                        scen_agg = (
+                            df_improved.groupby("scenario_name", dropna=False)
+                            .agg(
+                                improved_cnt=("improved_cnt", "sum"),
+                                degraded_cnt=("degraded_cnt", "sum"),
+                            )
+                            .reset_index()
+                        )
+                        scen_agg["net_tp_delta"] = (
+                            scen_agg["improved_cnt"] - scen_agg["degraded_cnt"]
+                        )
+                        scen_agg = scen_agg.sort_values(
+                            by=["degraded_cnt", "improved_cnt"],
+                            ascending=[False, True],
+                        )
+                        top_scen_n = min(20, len(scen_agg))
+                        scen_top = scen_agg.head(top_scen_n)
+                        fig_scen = go.Figure()
+                        fig_scen.add_trace(
+                            go.Bar(
+                                y=scen_top["scenario_name"].astype(str),
+                                x=scen_top["degraded_cnt"],
+                                name="Degraded",
+                                orientation="h",
+                                marker_color="#cc4444",
+                            )
+                        )
+                        fig_scen.add_trace(
+                            go.Bar(
+                                y=scen_top["scenario_name"].astype(str),
+                                x=scen_top["improved_cnt"],
+                                name="Improved",
+                                orientation="h",
+                                marker_color="#44aa44",
+                            )
+                        )
+                        fig_scen.update_layout(
+                            barmode="group",
+                            title=f"Top {top_scen_n} scenarios by degraded ({lbl} vs A)",
+                            xaxis_title="Count",
+                            yaxis_title="scenario_name",
+                            height=max(280, 24 * top_scen_n),
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                        )
+                        st.plotly_chart(fig_scen, use_container_width=True)
+                        with st.expander("All scenarios (table)"):
+                            st.dataframe(scen_agg, hide_index=True, width="stretch")
+                    else:
+                        st.caption("No scenario aggregates.")
+
+                    # --- Top frames by degraded ---
+                    st.markdown("**Hotspots: frames** (sorted by degraded)")
+                    df_frame_sorted = pd.DataFrame()
+                    if not df_by_frame.empty:
+                        df_frame_sorted = df_by_frame.sort_values(
+                            by=["degraded_cnt", "improved_cnt"],
+                            ascending=[False, True],
+                        ).reset_index(drop=True)
+                        top_f = df_frame_sorted.head(20)
+                        lbl_f = (
+                            top_f["scenario_name"].astype(str).str.slice(0, 24)
+                            + " | f"
+                            + top_f["frame_index"].astype(str)
+                        )
+                        fig_fr = go.Figure()
+                        fig_fr.add_trace(
+                            go.Bar(
+                                y=lbl_f,
+                                x=top_f["degraded_cnt"],
+                                name="Degraded",
+                                orientation="h",
+                                marker_color="#cc4444",
+                            )
+                        )
+                        fig_fr.add_trace(
+                            go.Bar(
+                                y=lbl_f,
+                                x=top_f["improved_cnt"],
+                                name="Improved",
+                                orientation="h",
+                                marker_color="#44aa44",
+                            )
+                        )
+                        fig_fr.update_layout(
+                            barmode="group",
+                            title="Top 20 frames by degraded count",
+                            xaxis_title="Count",
+                            height=max(320, 22 * len(top_f)),
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                        )
+                        st.plotly_chart(fig_fr, use_container_width=True)
+                    else:
+                        st.caption("No per-frame breakdown for this comparison.")
+
+                    # --- Heatmap scenario × label (degraded), capped scenarios ---
+                    if not df_scenario_label.empty and df_scenario_label["degraded_cnt"].sum() > 0:
+                        st.markdown("**Heatmap: scenario × label (degraded)**")
+                        scen_deg = (
+                            df_scenario_label.groupby("scenario_name")["degraded_cnt"]
+                            .sum()
+                            .sort_values(ascending=False)
+                        )
+                        cap = 25
+                        top_scenarios = list(scen_deg.head(cap).index)
+                        sl = df_scenario_label[
+                            df_scenario_label["scenario_name"].isin(top_scenarios)
+                        ]
+                        if len(sl) > 0:
+                            pivot = sl.pivot_table(
+                                index="scenario_name",
+                                columns="label",
+                                values="degraded_cnt",
+                                aggfunc="sum",
+                                fill_value=0,
+                            )
+                            fig_hm = px.imshow(
+                                pivot.values,
+                                x=list(pivot.columns),
+                                y=list(pivot.index),
+                                labels=dict(x="Label", y="Scenario", color="Degraded"),
+                                title=f"Degraded counts (top {len(pivot)} scenarios)",
+                                color_continuous_scale="Reds",
+                                aspect="auto",
+                            )
+                            st.plotly_chart(fig_hm, use_container_width=True)
+
+                    with st.expander("Full dataset breakdown (per t4dataset_id row)"):
+                        st.dataframe(df_improved, width="stretch")
+
+                    # --- Drill-down: filters + objects ---
+                    st.markdown("**Drill-down: objects**")
+                    scen_key = f"p5_scen_{lbl}_{idx}"
+                    t4_key = f"p5_t4_{lbl}_{idx}"
+                    lab_key = f"p5_lab_{lbl}_{idx}"
+                    for k, default in ((scen_key, []), (t4_key, []), (lab_key, [])):
+                        if k not in st.session_state:
+                            st.session_state[k] = default
+
+                    scenarios_all = sorted(
+                        df_improved["scenario_name"].dropna().astype(str).unique().tolist()
+                    )
+                    t4_all = sorted(
+                        df_improved["t4dataset_name"].dropna().astype(str).unique().tolist()
+                    )
+                    labels_all = (
+                        sorted(df_by_object_full["label"].dropna().astype(str).unique().tolist())
+                        if not df_by_object_full.empty
+                        else []
+                    )
+                    # Keep prior picks valid so Streamlit does not reset widgets when options refresh
+                    scenarios_opts = sorted(
+                        set(scenarios_all) | set(st.session_state.get(scen_key, []) or [])
+                    )
+                    t4_opts = sorted(set(t4_all) | set(st.session_state.get(t4_key, []) or []))
+                    labels_opts = sorted(
+                        set(labels_all) | set(st.session_state.get(lab_key, []) or [])
+                    )
+
+                    pr1, pr2 = st.columns(2)
+                    with pr1:
+                        if st.button(
+                            "Preset: top 5 degraded scenarios",
+                            key=f"p5_pre_scen_{lbl}_{idx}",
+                        ):
+                            if not df_improved.empty:
+                                sa = (
+                                    df_improved.groupby("scenario_name", dropna=False)[
+                                        "degraded_cnt"
+                                    ]
+                                    .sum()
+                                    .sort_values(ascending=False)
+                                    .head(5)
+                                )
+                                st.session_state[scen_key] = [
+                                    str(x) for x in sa.index.tolist()
+                                ]
+                                st.rerun()
+                    fr_multiselect_key = f"p5_frkeys_{lbl}_{idx}"
+                    if fr_multiselect_key not in st.session_state:
+                        st.session_state[fr_multiselect_key] = []
+                    frame_key_labels = {}
+                    if not df_frame_sorted.empty:
+                        for _, rw in df_frame_sorted.head(40).iterrows():
+                            fk = f"{rw['t4dataset_id']}|{rw['frame_index']}"
+                            frame_key_labels[fk] = (
+                                f"f {rw['frame_index']} | deg {int(rw['degraded_cnt'])} | "
+                                f"{str(rw.get('scenario_name', ''))[:32]}"
+                            )
+                    with pr2:
+                        if st.button(
+                            "Preset: top 10 degraded frames (object filter)",
+                            key=f"p5_pre_fr_{lbl}_{idx}",
+                        ):
+                            if frame_key_labels:
+                                topk = list(frame_key_labels.keys())[:10]
+                                st.session_state[fr_multiselect_key] = topk
+                                st.rerun()
+
+                    colf1, colf2, colf3 = st.columns(3)
+                    with colf1:
+                        if scenarios_opts:
+                            st.multiselect(
+                                "Filter scenario_name",
+                                scenarios_opts,
+                                key=scen_key,
+                            )
+                        else:
+                            st.caption("No scenarios.")
+                    with colf2:
+                        if t4_opts:
+                            st.multiselect(
+                                "Filter t4dataset_name",
+                                t4_opts,
+                                key=t4_key,
+                            )
+                        else:
+                            st.caption("No t4dataset_name.")
+                    with colf3:
+                        if labels_opts:
+                            st.multiselect(
+                                "Filter label",
+                                labels_opts,
+                                key=lab_key,
+                            )
+                        else:
+                            st.caption("No labels.")
+
+                    prev_fr = st.session_state.get(fr_multiselect_key) or []
+                    base_frame_keys = list(frame_key_labels.keys())
+                    for k in prev_fr:
+                        if k not in frame_key_labels:
+                            frame_key_labels[k] = f"(selected) frame {str(k).split('|')[-1]}"
+                    frame_opts_keys = base_frame_keys + [
+                        k for k in prev_fr if k not in base_frame_keys
+                    ]
+                    if frame_opts_keys:
+                        st.multiselect(
+                            "Limit objects to frames (optional)",
+                            options=frame_opts_keys,
+                            format_func=lambda k: frame_key_labels.get(k, k),
+                            key=fr_multiselect_key,
+                        )
+
+                    change_type_filter = st.selectbox(
+                        "Change type",
+                        ["degraded", "improved", "all", "both_tp", "both_fn"],
+                        key=f"change_type_{lbl}_{idx}",
+                        help="Filter objects by TP change between runs.",
+                    )
+                    sort_obj = st.selectbox(
+                        "Sort objects by",
+                        [
+                            "degraded_priority_then_dist",
+                            "frame_then_uuid",
+                            "label_then_dist",
+                        ],
+                        key=f"p5_sort_{lbl}_{idx}",
+                    )
+
+                    df_obj_show = (
+                        df_by_object_full.copy()
+                        if not df_by_object_full.empty
+                        else pd.DataFrame()
+                    )
+                    if not df_obj_show.empty:
+                        ss = st.session_state.get(scen_key) or []
+                        if ss:
+                            df_obj_show = df_obj_show[
+                                df_obj_show["scenario_name"].astype(str).isin(ss)
+                            ]
+                        tt = st.session_state.get(t4_key) or []
+                        if tt:
+                            df_obj_show = df_obj_show[
+                                df_obj_show["t4dataset_name"].astype(str).isin(tt)
+                            ]
+                        ll = st.session_state.get(lab_key) or []
+                        if ll:
+                            df_obj_show = df_obj_show[
+                                df_obj_show["label"].astype(str).isin(ll)
+                            ]
+                        fk_sel = st.session_state.get(fr_multiselect_key) or []
+                        if fk_sel:
+                            fk_set = set(fk_sel)
+                            df_obj_show = df_obj_show[
+                                (
+                                    df_obj_show["t4dataset_id"].astype(str)
+                                    + "|"
+                                    + df_obj_show["frame_index"].astype(str)
+                                ).isin(fk_set)
+                            ]
+                        if change_type_filter != "all":
+                            df_obj_show = df_obj_show[
+                                df_obj_show["change_type"] == change_type_filter
+                            ]
+                        if sort_obj == "degraded_priority_then_dist":
+                            df_obj_show = df_obj_show.copy()
+                            df_obj_show["_prio"] = df_obj_show["change_type"].map(
+                                {
+                                    "degraded": 0,
+                                    "improved": 1,
+                                    "both_tp": 2,
+                                    "both_fn": 3,
+                                }
+                            )
+                            df_obj_show = df_obj_show.sort_values(
+                                by=["_prio", "dist_h"],
+                                ascending=[True, True],
+                            ).drop(columns=["_prio"], errors="ignore")
+                        elif sort_obj == "frame_then_uuid":
+                            df_obj_show = df_obj_show.sort_values(
+                                by=["t4dataset_id", "frame_index", "gt_uuid"]
+                            )
+                        else:
+                            df_obj_show = df_obj_show.sort_values(
+                                by=["label", "dist_h", "t4dataset_id", "frame_index"]
+                            )
+
+                    n_show = 200
+                    st.caption(
+                        f"Showing up to {n_show} rows; use **Download CSV** for the full filtered list."
+                    )
+                    if not df_obj_show.empty:
+                        st.download_button(
+                            label="Download filtered objects (CSV)",
+                            data=df_obj_show.to_csv(index=False).encode("utf-8"),
+                            file_name=f"perception_diff_{lbl}_vs_A_objects.csv",
+                            mime="text/csv",
+                            key=f"p5_dl_{lbl}_{idx}",
+                        )
+                        st.dataframe(
+                            df_obj_show.head(n_show),
+                            hide_index=True,
+                            width="stretch",
+                        )
+                    else:
+                        st.caption("No objects match filters.")
+
+                    with st.expander("Full frame table (sort: degraded desc)"):
+                        if not df_frame_sorted.empty:
+                            st.dataframe(df_frame_sorted, hide_index=True, width="stretch")
                         else:
                             st.caption("No frame breakdown.")
-
-                    # By object: per-object list with change_type, label, dist_h
-                    with st.expander("By object"):
-                        change_type_filter = st.selectbox(
-                            "Change type",
-                            ["all", "improved", "degraded", "both_tp", "both_fn"],
-                            key=f"change_type_{lbl}_{idx}",
-                            help="Filter objects by TP change between runs.",
-                        )
-                        if not df_by_object_full.empty:
-                            df_obj_show = df_by_object_full
-                            if change_type_filter != "all":
-                                df_obj_show = df_obj_show[
-                                    df_obj_show["change_type"] == change_type_filter
-                                ]
-                            if len(df_obj_show) > 500:
-                                st.caption(
-                                    f"Showing first 500 of {len(df_obj_show)} objects."
-                                )
-                                st.dataframe(df_obj_show.head(500), hide_index=True)
-                            else:
-                                st.dataframe(df_obj_show, hide_index=True)
-                        else:
-                            st.caption("No object breakdown.")
             else:
                 st.caption(f"Run {lbl} vs A: No data.")
         except Exception as e:

@@ -129,6 +129,12 @@ if has_suite_name:
 else:
     suite_list = []
 
+# Apply deep-link from Detection Stats (suite / scenario / t4dataset) before selectboxes render
+if "bbox_viewer_link_suite" in st.session_state:
+    _lsu = st.session_state.pop("bbox_viewer_link_suite", None)
+    if suite_list and _lsu is not None and str(_lsu) in suite_list:
+        st.session_state["bbox_viewer_suite"] = str(_lsu)
+
 with st.sidebar:
     selected_suite = None
     selected_scenario = None
@@ -150,6 +156,10 @@ with st.sidebar:
                 [filter_file]
             ).df()["v"].dropna().astype(str).tolist()
         if scenario_list:
+            if "bbox_viewer_link_scenario" in st.session_state:
+                _lsc = st.session_state.pop("bbox_viewer_link_scenario", None)
+                if _lsc is not None and str(_lsc) in scenario_list:
+                    st.session_state["bbox_viewer_scenario"] = str(_lsc)
             selected_scenario = st.selectbox(
                 "Scenario name",
                 scenario_list,
@@ -175,6 +185,10 @@ with st.sidebar:
     has_multiple_t4dataset = len(t4dataset_list) > 1
     selected_t4dataset = None
     if has_multiple_t4dataset and t4dataset_list:
+        if "bbox_viewer_link_t4dataset" in st.session_state:
+            _lt4 = st.session_state.pop("bbox_viewer_link_t4dataset", None)
+            if _lt4 is not None and str(_lt4) in t4dataset_list:
+                st.session_state["bbox_viewer_t4dataset"] = str(_lt4)
         selected_t4dataset = st.selectbox(
             "t4dataset_name",
             t4dataset_list,
@@ -201,7 +215,13 @@ topic_names = con.execute(
 ).df()["v"].dropna().tolist()
 if not topic_names:
     # Clear scene from link so selectbox falls back to first available (avoids "No topic_name" loop)
-    for key in ("bbox_viewer_scenario", "bbox_viewer_suite"):
+    for key in (
+        "bbox_viewer_scenario",
+        "bbox_viewer_suite",
+        "bbox_viewer_link_suite",
+        "bbox_viewer_link_scenario",
+        "bbox_viewer_link_t4dataset",
+    ):
         if key in st.session_state:
             del st.session_state[key]
     st.warning(
