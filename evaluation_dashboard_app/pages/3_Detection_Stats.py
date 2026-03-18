@@ -743,6 +743,23 @@ def _baobab_hierarchy_from_objects(
         parts.append(agg)
     out = pd.concat(parts, ignore_index=True)
     out["root"] = root_label
+
+    def _frame_ring_label(fr_g: str, scen_g: str) -> str:
+        if fr_g == "Other frames" or str(fr_g) == "Other frames":
+            return "Other frames"
+        sfg = str(fr_g)
+        if "|f" not in sfg:
+            return sfg
+        fid = sfg.split("|f", 1)[-1]
+        if scen_g == "Other scenarios":
+            t4 = sfg.split("|f", 1)[0]
+            t4s = t4 if len(t4) <= 14 else ("…" + t4[-12:])
+            return f"{t4s}|f{fid}"
+        return f"f{fid}"
+
+    out["fr_display"] = out.apply(
+        lambda r: _frame_ring_label(r["fr_g"], r["scen_g"]), axis=1
+    )
     return out
 
 
@@ -1041,7 +1058,8 @@ if not single_mode:
                         "arc/tile size ∝ GT object count (like a disk-usage tree)."
                     )
                     st.caption(
-                        "Rings/tiles: **scenario** → **frame** (`dataset|fN`) → **label**. "
+                        "Rings/tiles: **scenario** → **frame** (`fN` per scenario; under **Other scenarios**, "
+                        "`…dataset|fN` disambiguates) → **label**. "
                         "**Other scenarios** / **Other frames** group smaller buckets (sliders below)."
                     )
                     b_key = f"p5_baobab_{lbl}_{idx}"
@@ -1101,7 +1119,7 @@ if not single_mode:
                                 continue
                             cmap = "Reds" if ct == "degraded" else "Greens"
                             title = f"{baobab_viz}: {ct} (n = {int(hdf['n'].sum())} GT objects)"
-                            path_cols = ["root", "scen_g", "fr_g", "label"]
+                            path_cols = ["root", "scen_g", "fr_display", "label"]
                             if baobab_viz == "Sunburst":
                                 fig_b = px.sunburst(
                                     hdf,
@@ -1417,8 +1435,8 @@ if not single_mode:
                             fk = f"{rw['t4dataset_id']}|{rw['frame_index']}"
                             # Use scenario_name (not suite_name) for frame option labels
                             frame_key_labels[fk] = (
-                                f"f {rw['frame_index']} | deg {int(rw['degraded_cnt'])} | "
-                                f"{str(rw.get('scenario_name', ''))[:40]}"
+                                f"{str(rw.get('scenario_name', ''))[:36]} | "
+                                f"f{rw['frame_index']} | deg {int(rw['degraded_cnt'])}"
                             )
                     with pr2:
                         if st.button(
