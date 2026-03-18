@@ -1143,8 +1143,9 @@ if not single_mode:
                             ascending=[False, True],
                         ).reset_index(drop=True)
                         top_f = df_frame_sorted.head(20)
+                        # Use scenario_name (not suite_name) for frame labels
                         lbl_f = (
-                            top_f["scenario_name"].astype(str).str.slice(0, 24)
+                            top_f["scenario_name"].astype(str).str.slice(0, 40)
                             + " | f"
                             + top_f["frame_index"].astype(str)
                         )
@@ -1169,8 +1170,9 @@ if not single_mode:
                         )
                         fig_fr.update_layout(
                             barmode="group",
-                            title="Top 20 frames by degraded count",
+                            title="Top 20 frames by degraded count (scenario | frame)",
                             xaxis_title="Count",
+                            yaxis_title="Scenario name | frame index",
                             height=max(320, 22 * len(top_f)),
                             legend=dict(orientation="h", yanchor="bottom", y=1.02),
                         )
@@ -1268,9 +1270,10 @@ if not single_mode:
                     if not df_frame_sorted.empty:
                         for _, rw in df_frame_sorted.head(40).iterrows():
                             fk = f"{rw['t4dataset_id']}|{rw['frame_index']}"
+                            # Use scenario_name (not suite_name) for frame option labels
                             frame_key_labels[fk] = (
                                 f"f {rw['frame_index']} | deg {int(rw['degraded_cnt'])} | "
-                                f"{str(rw.get('scenario_name', ''))[:32]}"
+                                f"{str(rw.get('scenario_name', ''))[:40]}"
                             )
                     with pr2:
                         if st.button(
