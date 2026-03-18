@@ -695,6 +695,57 @@ _DIST_BIN_CASE = """CASE
   WHEN dist_h >= 150 THEN '[150,inf)'
   ELSE '[unknown]' END"""
 
+
+def _baobab_hierarchy_from_objects(
+    df_obj: pd.DataFrame,
+    change_type: str,
+    root_label: str,
+    max_scenarios: int,
+    max_frames: int,
+) -> pd.DataFrame:
+    """
+    Build a leaf table for Plotly sunburst/treemap: root → scenario → frame → label.
+    Caps scenarios and frames per scenario; merges the rest into Other buckets.
+    """
+    if df_obj.empty or "change_type" not in df_obj.columns:
+        return pd.DataFrame()
+    sub = df_obj[df_obj["change_type"] == change_type].copy()
+    if sub.empty:
+        return pd.DataFrame()
+    sub["scenario_name"] = sub["scenario_name"].fillna("").astype(str).replace("", "(no scenario)")
+    sub["label"] = sub["label"].fillna("").astype(str).replace("", "(no label)")
+    sub["frame_key"] = (
+        sub["t4dataset_id"].astype(str) + "|f" + sub["frame_index"].astype(str)
+    )
+    leaf = (
+        sub.groupby(["scenario_name", "frame_key", "label"], dropna=False)
+        .size()
+        .reset_index(name="n")
+    )
+    if leaf.empty:
+        return pd.DataFrame()
+    ms = max(int(max_scenarios), 1)
+    mf = max(int(max_frames), 1)
+    scen_tot = leaf.groupby("scenario_name")["n"].sum().sort_values(ascending=False)
+    top_scen = set(scen_tot.head(ms).index)
+    leaf["scen_g"] = np.where(
+        leaf["scenario_name"].isin(top_scen),
+        leaf["scenario_name"],
+        "Other scenarios",
+    )
+    parts = []
+    for _, g in leaf.groupby("scen_g"):
+        fr_tot = g.groupby("frame_key")["n"].sum().sort_values(ascending=False)
+        top_fr = set(fr_tot.head(mf).index)
+        g2 = g.copy()
+        g2["fr_g"] = np.where(g2["frame_key"].isin(top_fr), g2["frame_key"], "Other frames")
+        agg = g2.groupby(["scen_g", "fr_g", "label"], as_index=False)["n"].sum()
+        parts.append(agg)
+    out = pd.concat(parts, ignore_index=True)
+    out["root"] = root_label
+    return out
+
+
 if not single_mode:
     st.subheader("Perception diff (vs baseline A)")
     st.caption(
@@ -1211,6 +1262,100 @@ if not single_mode:
                                 aspect="auto",
                             )
                             st.plotly_chart(fig_hm, use_container_width=True)
+
+                    with st.expander(
+                        "Hierarchical view (Baobab-style: scenario → frame → label)",
+                        expanded=False,
+                    ):
+                        st.caption(
+                            "Arc or tile **area ∝ count** of GT objects at that path. "
+                            "Ring/order: run total → **scenario** → **frame** (`dataset|fN`) → **label**. "
+                            "Small scenarios are merged into **Other scenarios**; "
+                            "small frames into **Other frames** (see sliders)."
+                        )
+                        b_key = f"p5_baobab_{lbl}_{idx}"
+                        c1b, c2b, c3b = st.columns([1, 1, 1])
+                        with c1b:
+                            baobab_viz = st.radio(
+                                "Chart type",
+                                ["Sunburst", "Treemap"],
+                                horizontal=True,
+                                key=f"{b_key}_viz",
+                            )
+                        with c2b:
+                            baobab_ns = st.slider(
+                                "Max scenarios",
+                                min_value=5,
+                                max_value=25,
+                                value=15,
+                                key=f"{b_key}_ns",
+                            )
+                        with c3b:
+                            baobab_nf = st.slider(
+                                "Max frames / scenario",
+                                min_value=5,
+                                max_value=20,
+                                value=10,
+                                key=f"{b_key}_nf",
+                            )
+                        baobab_which = st.multiselect(
+                            "Show",
+                            ["degraded", "improved"],
+                            default=["degraded"],
+                            key=f"{b_key}_which",
+                            help="Degraded = TP→FN vs A; improved = FN→TP vs A.",
+                        )
+                        if not baobab_which:
+                            st.info("Select at least one of **degraded** or **improved**.")
+                        elif df_by_object_full.empty:
+                            st.caption("No object-level rows for hierarchy.")
+                        else:
+                            for ct in baobab_which:
+                                root = (
+                                    f"Degraded ({lbl} vs A)"
+                                    if ct == "degraded"
+                                    else f"Improved ({lbl} vs A)"
+                                )
+                                hdf = _baobab_hierarchy_from_objects(
+                                    df_by_object_full,
+                                    ct,
+                                    root,
+                                    baobab_ns,
+                                    baobab_nf,
+                                )
+                                if hdf.empty:
+                                    st.caption(f"No **{ct}** objects to chart.")
+                                    continue
+                                cmap = "Reds" if ct == "degraded" else "Greens"
+                                title = f"{baobab_viz}: {ct} (n = {int(hdf['n'].sum())} GT objects)"
+                                path_cols = ["root", "scen_g", "fr_g", "label"]
+                                if baobab_viz == "Sunburst":
+                                    fig_b = px.sunburst(
+                                        hdf,
+                                        path=path_cols,
+                                        values="n",
+                                        color="n",
+                                        color_continuous_scale=cmap,
+                                        title=title,
+                                    )
+                                    fig_b.update_layout(
+                                        margin=dict(t=50, l=10, r=10, b=10),
+                                        height=620,
+                                    )
+                                else:
+                                    fig_b = px.treemap(
+                                        hdf,
+                                        path=path_cols,
+                                        values="n",
+                                        color="n",
+                                        color_continuous_scale=cmap,
+                                        title=title,
+                                    )
+                                    fig_b.update_layout(
+                                        margin=dict(t=50, l=10, r=10, b=10),
+                                        height=520,
+                                    )
+                                st.plotly_chart(fig_b, use_container_width=True)
 
                     with st.expander("Full dataset breakdown (per t4dataset_id row)"):
                         st.dataframe(df_improved, width="stretch")
