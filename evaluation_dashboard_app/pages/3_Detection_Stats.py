@@ -1087,39 +1087,34 @@ if not single_mode:
                             value=10,
                             key=f"{b_key}_nf",
                         )
-                    baobab_which = st.multiselect(
-                        "Show",
-                        ["degraded", "improved"],
-                        default=["degraded", "improved"],
-                        key=f"{b_key}_which",
-                        help="Degraded = TP→FN vs A; improved = FN→TP vs A.",
-                    )
-                    if not baobab_which:
-                        st.info("Select at least one of **degraded** or **improved**.")
-                    elif df_by_object_full.empty:
+                    if df_by_object_full.empty:
                         st.caption("No object-level rows for hierarchy.")
                     else:
-                        for ct in ("degraded", "improved"):
-                            if ct not in baobab_which:
-                                continue
-                            root = (
-                                f"Degraded ({lbl} vs A)"
-                                if ct == "degraded"
-                                else f"Improved ({lbl} vs A)"
-                            )
-                            hdf = _baobab_hierarchy_from_objects(
-                                df_by_object_full,
-                                ct,
-                                root,
-                                baobab_ns,
-                                baobab_nf,
-                            )
+                        path_cols = ["root", "scen_g", "fr_display", "label"]
+                        h_imp = _baobab_hierarchy_from_objects(
+                            df_by_object_full,
+                            "improved",
+                            f"Improved ({lbl} vs A)",
+                            baobab_ns,
+                            baobab_nf,
+                        )
+                        h_deg = _baobab_hierarchy_from_objects(
+                            df_by_object_full,
+                            "degraded",
+                            f"Degraded ({lbl} vs A)",
+                            baobab_ns,
+                            baobab_nf,
+                        )
+                        pair_both = (not h_imp.empty) and (not h_deg.empty)
+                        plot_entries = []
+                        for ct, hdf, cmap in (
+                            ("improved", h_imp, "Greens"),
+                            ("degraded", h_deg, "Reds"),
+                        ):
                             if hdf.empty:
-                                st.caption(f"No **{ct}** objects to chart.")
+                                plot_entries.append((ct, None))
                                 continue
-                            cmap = "Reds" if ct == "degraded" else "Greens"
                             title = f"{baobab_viz}: {ct} (n = {int(hdf['n'].sum())} GT objects)"
-                            path_cols = ["root", "scen_g", "fr_display", "label"]
                             if baobab_viz == "Sunburst":
                                 fig_b = px.sunburst(
                                     hdf,
@@ -1129,9 +1124,10 @@ if not single_mode:
                                     color_continuous_scale=cmap,
                                     title=title,
                                 )
+                                h_sb = 480 if pair_both else 620
                                 fig_b.update_layout(
-                                    margin=dict(t=50, l=10, r=10, b=10),
-                                    height=620,
+                                    margin=dict(t=36, l=4, r=4, b=4),
+                                    height=h_sb,
                                 )
                             else:
                                 fig_b = px.treemap(
@@ -1142,11 +1138,42 @@ if not single_mode:
                                     color_continuous_scale=cmap,
                                     title=title,
                                 )
+                                h_tr = 440 if pair_both else 520
                                 fig_b.update_layout(
-                                    margin=dict(t=50, l=10, r=10, b=10),
-                                    height=520,
+                                    margin=dict(t=40, l=4, r=4, b=4),
+                                    height=h_tr,
                                 )
-                            st.plotly_chart(fig_b, use_container_width=True)
+                            plot_entries.append((ct, fig_b))
+
+                        two_up = (
+                            len(plot_entries) == 2
+                            and plot_entries[0][1] is not None
+                            and plot_entries[1][1] is not None
+                        )
+                        if two_up:
+                            bc1, bc2 = st.columns(2, gap="small")
+                            with bc1:
+                                st.plotly_chart(
+                                    plot_entries[0][1],
+                                    use_container_width=True,
+                                    key=f"{b_key}_fig_{plot_entries[0][0]}",
+                                )
+                            with bc2:
+                                st.plotly_chart(
+                                    plot_entries[1][1],
+                                    use_container_width=True,
+                                    key=f"{b_key}_fig_{plot_entries[1][0]}",
+                                )
+                        else:
+                            for ct, fig_b in plot_entries:
+                                if fig_b is not None:
+                                    st.plotly_chart(
+                                        fig_b,
+                                        use_container_width=True,
+                                        key=f"{b_key}_fig_{ct}",
+                                    )
+                                else:
+                                    st.caption(f"No **{ct}** objects to chart.")
 
                     # --- By label: stacked improved vs degraded + net delta ---
                     st.markdown("**By label** (improved vs degraded)")
