@@ -1851,6 +1851,7 @@ def _comparison_lens_treemap_df(
 def _plot_comparison_lens_treemap(
     tdf: pd.DataFrame,
     st_key: str,
+    title: str,
 ) -> None:
     if tdf is None or tdf.empty:
         st.caption("_No data for this view._")
@@ -1861,7 +1862,6 @@ def _plot_comparison_lens_treemap(
         values="n",
         color="side",
         color_discrete_map={"Improved": IMPROVED_COLOR, "Degraded": DEGRADED_COLOR},
-        #title = "test"
     )
     fig.update_traces(
         textfont_size=12,
@@ -1875,7 +1875,14 @@ def _plot_comparison_lens_treemap(
         marker_line_color="rgba(255,255,255,0.45)",
         root_color="rgba(240,240,245,0.95)",
     )
-    apply_chart_theme(fig, height=430, margin=dict(t=30, l=2, r=2, b=2), paper_bgcolor="rgba(0,0,0,0)")
+    _title_layout = {**PLOTLY_LAYOUT_THEME["title"], "text": title}
+    apply_chart_theme(
+        fig,
+        height=430,
+        margin=dict(t=20, l=2, r=2, b=2),
+        paper_bgcolor="rgba(0,0,0,0)",
+        title=_title_layout,
+    )
     st.plotly_chart(fig, use_container_width=True, key=st_key)
 
 
@@ -2309,7 +2316,6 @@ if not single_mode:
                     root_lens = f"{lbl} vs A"
                     lc1, lc2, lc3 = st.columns(3, gap="small")
                     with lc1:
-                        st.markdown("**By class**")
                         if not df_by_label.empty:
                             tdf_l = _comparison_lens_treemap_df(
                                 df_by_label["label"],
@@ -2318,12 +2324,13 @@ if not single_mode:
                                 root_lens,
                             )
                             _plot_comparison_lens_treemap(
-                                tdf_l, f"p5_lens_lab_{lbl}_{idx}"
+                                tdf_l,
+                                f"p5_lens_lab_{lbl}_{idx}",
+                                "By class",
                             )
                         else:
                             st.caption("_No label data._")
                     with lc2:
-                        st.markdown("**By scenario**")
                         if not scen_agg.empty:
                             tdf_s = _comparison_lens_treemap_df(
                                 scen_agg["scenario_name"].astype(str),
@@ -2332,12 +2339,13 @@ if not single_mode:
                                 root_lens,
                             )
                             _plot_comparison_lens_treemap(
-                                tdf_s, f"p5_lens_scen_{lbl}_{idx}"
+                                tdf_s,
+                                f"p5_lens_scen_{lbl}_{idx}",
+                                "By scenario",
                             )
                         else:
                             st.caption("_No scenario data._")
                     with lc3:
-                        st.markdown("**By frame**")
                         if not df_frame_sorted.empty:
                             fr_cap = 36
                             fr_top = df_frame_sorted.head(fr_cap).copy()
@@ -2365,7 +2373,9 @@ if not single_mode:
                                 root_lens,
                             )
                             _plot_comparison_lens_treemap(
-                                tdf_f, f"p5_lens_fr_{lbl}_{idx}"
+                                tdf_f,
+                                f"p5_lens_fr_{lbl}_{idx}",
+                                "By frame",
                             )
                             st.caption(
                                 f"Top **{fr_cap}** frames by degraded, plus **Other frames** "
