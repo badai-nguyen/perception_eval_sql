@@ -352,9 +352,6 @@ def _kpi_row_for_view(con, view: str, filter_clause: str):
         "tpr": tpr, "fpr": fpr, "precision": precision, "recall": recall, "f1": f1,
     }
 
-if st.button("Open Bounding Box Viewer", key="det_stats_open_bev_top", help="Open the BEV page with current run(s). Use links in tables below to open with a specific scenario/frame."):
-    st.switch_page("pages/4_Bounding_Box_Viewer.py")
-
 def _pct_str(v):
     if v is None:
         return "—"
@@ -437,6 +434,11 @@ _KPI_CSS = """
 </style>
 """
 
+
+# =============================
+# Panel 1: t4dataset Summary
+# =============================
+st.subheader("Summary")
 if single_mode:
     fc = build_filter_clause(filters_base)
     kpi = _kpi_row_for_view(con, "view_eval_flat", fc)
@@ -470,8 +472,6 @@ else:
             }
         cards_html_parts.append(_render_kpi_card(f"Run {lbl}", kpi or {}, f"kpi-run-{lbl}", deltas=deltas))
     st.markdown('<div class="kpi-wrap">' + "".join(cards_html_parts) + "</div>", unsafe_allow_html=True)
-
-st.divider()
 
 if st.checkbox("Debug: Inspect Parquet (All Runs)" if not single_mode else "Debug: Inspect Parquet"):
     cols_used = st.columns(len(target_files))
@@ -552,11 +552,6 @@ if st.checkbox("Debug: Inspect Parquet (All Runs)" if not single_mode else "Debu
 
 
 
-# =============================
-# Panel 1: t4dataset Summary
-# =============================
-st.subheader("t4dataset summary and data parse")
-
 try:
     if single_mode:
         query_base = f"""
@@ -580,11 +575,11 @@ try:
         df_status = con.execute(query_status).df()
 
     if single_mode:
-        st.write("**Status Count Table (label × status)**")
         if not df_status.empty:
-            df_status_wide = df_status.pivot_table(index='label', columns='status', values='num', fill_value=0).reset_index()
-            st.download_button("Download status count (CSV)", data=df_status_wide.to_csv(index=False).encode("utf-8"), file_name="detection_status_count.csv", mime="text/csv", key="dl_status_count")
-            st.dataframe(df_status_wide)
+            if st.checkbox("Debug: Inspect Status Count (All Runs)" if not single_mode else "Debug: Inspect Status Count"):
+                df_status_wide = df_status.pivot_table(index='label', columns='status', values='num', fill_value=0).reset_index()
+                st.download_button("Download status count (CSV)", data=df_status_wide.to_csv(index=False).encode("utf-8"), file_name="detection_status_count.csv", mime="text/csv", key="dl_status_count")
+                st.dataframe(df_status_wide)
             fig2 = px.bar(
                 df_status,
                 x="label",
@@ -598,12 +593,13 @@ try:
         else:
             st.info("No status count data available")
     else:
-        st.write("**Status Count Table (label × status by run)**")
         if not df_status.empty:
-            df_status_wide = df_status.pivot_table(index='label', columns=['dataset', 'status'], values='num', fill_value=0)
-            df_status_wide.columns = [f"{col[0]} {col[1]}" for col in df_status_wide.columns]
-            df_status_wide = df_status_wide.reset_index()
-            st.dataframe(df_status_wide)
+
+            if st.checkbox("Debug: Inspect Status Count (All Runs)" if not single_mode else "Debug: Inspect Status Count"):
+                df_status_wide = df_status.pivot_table(index='label', columns=['dataset', 'status'], values='num', fill_value=0)
+                df_status_wide.columns = [f"{col[0]} {col[1]}" for col in df_status_wide.columns]
+                df_status_wide = df_status_wide.reset_index()
+                st.dataframe(df_status_wide)
             fig2 = px.bar(
                 df_status,
                 x="label",
@@ -695,7 +691,7 @@ def _tpr_fpr_view(i: int) -> str:
 # =============================
 # Panel 3: TP Rate by Distance Bin
 # =============================
-st.subheader("TP Rate by Distance Bin" + (" (Comparison)" if not single_mode else ""))
+st.subheader("TP Rate by Distance Bin")
 
 try:
     filter_clause_base = build_filter_clause(filters_base, enable_dist_h=False)
@@ -2055,119 +2051,6 @@ else:
                         st.plotly_chart(fig, width="stretch")
             except Exception as e:
                 st.error(f"Error (Run {lbl} − A): {e}")
-
-# =============================
-# Panel 6b: Extended errors (velocity / 3D, when columns exist)
-# =============================
-_has_vel_err = schema.get("has_vx_error") and schema.get("has_vy_error") and schema.get("has_speed_error")
-if _has_vel_err:
-    st.divider()
-    st.subheader("Mean velocity / speed error (TP only)")
-    st.caption("Mean absolute vx_error, vy_error, speed_error for matched detections.")
-    try:
-        fc = build_filter_clause(filters_base)
-        if single_mode:
-            q_vel = f"""
-            SELECT
-                label,
-                AVG(ABS(CAST(vx_error AS DOUBLE))) FILTER (WHERE status = 'TP' AND vx_error IS NOT NULL) AS mean_abs_vx_error,
-                AVG(ABS(CAST(vy_error AS DOUBLE))) FILTER (WHERE status = 'TP' AND vy_error IS NOT NULL) AS mean_abs_vy_error,
-                AVG(ABS(CAST(speed_error AS DOUBLE))) FILTER (WHERE status = 'TP' AND speed_error IS NOT NULL) AS mean_abs_speed_error
-            FROM view_eval_flat
-            WHERE {fc}
-            GROUP BY label
-            ORDER BY label
-            """
-            df_vel = con.execute(q_vel).df()
-            if not df_vel.empty:
-                fig_vel = go.Figure()
-                fig_vel.add_trace(go.Bar(x=df_vel["label"], y=df_vel["mean_abs_vx_error"], name="VX Error", marker_color=RUN_COLORS[0]))
-                fig_vel.add_trace(go.Bar(x=df_vel["label"], y=df_vel["mean_abs_vy_error"], name="VY Error", marker_color=RUN_COLORS[1]))
-                fig_vel.add_trace(go.Bar(x=df_vel["label"], y=df_vel["mean_abs_speed_error"], name="Speed Error", marker_color=RUN_COLORS[2]))
-                fig_vel.update_layout(title=f"Mean velocity/speed error within {max_eval_range} [m]", xaxis_title="Label", yaxis_title="Error", barmode="group")
-                st.plotly_chart(fig_vel, width="stretch")
-            else:
-                st.info("No velocity error data.")
-        else:
-            dfs_vel = []
-            for i in range(len(runs)):
-                fc_i = build_filter_clause(filters_list[i])
-                q = f"""
-                SELECT label,
-                    AVG(ABS(CAST(vx_error AS DOUBLE))) FILTER (WHERE status = 'TP' AND vx_error IS NOT NULL) AS mean_abs_vx_error,
-                    AVG(ABS(CAST(vy_error AS DOUBLE))) FILTER (WHERE status = 'TP' AND vy_error IS NOT NULL) AS mean_abs_vy_error,
-                    AVG(ABS(CAST(speed_error AS DOUBLE))) FILTER (WHERE status = 'TP' AND speed_error IS NOT NULL) AS mean_abs_speed_error
-                FROM {_flat_view(i)}
-                WHERE {fc_i}
-                GROUP BY label ORDER BY label
-                """
-                df_i = con.execute(q).df()
-                df_i["run"] = run_labels_list[i]
-                dfs_vel.append(df_i)
-            df_vel_all = pd.concat(dfs_vel, ignore_index=True)
-            if not df_vel_all.empty:
-                for err_name, col in [("VX Error", "mean_abs_vx_error"), ("VY Error", "mean_abs_vy_error"), ("Speed Error", "mean_abs_speed_error")]:
-                    fig_vel = px.bar(
-                        df_vel_all, x="label", y=col, color="run", barmode="group",
-                        title=f"Mean {err_name} by run",
-                        color_discrete_sequence=RUN_COLORS,
-                    )
-                    st.plotly_chart(fig_vel, width="stretch")
-            else:
-                st.info("No velocity error data.")
-    except Exception as e:
-        st.caption(f"Velocity error query failed: {e}")
-
-if schema.get("has_z_error") or schema.get("has_center_distance") or schema.get("has_plane_distance"):
-    with st.expander("Z / center / plane distance (TP only)", expanded=False):
-        try:
-            fc = build_filter_clause(filters_base)
-            sel = []
-            if schema.get("has_z_error"):
-                sel.append("AVG(ABS(CAST(z_error AS DOUBLE))) FILTER (WHERE status = 'TP' AND z_error IS NOT NULL) AS mean_abs_z_error")
-            if schema.get("has_center_distance"):
-                sel.append("AVG(CAST(center_distance AS DOUBLE)) FILTER (WHERE status = 'TP' AND center_distance IS NOT NULL) AS mean_center_distance")
-            if schema.get("has_plane_distance"):
-                sel.append("AVG(CAST(plane_distance AS DOUBLE)) FILTER (WHERE status = 'TP' AND plane_distance IS NOT NULL) AS mean_plane_distance")
-            if sel:
-                q_extra = f"""
-                SELECT label, {', '.join(sel)}
-                FROM view_eval_flat
-                WHERE {fc}
-                GROUP BY label ORDER BY label
-                """
-                df_extra = con.execute(q_extra).df()
-                if not df_extra.empty:
-                    st.dataframe(df_extra, hide_index=True)
-                else:
-                    st.caption("No data.")
-        except Exception as e:
-            st.caption(str(e))
-
-# =============================
-# Panel 6c: Point cloud quality (when column exists)
-# =============================
-if schema.get("has_pointcloud_num"):
-    st.divider()
-    st.subheader("Point cloud count (GT)")
-    st.caption("LiDAR point count per GT object when available.")
-    try:
-        fc = build_filter_clause(filters_base)
-        q_pc = f"""
-        SELECT label, AVG(CAST(pointcloud_num AS DOUBLE)) AS avg_pointcloud_num, COUNT(*) AS n
-        FROM view_eval_flat
-        WHERE source = 'GT' AND pointcloud_num IS NOT NULL AND {fc}
-        GROUP BY label ORDER BY label
-        """
-        df_pc = con.execute(q_pc).df()
-        if not df_pc.empty:
-            st.dataframe(df_pc, hide_index=True)
-            fig_pc = px.bar(df_pc, x="label", y="avg_pointcloud_num", title="Mean pointcloud_num by label")
-            st.plotly_chart(fig_pc, use_container_width=True)
-        else:
-            st.info("No pointcloud_num data in range.")
-    except Exception as e:
-        st.caption(f"Point cloud query failed: {e}")
 
 # =============================
 # Panel 8: Object Count with Distance

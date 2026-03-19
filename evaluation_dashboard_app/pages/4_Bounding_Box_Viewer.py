@@ -365,12 +365,6 @@ color_map = {
 def get_color(source, status): return color_map.get((source, status), "#999999")
 
 # ----------------------------
-# Link back to Detection Stats
-# ----------------------------
-if st.button("See full stats (Detection Stats)", key="bev_link_detection_stats", help="Open the Detection Stats page with the same run(s)."):
-    st.switch_page("pages/3_Detection_Stats.py")
-
-# ----------------------------
 # Currently showing & comparison hint
 # ----------------------------
 if len(files_to_load) == 1:
