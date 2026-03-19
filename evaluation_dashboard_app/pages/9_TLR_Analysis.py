@@ -224,13 +224,25 @@ def _render_compare_tabs(analyzer_a, analyzer_b, label_a, label_b, tab_criteria,
         common_suites = analyzer_a.get_common_scenario_keys(analyzer_b)
         if common_suites:
             st.subheader("TP rate by criteria: per suite pair")
+            if "tlr_scenario_expand_all" not in st.session_state:
+                st.session_state["tlr_scenario_expand_all"] = True
+            expand_all = st.session_state["tlr_scenario_expand_all"]
+            btn_expand, btn_collapse, _ = st.columns([1, 1, 4])
+            with btn_expand:
+                if st.button("Expand all", key="tlr_expand_all_btn", help="Expand all scenario-pair expanders"):
+                    st.session_state["tlr_scenario_expand_all"] = True
+                    st.rerun()
+            with btn_collapse:
+                if st.button("Collapse all", key="tlr_collapse_all_btn", help="Collapse all scenario-pair expanders"):
+                    st.session_state["tlr_scenario_expand_all"] = False
+                    st.rerun()
             st.caption(f"TP rate by criteria (A vs B) for each of the {len(common_suites)} common suite pairs.")
             for i, suite_name in enumerate(common_suites):
                 per_suite_df, fig_suite = _build_suite_pair_compare(
                     analyzer_a, analyzer_b, suite_name, label_a, label_b
                 )
                 if per_suite_df is not None and fig_suite is not None:
-                    with st.expander(f"**{suite_name}**", expanded=False):
+                    with st.expander(f"**{suite_name}**", expanded=expand_all):
                         st.dataframe(per_suite_df, use_container_width=True, hide_index=True, key=f"tlr_suite_df_{i}")
                         st.plotly_chart(fig_suite, use_container_width=True, key=f"tlr_suite_chart_{i}")
         else:
