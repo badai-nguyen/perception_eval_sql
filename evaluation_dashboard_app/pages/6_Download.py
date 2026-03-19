@@ -38,6 +38,7 @@ from lib.WebAPI import scenarioAPI
 from lib.user_config import UserConfig
 from lib.path_utils import get_data_root, resolve_under_data_root, to_data_relative
 from lib.eval_summary import find_eval_result_dirs, run_eval_result_for_dir, generate_summary_and_score_csv
+from lib.page_chrome import inject_app_page_styles, render_page_hero
 from lib.db import is_task_queue_enabled, create_task, list_recent_tasks, get_task, delete_task
 from lib import download_core
 from lib.auth import get_current_user_id, is_auth_enabled
@@ -650,11 +651,20 @@ class JobResult:
 st.set_page_config(
     page_title="Autoware Evaluator Downloader",
     page_icon="🚗",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-st.title("🚗 Autoware Evaluator Results Downloader")
-st.markdown("---")
+inject_app_page_styles()
+render_page_hero(
+    kicker="Data pipeline",
+    title="Autoware Evaluator results downloader",
+    description=(
+        "Pull jobs from the evaluator, fetch scenarios, run local eval hooks, build parquet — "
+        "with optional worker queue integration when configured."
+    ),
+    mode="Single Run",
+)
 
 
 def _task_type_label(task_type: str) -> str:

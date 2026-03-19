@@ -10,6 +10,7 @@ from typing import Optional, List, Tuple
 
 from lib.path_utils import path_display
 from lib.parquet_schema import schema_flags
+from lib.page_chrome import inject_app_page_styles, render_loaded_data_section, render_page_hero
 
 # Perception diff: unified improved/degraded palette (Hierarchical view + Comparison lens)
 IMPROVED_COLOR = "#1a9850"
@@ -261,7 +262,12 @@ def _scalar_metric_spider_compare(
     return fig
 
 
-st.set_page_config(layout="wide", page_title="Object Detection")
+st.set_page_config(
+    layout="wide",
+    page_title="Object Detection",
+    page_icon="🎯",
+    initial_sidebar_state="expanded",
+)
 
 # =============================
 # Session state from Overview (mode, run paths)
@@ -270,7 +276,7 @@ if "runA" not in st.session_state:
     st.warning("Please load data from the **Overview** page first (select mode and run(s)).")
     st.stop()
 
-st.title("Object Detection Evaluation Dashboard")
+inject_app_page_styles()
 
 mode = st.session_state.get("mode", "Single Mode")
 runA = st.session_state["runA"]
@@ -483,7 +489,7 @@ for i, (r, pl) in enumerate(zip(runs, parquet_lists)):
 # =============================
 _SECTION_CSS = """
 <style>
-.section-header { border-left: 4px solid #4A90D9; padding-left: 12px; font-weight: 600; font-size: 1rem; color: #1f2937; margin: 1.25rem 0 0.75rem 0; }
+.section-header { border-left: 4px solid #0d9488; padding-left: 12px; font-weight: 700; font-size: 1.02rem; color: #0f172a; margin: 1.35rem 0 0.65rem 0; letter-spacing: -0.02em; }
 .section-block { margin-bottom: 1.5rem; }
 .run-chip { display: inline-block; background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 999px; padding: 0.35rem 0.85rem; font-size: 0.875rem; margin: 0.25rem 0.25rem 0.25rem 0; }
 .run-chip strong { color: #334155; }
@@ -492,15 +498,26 @@ _SECTION_CSS = """
 st.markdown(_SECTION_CSS, unsafe_allow_html=True)
 
 # =============================
-# Loaded Runs (from Overview)
+# Loaded Runs (from Overview) + hero
 # =============================
-st.markdown('<div class="section-header">Loaded Runs</div>', unsafe_allow_html=True)
-chips = []
+_ld_entries = []
 for i, r in enumerate(runs):
     lbl = run_labels_list[i] if i < len(run_labels_list) else str(i)
-    prefix = "A" if lbl == "A" else lbl
-    chips.append(f'<span class="run-chip"><strong>{prefix}:</strong> {path_display(r["path"])}</span>')
-st.markdown('<div style="margin-bottom: 1rem;">' + " ".join(chips) + "</div>", unsafe_allow_html=True)
+    if lbl == "A":
+        _ltitle = "Baseline · A"
+    else:
+        _ltitle = f"Candidate · {lbl}"
+    _ld_entries.append((_ltitle, path_display(r["path"])))
+render_loaded_data_section(_ld_entries)
+render_page_hero(
+    kicker="Object detection",
+    title="Detection evaluation dashboard",
+    description=(
+        "Parquet-driven analytics: filters, hierarchical views, scenario breakdowns, "
+        "and multi-run compare when you load several runs from Overview."
+    ),
+    mode=mode,
+)
 
 # =============================
 # Sidebar - Filters
@@ -508,7 +525,8 @@ st.markdown('<div style="margin-bottom: 1rem;">' + " ".join(chips) + "</div>", u
 # File selection per run
 target_files = []
 with st.sidebar:
-    st.header("Filters / Inputs")
+    st.markdown("##### Filters / inputs")
+    st.caption("Pick parquet per run, then slice by suite, scenario, labels, and topics.")
     for i, (pl, lbl) in enumerate(zip(parquet_lists, run_labels_list)):
         if len(pl) == 1:
             target_files.append(pl[0])

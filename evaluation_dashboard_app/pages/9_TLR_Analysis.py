@@ -14,16 +14,27 @@ from urllib.parse import quote
 
 from lib.tlr_eval_analyzer import TLREvaluationAnalyzer
 from lib.path_utils import get_data_root, path_display, list_tlr_result_directories
+from lib.page_chrome import (
+    inject_app_page_styles,
+    render_loaded_data_section,
+    render_page_hero,
+    render_share_link_callout,
+    section_header,
+)
 
-st.set_page_config(page_title="TLR Analysis", layout="wide")
+st.set_page_config(
+    page_title="TLR Analysis",
+    layout="wide",
+    page_icon="🚦",
+    initial_sidebar_state="expanded",
+)
+inject_app_page_styles()
 
 # ====== URL QUERY PARAMS (for shareable links) ======
 params = st.query_params
 url_mode = params.get("mode")       # "single" / "compare" / None
 url_path_a = params.get("path_a")  # relative path under data root
 url_path_b = params.get("path_b")  # for compare mode
-
-st.title("TLR (Traffic Light Recognition) Evaluation Analysis")
 
 # ----- Helpers -----
 data_root = get_data_root()
@@ -426,8 +437,8 @@ def _render_compare_tabs(analyzer_a, analyzer_b, label_a, label_b, tab_criteria,
 
 
 # ----- Sidebar: mode and TLR directory selection -----
-st.sidebar.header("TLR data")
-st.sidebar.caption(f"Data root: `{path_display(data_root)}`")
+st.sidebar.markdown("##### TLR data")
+st.sidebar.caption(f"Root: `{path_display(data_root)}` — directories with **result.json** are listed below.")
 
 tlr_candidates = list_tlr_result_directories()
 # Build stable keys for URL (path relative to data root)
@@ -515,6 +526,26 @@ if analyzer_a is None:
     )
     st.stop()
 
+_hero_mode = "Compare Mode" if mode == "Compare" else "Single Run"
+if mode == "Compare" and resolved_path_b:
+    render_loaded_data_section(
+        [
+            ("Baseline · A", path_display(Path(resolved_path_a))),
+            ("Candidate · B", path_display(Path(resolved_path_b))),
+        ]
+    )
+else:
+    render_loaded_data_section([("TLR result", path_display(Path(resolved_path_a)))])
+render_page_hero(
+    kicker="Traffic light recognition",
+    title="TLR evaluation analysis",
+    description=(
+        "Criteria matrices, vehicle status vs. traffic-light type, critical and priority zones — "
+        "explore one dataset or compare A vs B with shareable URLs."
+    ),
+    mode=_hero_mode,
+)
+
 # ----- Labels for compare mode -----
 label_a = Path(resolved_path_a).name if resolved_path_a else "A"
 label_b = Path(resolved_path_b).name if resolved_path_b else "B"
@@ -522,9 +553,9 @@ label_b = Path(resolved_path_b).name if resolved_path_b else "B"
 # ========== SINGLE MODE ==========
 if mode == "Single":
     stats = analyzer_a.get_summary_stats()
-    st.subheader("Overview")
+    section_header("Results overview", "Aggregate counts and TP rate for the selected TLR directory.")
     share_q = f"mode=single&path_a={quote(tlr_keys[sel_a], safe='/')}"
-    st.caption(f"Share this view: append `?{share_q}` to the TLR Analysis page URL.")
+    render_share_link_callout(share_q, caption="Append to the TLR Analysis page URL on your server.")
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Scenarios", stats["num_scenarios"])
     c2.metric("Total frames", f"{stats['total_frames']:,}")
@@ -551,9 +582,9 @@ if analyzer_b is None:
 stats_a = analyzer_a.get_summary_stats()
 stats_b = analyzer_b.get_summary_stats()
 
-st.subheader("Overview: A vs B")
+section_header("Compare overview", "Side-by-side stats for baseline A and candidate B.")
 share_q_compare = f"mode=compare&path_a={quote(tlr_keys[sel_a], safe='/')}&path_b={quote(tlr_keys[sel_b], safe='/')}"
-st.caption(f"Share this view: append `?{share_q_compare}` to the TLR Analysis page URL.")
+render_share_link_callout(share_q_compare, caption="Append to the TLR Analysis page URL on your server.")
 col_a, col_delta, col_b = st.columns(3)
 with col_a:
     st.markdown(f"**{label_a} (Baseline)**")

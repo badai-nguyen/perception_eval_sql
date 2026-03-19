@@ -2,6 +2,22 @@ import streamlit as st
 from pathlib import Path
 import re
 
+from lib.page_chrome import inject_app_page_styles, render_page_hero
+
+st.set_page_config(
+    page_title="Help",
+    page_icon="❔",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+inject_app_page_styles()
+render_page_hero(
+    kicker="Documentation",
+    title="Help & guide",
+    description="In-app copy of the project README — setup, pages, and workflows for the evaluation dashboard.",
+    mode="Single Run",
+)
+
 readme_path = Path("Readme.md")
 content = readme_path.read_text(encoding="utf-8")
 

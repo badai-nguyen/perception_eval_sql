@@ -6,6 +6,13 @@ from lib.path_utils import get_data_root, get_data_root_display, list_run_direct
 import plotly.express as px
 import plotly.graph_objects as go
 from lib.user_config import UserConfig
+from lib.page_chrome import (
+    inject_app_page_styles,
+    render_loaded_data_section,
+    render_page_hero,
+    render_share_link_callout,
+    section_header,
+)
 
 # ====== URL QUERY PARAMS (OPTIONAL OVERRIDE) ======
 params = st.query_params
@@ -20,6 +27,7 @@ url_compare_runs = [
 
 # ====== CONFIG AND CONSTANTS ======
 st.set_page_config(page_title="Overview", layout="wide", initial_sidebar_state="expanded")
+inject_app_page_styles()
 RUN_ROOT = get_data_root()
 PRODUCT_LABEL_JA = {
     "Occlusion-Case": "遮蔽ケース",
@@ -250,7 +258,6 @@ if st.session_state.get("mode") != mode and "overview_compare_run_names" in st.s
     del st.session_state["overview_compare_run_names"]
 st.session_state["mode"] = mode
 user_config.set("overview_mode", mode)
-st.title("Overview")
 
 # --- Handle RUN_ROOT existence and emptiness ---
 if not RUN_ROOT.exists() or not RUN_ROOT.is_dir():
@@ -268,6 +275,16 @@ run_names = [p.name for p in run_dirs]
 if not run_dirs:
     st.warning(f"No runs found in '{get_data_root_display()}'.\n\nPlease add at least one sub-directory with evaluation results, e.g. `{get_data_root_display()}/my_eval_run/`.")
     st.stop()
+
+render_page_hero(
+    kicker="Evaluation hub",
+    title="Overview",
+    description=(
+        "Choose baseline and optional compare runs, filter perception/product labels, and inspect summary metrics. "
+        "Use the sidebar pages for deeper analysis; copy the share link below so teammates open the same view."
+    ),
+    mode=mode,
+)
 
 saved_run_a = user_config.get("overview_run_a", run_names[0] if run_names else "")
 # URL override (only if valid)
@@ -391,21 +408,23 @@ else:
         st.session_state.pop(key, None)
 
 # ====== MAIN PAGE METRICS & CHARTS ======
-st.subheader("Loaded Runs")
-st.markdown(f"**Baseline (A):** `{path_display(runA['path'])}`")
+_ov_entries = [("Baseline · A", path_display(runA["path"]))]
 if mode == "Compare Mode" and compare_run_dirs:
     all_runs = st.session_state["all_runs"]
     run_labels = st.session_state["run_labels"]
     for i in range(1, len(all_runs)):
-        st.markdown(f"**Candidate ({run_labels[i]}):** `{path_display(all_runs[i]['path'])}`")
-# Shareable link (for multi-user: share this view with others)
+        _ov_entries.append((f"Candidate · {run_labels[i]}", path_display(all_runs[i]["path"])))
+render_loaded_data_section(_ov_entries)
 share_q = f"mode={'compare' if mode == 'Compare Mode' else 'single'}&run_a={run_a_dir.name}"
 if mode == "Compare Mode" and compare_run_names:
     for j, name in enumerate(compare_run_names):
         share_q += f"&run_{chr(98 + j)}={name}"
-st.caption(f"Share this view: append `?{share_q}` to your server URL (e.g. from Data Management page).")
+render_share_link_callout(
+    share_q,
+    caption="Append to your server URL (e.g. `https://host:8501/?` + query). Build links from Data Management too.",
+)
 
-st.subheader("Summary")
+section_header("Summary metrics", "TP and error statistics from Summary.csv (respects Overview label filters).")
 if runA.get("summary") is None:
     st.info(
         "**Summary.csv** not found for this run. "

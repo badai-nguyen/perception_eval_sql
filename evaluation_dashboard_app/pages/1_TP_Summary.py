@@ -2,9 +2,10 @@ import streamlit as st
 import plotly.express as px
 import pandas as pd
 from lib.path_utils import path_display
+from lib.page_chrome import inject_app_page_styles, render_loaded_data_section, render_page_hero, section_header
 
-st.set_page_config(layout="wide")
-st.title("TP / Position / Velocity Statistics Viewer")
+st.set_page_config(layout="wide", page_title="TP Summary", page_icon="📈", initial_sidebar_state="expanded")
+inject_app_page_styles()
 
 # ========== Safety Check ==========
 if "runA" not in st.session_state:
@@ -24,20 +25,37 @@ if mode == "Compare Mode":
     df_b = runB["summary"] if runB else None
     df_cmp = st.session_state.get("df_cmp")
 
-st.subheader("Loaded Runs")
-st.markdown(f"**Baseline (A):** `{path_display(runA['path'])}`")
-if mode == "Compare Mode":
-    st.markdown(f"**Candidate (B):** `{path_display(runB['path'])}`")
 # Fail early if compare data is incomplete
 if mode == "Compare Mode" and (df_b is None or df_cmp is None):
     st.warning("Compare mode requires both Run B and delta data. Reload from Overview.")
     st.stop()
+
+_run_b = st.session_state.get("runB")
+if mode == "Compare Mode" and _run_b:
+    render_loaded_data_section(
+        [
+            ("Baseline · A", path_display(runA["path"])),
+            ("Candidate · B", path_display(_run_b["path"])),
+        ]
+    )
+else:
+    render_loaded_data_section([("Current run", path_display(runA["path"]))])
+
+render_page_hero(
+    kicker="TP & kinematics",
+    title="Position, velocity & TP statistics",
+    description="Summary.csv metrics: TP, lateral/longitudinal error stats, and velocity — filter, compare runs, or inspect deltas.",
+    mode=mode,
+)
+
 # ========== View Selector ==========
+st.sidebar.markdown("##### Scope")
 if mode == "Compare Mode":
     view = st.sidebar.selectbox(
-        "View",
+        "Dataset",
         ["Baseline (A)", "Candidate (B)", "Delta (B - A)"],
-        index=2
+        index=2,
+        help="Delta shows row-wise B − A after matching on Summary keys from Overview.",
     )
     df_active = {
         "Baseline (A)": df_a,
@@ -50,15 +68,17 @@ else:
     view = "Single Run"
     use_delta = False
 
+st.sidebar.divider()
+
 # ========== Debug Controls ==========
-show_debug = st.sidebar.checkbox("Show debug info", value=False)
+show_debug = st.sidebar.checkbox("Show debug tables", value=False)
 
 if show_debug:
-    st.subheader("Raw Data Check")
+    section_header("Raw data preview", "First rows of the active dataframe.")
     st.dataframe(df_active.head(10), width="stretch")
 
 # ========== Sidebar Filters ==========
-st.sidebar.header("Filters")
+st.sidebar.markdown("##### Filters")
 tp_col = "TP_delta" if use_delta else "TP"
 if tp_col not in df_active.columns:
     st.warning(f"Missing required column: {tp_col}")
@@ -109,7 +129,7 @@ if show_debug:
     st.dataframe(df_f, width="stretch")
 
 # ========== Summary ==========
-st.subheader("Summary")
+section_header("At-a-glance", "Row count and TP stats after sidebar filters (and velocity clipping if enabled).")
 count = len(df_f)
 tp_mean = df_f[tp_col].mean() if count else 0.0
 tp_median = df_f[tp_col].median() if count else 0.0
@@ -133,7 +153,7 @@ if use_delta and count:
 col1, col2 = st.columns(2)
 
 with col1:
-    st.subheader("Absolute Position RMS (X vs Y)")
+    section_header("Position RMS (X vs Y)", "Lateral vs longitudinal RMS error; color encodes TP or ΔTP.")
     # Always compare the two sources side by side (before and after/delta)
     if use_delta:
         # Show both reference and target RMS comparisons for X and Y, as well as their deltas
@@ -192,7 +212,7 @@ with col1:
         st.plotly_chart(fig_rms, width="stretch")
 
 with col2:
-    st.subheader("Velocity (vx vs vy)")
+    section_header("Velocity (vx vs vy)", "Planar velocity colored by TP or ΔTP.")
 
     def plot_velocity(df, vx, vy, vx_label, vy_label):
         fig = px.scatter(
@@ -218,7 +238,7 @@ with col2:
         plot_velocity(df_f, "vx", "vy", "Vx", "Vy")
 
 # ========== Metric Distribution ==========
-st.subheader("Metric Distribution")
+section_header("Metric distribution", "Histogram + marginal box for any Summary column or delta column.")
 metrics = ["xstd", "ystd", "xrms", "yrms", "vx", "vy", "TP"]
 metrics_delta = [f"{m}_delta" for m in metrics]
 metric_options = metrics_delta if use_delta else metrics
@@ -234,35 +254,45 @@ fig_hist = px.histogram(
     df_f,
     x=metric,
     nbins=40,
-    color_discrete_sequence=["#636EFA"],  # Plotly blue
-    marginal="box",  # Adds a box plot at the top
-    opacity=0.85,
+    color_discrete_sequence=["#0d9488"],
+    marginal="box",
+    opacity=0.88,
 )
 fig_hist.update_layout(
+    template="plotly_white",
     showlegend=False,
     bargap=0.04,
     xaxis_title=metric,
     yaxis_title="Count",
+    paper_bgcolor="rgba(248,250,252,0.9)",
+    plot_bgcolor="rgba(255,255,255,0.95)",
+    font=dict(family="system-ui, sans-serif", size=12, color="#334155"),
+    margin=dict(t=36, b=48, l=56, r=28),
 )
 st.plotly_chart(fig_hist, width="stretch")
 
-# Optionally, add a KDE/violin plot for more insight into distribution
-st.subheader("Density (KDE/Violin)")
+section_header("Density (violin)", "Shape of the selected metric including outliers.")
 fig_density = px.violin(
     df_f,
     y=metric,
     box=True,
     points="all",
+    color_discrete_sequence=["#312e81"],
 )
 fig_density.update_layout(
+    template="plotly_white",
     yaxis_title=metric,
     showlegend=False,
+    paper_bgcolor="rgba(248,250,252,0.9)",
+    plot_bgcolor="rgba(255,255,255,0.95)",
+    font=dict(family="system-ui, sans-serif", size=12, color="#334155"),
+    margin=dict(t=36, b=48, l=56, r=28),
 )
 st.plotly_chart(fig_density, width="stretch")
 
 # ========== Scenario-level Delta Analysis (Compare Mode) ==========
 if mode == "Compare Mode" and use_delta and "id" in df_cmp.columns:
-    st.subheader("Per-Scenario TP Delta (B - A)")
+    section_header("Per-scenario ΔTP", "Mean TP delta per scenario — rank by improvement, regression, or magnitude.")
 
     # Aggregate per scenario using mean delta TP
     scenario_delta = (

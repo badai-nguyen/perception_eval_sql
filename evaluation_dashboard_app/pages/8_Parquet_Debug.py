@@ -11,14 +11,30 @@ import os
 import pathlib
 from typing import Any, Dict, List, Optional, Tuple
 
+from lib.page_chrome import inject_app_page_styles, render_page_hero
+
 try:
     import plotly.graph_objects as go
     HAS_PLOTLY = True
 except ImportError:
     HAS_PLOTLY = False
 
-st.set_page_config(layout="wide", page_title="Parquet & PKL Debug")
-st.title("Parquet & PKL & result.json File Inspector")
+st.set_page_config(
+    layout="wide",
+    page_title="Parquet & PKL Debug",
+    page_icon="🔬",
+    initial_sidebar_state="expanded",
+)
+inject_app_page_styles()
+render_page_hero(
+    kicker="Developer tools",
+    title="Parquet, PKL & result.json inspector",
+    description=(
+        "Peek inside evaluation artifacts: schema, keys, criteria status, and optional plots — "
+        "for debugging pipeline output without leaving the dashboard."
+    ),
+    mode="Single Run",
+)
 
 # =============================
 # DuckDB

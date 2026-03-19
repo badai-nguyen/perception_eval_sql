@@ -15,15 +15,25 @@ from lib.path_utils import (
     delete_run,
     format_size,
 )
+from lib.page_chrome import inject_app_page_styles, render_page_hero, section_header
 
 st.set_page_config(
     page_title="Data Management",
     page_icon="📁",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-st.title("📁 Data Management")
-st.caption("List runs, free space by deleting runs, and copy shareable links to share results with others.")
+inject_app_page_styles()
+render_page_hero(
+    kicker="Workspace",
+    title="Data management",
+    description=(
+        "Browse runs under the data root, check Summary/Score/Parquet flags, copy shareable Overview links, "
+        "and delete runs to free disk space."
+    ),
+    mode="Single Run",
+)
 
 data_root = get_data_root()
 st.sidebar.info(f"**Data root:** `{get_data_root_display()}/`")
@@ -46,12 +56,11 @@ for run_path in run_dirs:
         "Parquet": "✓" if info["has_parquet"] else "—",
     })
 
-st.subheader("Runs")
+section_header("Runs in data root", "Size, modified time, and which artifacts exist per run.")
 st.dataframe(rows, width="stretch", hide_index=True)
 
 # Shareable link builder
-st.subheader("Share result with others")
-st.caption("Append the query below to your server URL to open Overview with the selected run(s).")
+section_header("Share with teammates", "Compose a query string for Overview — append it to your app base URL.")
 col_a, col_b = st.columns(2)
 with col_a:
     run_names = [r["Run name"] for r in rows]
@@ -73,8 +82,7 @@ st.code(q, language=None)
 st.caption("Example: `https://your-server:8501/?` + the query above.")
 
 # Delete section
-st.subheader("Delete a run")
-st.caption("Permanently remove a run and free disk space. This cannot be undone.")
+section_header("Delete a run", "Permanent — frees disk space. Use with care on shared servers.")
 del_run_name = st.selectbox(
     "Run to delete",
     options=run_names,

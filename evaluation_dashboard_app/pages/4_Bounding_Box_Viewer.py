@@ -10,9 +10,15 @@ from typing import Any, List, Optional, Tuple
 
 from lib.path_utils import path_display
 from lib.parquet_schema import schema_flags
+from lib.page_chrome import inject_app_page_styles, render_loaded_data_section, render_page_hero
 
-st.set_page_config(layout="wide")
-st.title("Bounding Box Viewer")
+st.set_page_config(
+    layout="wide",
+    page_title="Bounding Box Viewer",
+    page_icon="🖼️",
+    initial_sidebar_state="expanded",
+)
+inject_app_page_styles()
 
 # =============================
 # Session state from Overview (run path)
@@ -61,19 +67,33 @@ for i, (r, pl) in enumerate(zip(runs, parquet_lists)):
 multi_run = len(runs) >= 2
 
 # ----------------------------
-# Loaded Runs (from Overview)
+# Loaded Runs (from Overview) + hero
 # ----------------------------
-st.subheader("Loaded Runs")
+_ld_entries = []
 for i, r in enumerate(runs):
     lbl = run_labels_list[i] if i < len(run_labels_list) else str(i)
-    prefix = "Baseline (A):" if lbl == "A" else f"Candidate ({lbl}):"
-    st.markdown(f"**{prefix}** `{path_display(r['path'])}`")
+    if lbl == "A":
+        _ltitle = "Baseline · A"
+    else:
+        _ltitle = f"Candidate · {lbl}"
+    _ld_entries.append((_ltitle, path_display(r["path"])))
+render_loaded_data_section(_ld_entries)
+render_page_hero(
+    kicker="Spatial visualization",
+    title="Bounding box & BEV viewer",
+    description=(
+        "Inspect frames from parquet: camera overlays, bird’s-eye context, and optional multi-run comparison "
+        "when several evaluations are loaded from Overview."
+    ),
+    mode=mode,
+)
 
 # ----------------------------
 # Sidebar (Filters)
 # ----------------------------
 with st.sidebar:
-    st.header("Filters")
+    st.markdown("##### Filters")
+    st.caption("Parquet file, suite, scenario, frame — narrow down what you visualize.")
 
     if multi_run:
         runs_to_show = st.multiselect(

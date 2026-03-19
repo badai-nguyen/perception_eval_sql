@@ -2,8 +2,23 @@ import streamlit as st
 import re
 import subprocess
 
-st.set_page_config(page_title="lsim_analysis_tool runner", layout="centered")
-st.title("lsim_analysis_tool runner")
+from lib.page_chrome import inject_app_page_styles, render_page_hero
+
+st.set_page_config(
+    page_title="lsim_analysis_tool runner",
+    page_icon="⚙️",
+    layout="centered",
+)
+inject_app_page_styles()
+render_page_hero(
+    kicker="CLI bridge",
+    title="lsim_analysis_tool runner",
+    description=(
+        "Paste Autoware Evaluator report or suite URLs, generate shell snippets, and run analysis commands "
+        "from a simple form."
+    ),
+    mode="Single Run",
+)
 
 # Constants and regexes
 JOB_RE = re.compile(r"/reports/([0-9a-fA-F-]{36})")
