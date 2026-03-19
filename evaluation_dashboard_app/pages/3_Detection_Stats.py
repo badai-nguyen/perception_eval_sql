@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional, List, Tuple
 
 from lib.path_utils import path_display
+from lib.parquet_schema import schema_flags
 
 # Perception diff: unified improved/degraded palette (Hierarchical view + Comparison lens)
 IMPROVED_COLOR = "#1a9850"
@@ -308,9 +309,169 @@ filters_base = {
 }
 filters_list = [filters_base] * len(runs)
 
+# Schema flags for optional columns (confidence, velocity, etc.)
+schema = schema_flags(con, target_file)
+
 # =============================
 # Main Content
 # =============================
+
+# -----------------------------
+# KPI strip (TP, FP, FN, TPR, FPR, Precision, Recall, F1)
+# -----------------------------
+def _flat_view(i: int) -> str:
+    return "view_eval_flat" if i == 0 else f"view_eval_flat_{i}"
+
+def _kpi_row_for_view(con, view: str, filter_clause: str):
+    """Return dict with tp_gt, fn, tp_est, fp and derived TPR, FPR, Precision, Recall, F1."""
+    q = f"""
+    SELECT
+        COUNT(*) FILTER (WHERE source = 'GT' AND status = 'TP') AS tp_gt,
+        COUNT(*) FILTER (WHERE source = 'GT' AND status = 'FN') AS fn,
+        COUNT(*) FILTER (WHERE source = 'EST' AND status = 'TP') AS tp_est,
+        COUNT(*) FILTER (WHERE source = 'EST' AND status = 'FP') AS fp
+    FROM {view}
+    WHERE {filter_clause}
+    """
+    row = con.execute(q).fetchone()
+    if not row:
+        return None
+    tp_gt, fn, tp_est, fp = int(row[0]), int(row[1]), int(row[2]), int(row[3])
+    gt_total = tp_gt + fn
+    est_total = tp_est + fp
+    tpr = (tp_gt / gt_total) if gt_total > 0 else None
+    fpr = (fp / est_total) if est_total > 0 else None
+    precision = (tp_est / est_total) if est_total > 0 else None
+    recall = tpr
+    if precision is not None and recall is not None and (precision + recall) > 0:
+        f1 = 2 * precision * recall / (precision + recall)
+    else:
+        f1 = None
+    return {
+        "tp": tp_gt, "fp": fp, "fn": fn,
+        "tpr": tpr, "fpr": fpr, "precision": precision, "recall": recall, "f1": f1,
+    }
+
+if st.button("Open Bounding Box Viewer", key="det_stats_open_bev_top", help="Open the BEV page with current run(s). Use links in tables below to open with a specific scenario/frame."):
+    st.switch_page("pages/4_Bounding_Box_Viewer.py")
+
+def _pct_str(v):
+    if v is None:
+        return "—"
+    p = min(100.0, v * 100)
+    return f"{p:.0f}%" if abs(p - round(p)) < 0.05 else f"{p:.1f}%"
+def _delta_pct(a_val, b_val):
+    if a_val is None or b_val is None:
+        return ""
+    d = (b_val - a_val) * 100
+    if d == 0:
+        return "0%"
+    return f"{d:+.1f}%" if d != int(d) else f"{int(d):+d}%"
+
+def _metric_cell(label: str, value: str, delta_str: str = "", delta_positive: bool | None = None) -> str:
+    delta_span = ""
+    if delta_str:
+        cls = "kpi-delta-inline delta-pos" if delta_positive is True else "kpi-delta-inline delta-neg" if delta_positive is False else "kpi-delta-inline"
+        delta_span = f'<span class="{cls}">{delta_str}</span>'
+    return f'<div class="kpi-cell"><span class="kpi-label">{label}</span><span class="kpi-value">{value}</span>{delta_span}</div>'
+
+def _render_kpi_card(title: str, kpi: dict, css_id: str = "", deltas: dict | None = None) -> str:
+    """deltas: optional dict with keys tp, fp, fn, tpr, fpr, precision, recall, f1 (B - A). Shown inline in card."""
+    if not kpi:
+        return f'<div class="kpi-card" id="{css_id}"><div class="kpi-title">{title}</div><div class="kpi-empty">No data</div></div>'
+    d = deltas or {}
+
+    def _cell(label: str, val: str, delta_key: str, lower_is_better: bool = False):
+        delta_val = d.get(delta_key)
+        if delta_val is None:
+            return _metric_cell(label, val)
+        if delta_key in ("tpr", "fpr", "precision", "recall") and isinstance(delta_val, (int, float)):
+            delta_str = f"{delta_val * 100:+.1f}%" if abs(delta_val) <= 1 else f"{delta_val:+.1f}%"
+        elif delta_key == "f1":
+            delta_str = f"{delta_val:+.3f}"
+        else:
+            delta_str = f"{delta_val:+d}" if isinstance(delta_val, int) else f"{delta_val:+.3f}"
+        good = (delta_val >= 0 and not lower_is_better) or (delta_val <= 0 and lower_is_better)
+        return _metric_cell(label, val, delta_str, good)
+
+    row1 = "".join([
+        _cell("TP", str(kpi["tp"]), "tp"),
+        _cell("FP", str(kpi["fp"]), "fp", lower_is_better=True),
+        _cell("FN", str(kpi["fn"]), "fn", lower_is_better=True),
+    ])
+    f1_val = f"{kpi['f1']:.3f}" if kpi.get("f1") is not None else "—"
+    row2 = "".join([
+        _cell("TPR", _pct_str(kpi.get("tpr")), "tpr"),
+        _cell("FPR", _pct_str(kpi.get("fpr")), "fpr", lower_is_better=True),
+        _cell("Precision", _pct_str(kpi.get("precision")), "precision"),
+        _cell("Recall", _pct_str(kpi.get("recall")), "recall"),
+        _cell("F1", f1_val, "f1"),
+    ])
+    return f'''<div class="kpi-card" id="{css_id}">
+        <div class="kpi-title">{title}</div>
+        <div class="kpi-row">{row1}</div>
+        <div class="kpi-row">{row2}</div>
+    </div>'''
+
+_KPI_CSS = """
+<style>
+.kpi-wrap { display: flex; flex-wrap: wrap; gap: 1.5rem; align-items: flex-start; margin-bottom: 1.5rem; }
+.kpi-card {
+    background: linear-gradient(180deg, #f8f9fa 0%, #f0f2f5 100%);
+    border: 1px solid #dee2e6;
+    border-radius: 12px;
+    padding: 1.5rem 2rem;
+    min-width: 360px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+}
+.kpi-title { font-size: 0.9rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: #495057; margin-bottom: 1rem; }
+.kpi-row { display: flex; gap: 2rem; margin-bottom: 0.85rem; }
+.kpi-row:last-child { margin-bottom: 0; }
+.kpi-cell { display: flex; flex-direction: column; align-items: flex-start; min-width: 4.5rem; }
+.kpi-label { font-size: 0.8rem; color: #6c757d; text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 0.25rem; }
+.kpi-value { font-size: 1.5rem; font-weight: 700; color: #212529; font-variant-numeric: tabular-nums; line-height: 1.2; }
+.kpi-delta-inline { display: block; font-size: 0.8rem; font-weight: 600; margin-top: 0.2rem; font-variant-numeric: tabular-nums; }
+.kpi-delta-inline.delta-pos { color: #0d6b0d; }
+.kpi-delta-inline.delta-neg { color: #b02a37; }
+.kpi-empty { font-size: 1rem; color: #6c757d; font-style: italic; }
+</style>
+"""
+
+if single_mode:
+    fc = build_filter_clause(filters_base)
+    kpi = _kpi_row_for_view(con, "view_eval_flat", fc)
+    st.markdown(_KPI_CSS, unsafe_allow_html=True)
+    if kpi:
+        html = '<div class="kpi-wrap">' + _render_kpi_card("Metrics (within filters & max range)", kpi) + "</div>"
+        st.markdown(html, unsafe_allow_html=True)
+    else:
+        st.caption("No KPI data.")
+else:
+    kpis = []
+    for i in range(len(runs)):
+        fc = build_filter_clause(filters_list[i])
+        kpi = _kpi_row_for_view(con, _flat_view(i), fc)
+        kpis.append((run_labels_list[i], kpi))
+    st.markdown(_KPI_CSS, unsafe_allow_html=True)
+    baseline = kpis[0][1] if kpis else None
+    cards_html_parts = []
+    for lbl, kpi in kpis:
+        deltas = None
+        if baseline and kpi and lbl != run_labels_list[0]:
+            deltas = {
+                "tp": kpi["tp"] - baseline["tp"],
+                "fp": kpi["fp"] - baseline["fp"],
+                "fn": kpi["fn"] - baseline["fn"],
+                "tpr": (kpi["tpr"] - baseline["tpr"]) if (kpi.get("tpr") is not None and baseline.get("tpr") is not None) else None,
+                "fpr": (kpi["fpr"] - baseline["fpr"]) if (kpi.get("fpr") is not None and baseline.get("fpr") is not None) else None,
+                "precision": (kpi["precision"] - baseline["precision"]) if (kpi.get("precision") is not None and baseline.get("precision") is not None) else None,
+                "recall": (kpi["recall"] - baseline["recall"]) if (kpi.get("recall") is not None and baseline.get("recall") is not None) else None,
+                "f1": (kpi["f1"] - baseline["f1"]) if (kpi.get("f1") is not None and baseline.get("f1") is not None) else None,
+            }
+        cards_html_parts.append(_render_kpi_card(f"Run {lbl}", kpi or {}, f"kpi-run-{lbl}", deltas=deltas))
+    st.markdown('<div class="kpi-wrap">' + "".join(cards_html_parts) + "</div>", unsafe_allow_html=True)
+
+st.divider()
 
 if st.checkbox("Debug: Inspect Parquet (All Runs)" if not single_mode else "Debug: Inspect Parquet"):
     cols_used = st.columns(len(target_files))
@@ -391,10 +552,6 @@ if st.checkbox("Debug: Inspect Parquet (All Runs)" if not single_mode else "Debu
 
 
 
-# Helper: view name for run index i (0-based)
-def _flat_view(i: int) -> str:
-    return "view_eval_flat" if i == 0 else f"view_eval_flat_{i}"
-
 # =============================
 # Panel 1: t4dataset Summary
 # =============================
@@ -426,6 +583,7 @@ try:
         st.write("**Status Count Table (label × status)**")
         if not df_status.empty:
             df_status_wide = df_status.pivot_table(index='label', columns='status', values='num', fill_value=0).reset_index()
+            st.download_button("Download status count (CSV)", data=df_status_wide.to_csv(index=False).encode("utf-8"), file_name="detection_status_count.csv", mime="text/csv", key="dl_status_count")
             st.dataframe(df_status_wide)
             fig2 = px.bar(
                 df_status,
@@ -467,6 +625,7 @@ except Exception as e:
 # =============================
 # Panel 2: TP Rate (single) / TP Rate Comparison (compare)
 # =============================
+st.divider()
 st.subheader("TP Rate" + (" Comparison" if not single_mode else ""))
 
 _tpr_query = """
@@ -681,6 +840,78 @@ except Exception as e:
     st.error(f"Error: {e}")
 
 # =============================
+# =============================
+# Panel 4b: Confidence distribution (EST only, when column exists)
+# =============================
+if schema.get("has_confidence"):
+    st.divider()
+    st.subheader("Confidence distribution (EST)")
+    st.caption("Detection confidence for estimated objects. Use threshold below to see Precision/Recall at that cutoff.")
+    try:
+        fc = build_filter_clause(filters_base)
+        if single_mode:
+            q_conf = f"""
+            SELECT CAST(confidence AS DOUBLE) AS conf
+            FROM view_eval_flat
+            WHERE source = 'EST' AND confidence IS NOT NULL AND {fc}
+            """
+            df_conf = con.execute(q_conf).df()
+            if not df_conf.empty:
+                fig_conf = px.histogram(
+                    df_conf, x="conf", nbins=40,
+                    title="EST confidence distribution",
+                    labels={"conf": "Confidence"},
+                )
+                fig_conf.update_layout(yaxis_title="Count")
+                st.plotly_chart(fig_conf, use_container_width=True)
+                thresh = st.slider("Confidence threshold", 0.0, 1.0, 0.5, 0.05, key="conf_thresh")
+                q_pr = f"""
+                WITH gt_tp AS (
+                    SELECT COUNT(*) AS n FROM view_eval_flat
+                    WHERE source = 'GT' AND status IN ('TP','FN') AND {fc}
+                ),
+                tp_at AS (
+                    SELECT COUNT(*) AS n FROM view_eval_flat
+                    WHERE source = 'EST' AND status = 'TP' AND confidence IS NOT NULL AND CAST(confidence AS DOUBLE) >= {thresh} AND {fc}
+                ),
+                fp_at AS (
+                    SELECT COUNT(*) AS n FROM view_eval_flat
+                    WHERE source = 'EST' AND status = 'FP' AND confidence IS NOT NULL AND CAST(confidence AS DOUBLE) >= {thresh} AND {fc}
+                )
+                SELECT (SELECT n FROM gt_tp) AS gt_total, (SELECT n FROM tp_at) AS tp_at, (SELECT n FROM fp_at) AS fp_at
+                """
+                row_pr = con.execute(q_pr).fetchone()
+                if row_pr and row_pr[0] and row_pr[0] > 0:
+                    gt_tot, tp_at, fp_at = int(row_pr[0]), int(row_pr[1]), int(row_pr[2])
+                    fn_at = gt_tot - tp_at
+                    rec = tp_at / gt_tot if gt_tot else None
+                    prec = tp_at / (tp_at + fp_at) if (tp_at + fp_at) > 0 else None
+                    st.caption(f"At threshold {thresh:.2f}: Precision = {prec:.2%}, Recall = {rec:.2%} (TP={tp_at}, FP={fp_at}, FN={fn_at})")
+            else:
+                st.info("No EST confidence data in range.")
+        else:
+            dfs_c = []
+            for i in range(len(runs)):
+                fc_i = build_filter_clause(filters_list[i])
+                q = f"SELECT CAST(confidence AS DOUBLE) AS conf FROM {_flat_view(i)} WHERE source = 'EST' AND confidence IS NOT NULL AND {fc_i}"
+                df_i = con.execute(q).df()
+                df_i["run"] = run_labels_list[i]
+                dfs_c.append(df_i)
+            df_c_all = pd.concat(dfs_c, ignore_index=True)
+            if not df_c_all.empty:
+                fig_conf = px.histogram(
+                    df_c_all, x="conf", color="run", nbins=40, barmode="overlay", opacity=0.6,
+                    title="EST confidence distribution (by run)",
+                    labels={"conf": "Confidence"},
+                    color_discrete_sequence=RUN_COLORS,
+                )
+                st.plotly_chart(fig_conf, use_container_width=True)
+            else:
+                st.info("No EST confidence data.")
+    except Exception as e:
+        st.caption(f"Confidence query failed: {e}")
+
+# =============================
 # Panel 5: Perception diff vs baseline A (compare mode only)
 # =============================
 _DIST_BIN_CASE = """CASE
@@ -830,6 +1061,7 @@ def _plot_comparison_lens_treemap(
 
 
 if not single_mode:
+    st.divider()
     st.subheader("Perception diff (vs baseline A)")
     st.caption(
         "Per-GT-object comparison vs baseline A: **degraded** = was TP on A and FN on candidate; "
@@ -1577,6 +1809,24 @@ if not single_mode:
                     with st.expander("Full frame table (sort: degraded desc)"):
                         if not df_frame_sorted.empty:
                             st.dataframe(df_frame_sorted, hide_index=True, width="stretch")
+                            row0 = df_frame_sorted.iloc[0]
+                            suite_val = str(row0.get("suite_name", "") or "")
+                            scenario_val = str(row0.get("scenario_name", "") or "")
+                            t4_val = str(row0.get("t4dataset_name", "") or "")
+                            frame_val = row0.get("frame_index")
+                            if st.button(f"View in Bounding Box Viewer (top degraded frame for {lbl})", key=f"det_stats_bev_compare_{lbl}_{idx}", help="Open BEV with suite/scenario/frame of the top degraded frame."):
+                                if suite_val:
+                                    st.session_state["bbox_viewer_link_suite"] = suite_val
+                                if scenario_val:
+                                    st.session_state["bbox_viewer_link_scenario"] = scenario_val
+                                if t4_val:
+                                    st.session_state["bbox_viewer_link_t4dataset"] = t4_val
+                                if frame_val is not None:
+                                    try:
+                                        st.session_state["bbox_viewer_frame_index"] = int(frame_val)
+                                    except (TypeError, ValueError):
+                                        pass
+                                st.switch_page("pages/4_Bounding_Box_Viewer.py")
                         else:
                             st.caption("No frame breakdown.")
             else:
@@ -1587,6 +1837,7 @@ if not single_mode:
 # =============================
 # Single mode: Frame / Object level — Where are the misses?
 # =============================
+st.divider()
 if single_mode:
     st.subheader("Frame / Object level: Where are the misses?")
     try:
@@ -1597,6 +1848,7 @@ if single_mode:
                 frame_index,
                 COALESCE(MAX(CAST(scenario_name AS VARCHAR)), '') AS scenario_name,
                 COALESCE(MAX(CAST(suite_name AS VARCHAR)), '') AS suite_name,
+                COALESCE(MAX(CAST(t4dataset_name AS VARCHAR)), '') AS t4dataset_name,
                 COUNT(*) AS fn_cnt
             FROM view_eval_flat
             WHERE source = 'GT' AND status = 'FN' AND {filter_clause_base}
@@ -1620,7 +1872,27 @@ if single_mode:
             df_fn_object = con.execute(query_fn_object).df()
             if not df_fn_frame.empty:
                 st.markdown("**FN count by frame**")
+                st.download_button("Download FN by frame (CSV)", data=df_fn_frame.to_csv(index=False).encode("utf-8"), file_name="fn_by_frame.csv", mime="text/csv", key="dl_fn_frame")
                 st.dataframe(df_fn_frame, hide_index=True)
+                # View in BEV for top FN frame
+                row0 = df_fn_frame.iloc[0]
+                suite_val = str(row0.get("suite_name", "") or "")
+                scenario_val = str(row0.get("scenario_name", "") or "")
+                t4_val = str(row0.get("t4dataset_name", "") or "")
+                frame_val = row0.get("frame_index")
+                if st.button("View in Bounding Box Viewer (top FN frame)", key="det_stats_bev_fn_frame", help="Open BEV with suite/scenario/frame of the top FN frame."):
+                    if suite_val:
+                        st.session_state["bbox_viewer_link_suite"] = suite_val
+                    if scenario_val:
+                        st.session_state["bbox_viewer_link_scenario"] = scenario_val
+                    if t4_val:
+                        st.session_state["bbox_viewer_link_t4dataset"] = t4_val
+                    if frame_val is not None:
+                        try:
+                            st.session_state["bbox_viewer_frame_index"] = int(frame_val)
+                        except (TypeError, ValueError):
+                            pass
+                    st.switch_page("pages/4_Bounding_Box_Viewer.py")
             else:
                 st.caption("No FN by frame.")
             if not df_fn_object.empty:
@@ -1638,6 +1910,7 @@ if single_mode:
 # =============================
 # Panel 6: Mean Error (single) / Mean Error Comparison (compare)
 # =============================
+st.divider()
 st.subheader("Mean Error" + (" Comparison" if not single_mode else ""))
 
 try:
@@ -1784,8 +2057,122 @@ else:
                 st.error(f"Error (Run {lbl} − A): {e}")
 
 # =============================
+# Panel 6b: Extended errors (velocity / 3D, when columns exist)
+# =============================
+_has_vel_err = schema.get("has_vx_error") and schema.get("has_vy_error") and schema.get("has_speed_error")
+if _has_vel_err:
+    st.divider()
+    st.subheader("Mean velocity / speed error (TP only)")
+    st.caption("Mean absolute vx_error, vy_error, speed_error for matched detections.")
+    try:
+        fc = build_filter_clause(filters_base)
+        if single_mode:
+            q_vel = f"""
+            SELECT
+                label,
+                AVG(ABS(CAST(vx_error AS DOUBLE))) FILTER (WHERE status = 'TP' AND vx_error IS NOT NULL) AS mean_abs_vx_error,
+                AVG(ABS(CAST(vy_error AS DOUBLE))) FILTER (WHERE status = 'TP' AND vy_error IS NOT NULL) AS mean_abs_vy_error,
+                AVG(ABS(CAST(speed_error AS DOUBLE))) FILTER (WHERE status = 'TP' AND speed_error IS NOT NULL) AS mean_abs_speed_error
+            FROM view_eval_flat
+            WHERE {fc}
+            GROUP BY label
+            ORDER BY label
+            """
+            df_vel = con.execute(q_vel).df()
+            if not df_vel.empty:
+                fig_vel = go.Figure()
+                fig_vel.add_trace(go.Bar(x=df_vel["label"], y=df_vel["mean_abs_vx_error"], name="VX Error", marker_color=RUN_COLORS[0]))
+                fig_vel.add_trace(go.Bar(x=df_vel["label"], y=df_vel["mean_abs_vy_error"], name="VY Error", marker_color=RUN_COLORS[1]))
+                fig_vel.add_trace(go.Bar(x=df_vel["label"], y=df_vel["mean_abs_speed_error"], name="Speed Error", marker_color=RUN_COLORS[2]))
+                fig_vel.update_layout(title=f"Mean velocity/speed error within {max_eval_range} [m]", xaxis_title="Label", yaxis_title="Error", barmode="group")
+                st.plotly_chart(fig_vel, width="stretch")
+            else:
+                st.info("No velocity error data.")
+        else:
+            dfs_vel = []
+            for i in range(len(runs)):
+                fc_i = build_filter_clause(filters_list[i])
+                q = f"""
+                SELECT label,
+                    AVG(ABS(CAST(vx_error AS DOUBLE))) FILTER (WHERE status = 'TP' AND vx_error IS NOT NULL) AS mean_abs_vx_error,
+                    AVG(ABS(CAST(vy_error AS DOUBLE))) FILTER (WHERE status = 'TP' AND vy_error IS NOT NULL) AS mean_abs_vy_error,
+                    AVG(ABS(CAST(speed_error AS DOUBLE))) FILTER (WHERE status = 'TP' AND speed_error IS NOT NULL) AS mean_abs_speed_error
+                FROM {_flat_view(i)}
+                WHERE {fc_i}
+                GROUP BY label ORDER BY label
+                """
+                df_i = con.execute(q).df()
+                df_i["run"] = run_labels_list[i]
+                dfs_vel.append(df_i)
+            df_vel_all = pd.concat(dfs_vel, ignore_index=True)
+            if not df_vel_all.empty:
+                for err_name, col in [("VX Error", "mean_abs_vx_error"), ("VY Error", "mean_abs_vy_error"), ("Speed Error", "mean_abs_speed_error")]:
+                    fig_vel = px.bar(
+                        df_vel_all, x="label", y=col, color="run", barmode="group",
+                        title=f"Mean {err_name} by run",
+                        color_discrete_sequence=RUN_COLORS,
+                    )
+                    st.plotly_chart(fig_vel, width="stretch")
+            else:
+                st.info("No velocity error data.")
+    except Exception as e:
+        st.caption(f"Velocity error query failed: {e}")
+
+if schema.get("has_z_error") or schema.get("has_center_distance") or schema.get("has_plane_distance"):
+    with st.expander("Z / center / plane distance (TP only)", expanded=False):
+        try:
+            fc = build_filter_clause(filters_base)
+            sel = []
+            if schema.get("has_z_error"):
+                sel.append("AVG(ABS(CAST(z_error AS DOUBLE))) FILTER (WHERE status = 'TP' AND z_error IS NOT NULL) AS mean_abs_z_error")
+            if schema.get("has_center_distance"):
+                sel.append("AVG(CAST(center_distance AS DOUBLE)) FILTER (WHERE status = 'TP' AND center_distance IS NOT NULL) AS mean_center_distance")
+            if schema.get("has_plane_distance"):
+                sel.append("AVG(CAST(plane_distance AS DOUBLE)) FILTER (WHERE status = 'TP' AND plane_distance IS NOT NULL) AS mean_plane_distance")
+            if sel:
+                q_extra = f"""
+                SELECT label, {', '.join(sel)}
+                FROM view_eval_flat
+                WHERE {fc}
+                GROUP BY label ORDER BY label
+                """
+                df_extra = con.execute(q_extra).df()
+                if not df_extra.empty:
+                    st.dataframe(df_extra, hide_index=True)
+                else:
+                    st.caption("No data.")
+        except Exception as e:
+            st.caption(str(e))
+
+# =============================
+# Panel 6c: Point cloud quality (when column exists)
+# =============================
+if schema.get("has_pointcloud_num"):
+    st.divider()
+    st.subheader("Point cloud count (GT)")
+    st.caption("LiDAR point count per GT object when available.")
+    try:
+        fc = build_filter_clause(filters_base)
+        q_pc = f"""
+        SELECT label, AVG(CAST(pointcloud_num AS DOUBLE)) AS avg_pointcloud_num, COUNT(*) AS n
+        FROM view_eval_flat
+        WHERE source = 'GT' AND pointcloud_num IS NOT NULL AND {fc}
+        GROUP BY label ORDER BY label
+        """
+        df_pc = con.execute(q_pc).df()
+        if not df_pc.empty:
+            st.dataframe(df_pc, hide_index=True)
+            fig_pc = px.bar(df_pc, x="label", y="avg_pointcloud_num", title="Mean pointcloud_num by label")
+            st.plotly_chart(fig_pc, use_container_width=True)
+        else:
+            st.info("No pointcloud_num data in range.")
+    except Exception as e:
+        st.caption(f"Point cloud query failed: {e}")
+
+# =============================
 # Panel 8: Object Count with Distance
 # =============================
+st.divider()
 st.subheader("Object count with distance")
 
 try:

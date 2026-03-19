@@ -1,13 +1,15 @@
 import duckdb
 import streamlit as st
 import plotly.graph_objects as go
+import plotly.express as px
 import numpy as np
 import pandas as pd
 import os
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import Any, List, Optional, Tuple
 
 from lib.path_utils import path_display
+from lib.parquet_schema import schema_flags
 
 st.set_page_config(layout="wide")
 st.title("Bounding Box Viewer")
@@ -115,6 +117,9 @@ has_visibility = "visibility" in cols
 has_suite_name = "suite_name" in cols
 has_scenario_name = "scenario_name" in cols
 has_t4dataset_name = "t4dataset_name" in cols
+schema = schema_flags(con, filter_file)
+# Optional columns for hover (z, height, vx, vy, confidence, pointcloud_num)
+hover_extra_cols = [c for c in ["z", "height", "vx", "vy", "confidence", "pointcloud_num"] if c in cols]
 
 
 # --- Scene selection: one suite + one scenario (when columns exist)
@@ -269,6 +274,9 @@ if not selected_labels:
 # --- invalidオブジェクト表示オプション ---
 with st.sidebar:
     show_invalid = st.checkbox("Show invalid (zero-size) objects", value=False)
+    show_velocity_arrows = False
+    if schema.get("has_velocity"):
+        show_velocity_arrows = st.checkbox("Show velocity vectors", value=False, help="Draw arrows for vx, vy (scale: 2 s)")
 
 # --- Comparison view mode (when multiple runs) ---
 compare_view_mode = "side_by_side"
@@ -299,9 +307,10 @@ if has_visibility and selected_visibility:
     where.append(f"COALESCE(visibility,'UNKNOWN') IN ({','.join(['?']*len(selected_visibility))})")
     params.extend(selected_visibility)
 
+select_extras = (", " + ", ".join(hover_extra_cols)) if hover_extra_cols else ""
 sql = f"""
 SELECT frame_index, x, y, length, width, yaw, label, topic_name, source, status, uuid
-{select_vis}
+{select_vis}{select_extras}
 FROM parquet_scan(?)
 WHERE {" AND ".join(where)}
 ORDER BY frame_index
@@ -356,6 +365,12 @@ color_map = {
 def get_color(source, status): return color_map.get((source, status), "#999999")
 
 # ----------------------------
+# Link back to Detection Stats
+# ----------------------------
+if st.button("See full stats (Detection Stats)", key="bev_link_detection_stats", help="Open the Detection Stats page with the same run(s)."):
+    st.switch_page("pages/3_Detection_Stats.py")
+
+# ----------------------------
 # Currently showing & comparison hint
 # ----------------------------
 if len(files_to_load) == 1:
@@ -387,11 +402,12 @@ if "bbox_viewer_frame_index" in st.session_state:
     except (TypeError, ValueError):
         st.session_state["bbox_viewer_frame"] = int(df.frame_index.min())
     del st.session_state["bbox_viewer_frame_index"]
+f_min, f_max = int(df.frame_index.min()), int(df.frame_index.max())
 frame = st.slider(
     "Frame index",
-    int(df.frame_index.min()),
-    int(df.frame_index.max()),
-    value=st.session_state.get("bbox_viewer_frame", int(df.frame_index.min())),
+    f_min,
+    f_max,
+    value=st.session_state.get("bbox_viewer_frame", f_min),
     step=1,
     key="bbox_viewer_frame",
 )
@@ -399,6 +415,22 @@ df_frame = df[df.frame_index == frame]
 
 total_records = len(df_frame)
 valid_records = int(((df_frame["length"] > 0) & (df_frame["width"] > 0)).sum())
+
+# Current-frame KPI strip (TP / FN / FP for this frame)
+gt_frame = df_frame[df_frame["source"] == "GT"]
+est_frame = df_frame[df_frame["source"] == "EST"]
+tp_count = int(((gt_frame["status"] == "TP").sum()))
+fn_count = int(((gt_frame["status"] == "FN").sum()))
+fp_count = int(((est_frame["status"] == "FP").sum()))
+tp_est_count = int(((est_frame["status"] == "TP").sum()))
+gt_total = tp_count + fn_count
+tpr_frame = (tp_count / gt_total) if gt_total > 0 else None
+k1, k2, k3, k4, k5 = st.columns(5)
+with k1: st.metric("TP (this frame)", tp_count)
+with k2: st.metric("FN (this frame)", fn_count)
+with k3: st.metric("FP (this frame)", fp_count)
+with k4: st.metric("TP (EST)", tp_est_count)
+with k5: st.metric("TPR", f"{tpr_frame:.2%}" if tpr_frame is not None else "—")
 
 # ----------------------------
 # Quick view: switch between "All (comparison)" and single-run view
@@ -471,14 +503,30 @@ def _build_one_bev_figure(
     show_inv: bool,
     x_range: Tuple[float, float] | None = None,
     y_range: Tuple[float, float] | None = None,
+    hover_extra_cols: Optional[List[str]] = None,
+    show_velocity_arrows: bool = False,
 ) -> go.Figure:
     """Build one BEV figure from a single run's frame data. Optional x_range, y_range for consistent side-by-side scale."""
+    if hover_extra_cols is None:
+        hover_extra_cols = []
+    extra_in_df = [c for c in hover_extra_cols if c in df_fr.columns]
+    n_extra = len(extra_in_df)
+
+    def _make_customdata(labels, lengths, widths, uuids, extras_df=None):
+        if extras_df is None or n_extra == 0:
+            return np.column_stack([labels, lengths, widths, uuids])
+        extra_arrays = [extras_df[c].values for c in extra_in_df]
+        return np.column_stack([labels, lengths, widths, uuids] + extra_arrays)
+
+    def _hovertemplate():
+        base = "X: %{x}<br>Y: %{y}<br>Label: %{customdata[0]}<br>size: %{customdata[1]:.2f} x %{customdata[2]:.2f}<br>UUID: %{customdata[3]}"
+        for i, c in enumerate(extra_in_df):
+            base += f"<br>{c}: %{{customdata[{4 + i}]}}"
+        return base + "<extra></extra>"
+
     fig = go.Figure()
     shown = set()
-    hovertemplate = (
-        "X: %{x}<br>Y: %{y}<br>Label: %{customdata[0]}<br>size: %{customdata[1]:.2f} x %{customdata[2]:.2f}<br>"
-        "UUID: %{customdata[3]}<extra></extra>"
-    )
+    hovertemplate = _hovertemplate()
     mask_both_invalid = (df_fr["length"] <= 0) & (df_fr["width"] <= 0)
     mask_one_invalid = ((df_fr["length"] <= 0) | (df_fr["width"] <= 0)) & ~mask_both_invalid
     mask_valid = (df_fr["length"] > 0) & (df_fr["width"] > 0)
@@ -489,7 +537,7 @@ def _build_one_bev_figure(
             x=d["x"], y=d["y"], mode="markers",
             marker=dict(symbol="x", size=8, color=d.apply(lambda row: get_color(row.source, row.status), axis=1)),
             opacity=0.9, showlegend=False, hovertemplate=hovertemplate,
-            customdata=np.column_stack([d["label"].values, d["length"].values, d["width"].values, d["uuid"].values]),
+            customdata=_make_customdata(d["label"].values, d["length"].values, d["width"].values, d["uuid"].values, d),
             name="invalid"
         ))
     if not df_fr[mask_one_invalid].empty:
@@ -502,7 +550,7 @@ def _build_one_bev_figure(
                            color=get_color(group.iloc[0].source, group.iloc[0].status)),
                 opacity=0.6, name=name, legendgroup=name, showlegend=name not in shown,
                 hovertemplate=hovertemplate,
-                customdata=np.column_stack([group["label"].values, group["length"].values, group["width"].values, group["uuid"].values])
+                customdata=_make_customdata(group["label"].values, group["length"].values, group["width"].values, group["uuid"].values, group)
             ))
             shown.add(name)
     if not df_fr[mask_valid].empty:
@@ -512,14 +560,35 @@ def _build_one_bev_figure(
             show = name not in shown
             for _, row in group.iterrows():
                 x_poly, y_poly = rotated_rect(row.x, row.y, row.length, row.width, row.yaw)
+                row_custom = [row.label, row.length, row.width, row.uuid]
+                if n_extra:
+                    row_custom.extend([row[c] if c in row.index else "" for c in extra_in_df])
                 fig.add_trace(go.Scatter(
                     x=x_poly, y=y_poly, mode="lines", fill="toself", opacity=0.6,
                     line=dict(color=get_color(row.source, row.status)),
                     name=name, legendgroup=name, showlegend=show, hovertemplate=hovertemplate,
-                    customdata=[[row.label, row.length, row.width, row.uuid]]
+                    customdata=[row_custom]
                 ))
                 show = False
             shown.add(name)
+    # Velocity arrows (scale: 2 s)
+    if show_velocity_arrows and "vx" in df_fr.columns and "vy" in df_fr.columns:
+        v_scale = 2.0
+        v_mask = df_fr["x"].notna() & df_fr["y"].notna() & df_fr["vx"].notna() & df_fr["vy"].notna()
+        v_df = df_fr[v_mask]
+        if not v_df.empty:
+            xs, ys = [], []
+            for _, r in v_df.iterrows():
+                x0, y0 = float(r["x"]), float(r["y"])
+                vx, vy = float(r["vx"]), float(r["vy"])
+                xs.extend([x0, x0 + v_scale * vx, np.nan])
+                ys.extend([y0, y0 + v_scale * vy, np.nan])
+            fig.add_trace(go.Scatter(
+                x=xs, y=ys, mode="lines",
+                line=dict(color="rgba(100,100,100,0.7)", width=2, dash="dot"),
+                name="Velocity (2 s)",
+                showlegend=True,
+            ))
     fig.add_trace(go.Scatter(
         x=[0, -1.5, -1.5, 0], y=[0, -1, 1, 0],
         mode="lines", fill="toself",
@@ -562,15 +631,28 @@ def _build_overlay_bev_figure(
     run_order: List[str],
     plot_title: str,
     show_inv: bool,
+    hover_extra_cols: Optional[List[str]] = None,
+    show_velocity_arrows: bool = False,
 ) -> go.Figure:
     """Build one BEV with all runs overlaid. Legend = run only (toggle by run). Line style = run."""
+    if hover_extra_cols is None:
+        hover_extra_cols = []
+    extra_in_df = [c for c in hover_extra_cols if c in df_frame.columns]
+    n_extra = len(extra_in_df)
+
+    def _overlay_hovertemplate():
+        base = (
+            "Run: %{customdata[0]}<br>X: %{x}<br>Y: %{y}<br>Label: %{customdata[1]}<br>"
+            "Status: %{customdata[4]}<br>size: %{customdata[2]:.2f} x %{customdata[3]:.2f}<br>"
+            "UUID: %{customdata[5]}"
+        )
+        for i, c in enumerate(extra_in_df):
+            base += f"<br>{c}: %{{customdata[{6 + i}]}}"
+        return base + "<extra></extra>"
+
     fig = go.Figure()
     dash_styles = ["solid", "dash", "dot", "dashdot"]
-    hovertemplate = (
-        "Run: %{customdata[0]}<br>X: %{x}<br>Y: %{y}<br>Label: %{customdata[1]}<br>"
-        "Status: %{customdata[4]}<br>size: %{customdata[2]:.2f} x %{customdata[3]:.2f}<br>"
-        "UUID: %{customdata[5]}<extra></extra>"
-    )
+    hovertemplate = _overlay_hovertemplate()
     for run_idx, run_lbl in enumerate(run_order):
         dash = dash_styles[run_idx % len(dash_styles)]
         fig.add_trace(go.Scatter(
@@ -591,6 +673,12 @@ def _build_overlay_bev_figure(
 
         if show_inv and not df_fr[mask_both_invalid].empty:
             d = df_fr[mask_both_invalid]
+            base_cd = np.column_stack([
+                np.full(len(d), run_lbl), d["label"].values, d["length"].values, d["width"].values,
+                (d["source"] + "/" + d["status"]).values, d["uuid"].values,
+            ])
+            if n_extra:
+                base_cd = np.column_stack([base_cd] + [d[c].values for c in extra_in_df])
             fig.add_trace(go.Scatter(
                 x=d["x"], y=d["y"], mode="markers",
                 marker=dict(
@@ -600,16 +688,20 @@ def _build_overlay_bev_figure(
                 ),
                 opacity=0.9, legendgroup=run_lbl, showlegend=False,
                 hovertemplate=hovertemplate,
-                customdata=np.column_stack([
-                    np.full(len(d), run_lbl), d["label"].values, d["length"].values, d["width"].values,
-                    (d["source"] + "/" + d["status"]).values, d["uuid"].values,
-                ]),
+                customdata=base_cd,
             ))
         if not df_fr[mask_one_invalid].empty:
             d = df_fr[mask_one_invalid].copy()
             d["status_str"] = d["source"] + "/" + d["status"]
             for _, group in d.groupby("status_str"):
                 status_str = group["status_str"].iloc[0]
+                base_cd = np.column_stack([
+                    np.full(len(group), run_lbl), group["label"].values,
+                    group["length"].values, group["width"].values,
+                    np.full(len(group), status_str), group["uuid"].values,
+                ])
+                if n_extra:
+                    base_cd = np.column_stack([base_cd] + [group[c].values for c in extra_in_df])
                 fig.add_trace(go.Scatter(
                     x=group["x"], y=group["y"], mode="markers",
                     marker=dict(
@@ -619,11 +711,7 @@ def _build_overlay_bev_figure(
                     ),
                     opacity=0.7, legendgroup=run_lbl, showlegend=False,
                     hovertemplate=hovertemplate,
-                    customdata=np.column_stack([
-                        np.full(len(group), run_lbl), group["label"].values,
-                        group["length"].values, group["width"].values,
-                        np.full(len(group), status_str), group["uuid"].values,
-                    ]),
+                    customdata=base_cd,
                 ))
         if not df_fr[mask_valid].empty:
             d = df_fr[mask_valid].copy()
@@ -631,13 +719,33 @@ def _build_overlay_bev_figure(
             for _, row in d.iterrows():
                 x_poly, y_poly = rotated_rect(row.x, row.y, row.length, row.width, row.yaw)
                 status_str = row["source"] + "/" + row["status"]
+                row_custom = [run_lbl, row.label, row.length, row.width, status_str, row.uuid]
+                if n_extra:
+                    row_custom.extend([row[c] if c in row.index else "" for c in extra_in_df])
                 fig.add_trace(go.Scatter(
                     x=x_poly, y=y_poly, mode="lines", fill="toself", opacity=0.5,
                     line=dict(color=get_color(row.source, row.status), width=2, dash=dash),
                     legendgroup=run_lbl, showlegend=False,
                     hovertemplate=hovertemplate,
-                    customdata=[[run_lbl, row.label, row.length, row.width, status_str, row.uuid]],
+                    customdata=[row_custom],
                 ))
+    if show_velocity_arrows and "vx" in df_frame.columns and "vy" in df_frame.columns:
+        v_scale = 2.0
+        v_mask = df_frame["x"].notna() & df_frame["y"].notna() & df_frame["vx"].notna() & df_frame["vy"].notna()
+        v_df = df_frame[v_mask]
+        if not v_df.empty:
+            xs, ys = [], []
+            for _, r in v_df.iterrows():
+                x0, y0 = float(r["x"]), float(r["y"])
+                vx, vy = float(r["vx"]), float(r["vy"])
+                xs.extend([x0, x0 + v_scale * vx, np.nan])
+                ys.extend([y0, y0 + v_scale * vy, np.nan])
+            fig.add_trace(go.Scatter(
+                x=xs, y=ys, mode="lines",
+                line=dict(color="rgba(100,100,100,0.7)", width=2, dash="dot"),
+                name="Velocity (2 s)",
+                showlegend=True,
+            ))
     fig.add_trace(go.Scatter(
         x=[0, -1.5, -1.5, 0], y=[0, -1, 1, 0],
         mode="lines", fill="toself",
@@ -654,6 +762,22 @@ def _build_overlay_bev_figure(
 
 
 # ----------------------------
+# Status color legend (all BEV views)
+# ----------------------------
+_legend_html = (
+    '<div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; '
+    "margin-bottom:10px; padding:10px 14px; background:#f0f2f6; border-radius:8px; font-size:0.9em; "
+    "border:1px solid #e0e0e0;\">"
+    "<span style=\"font-weight:700;\">Status:</span> "
+    '<span style="background:#00cc66;color:#000;padding:2px 8px;border-radius:4px;">GT/TP</span> '
+    '<span style="background:#ff9933;color:#000;padding:2px 8px;border-radius:4px;">GT/FN</span> '
+    '<span style="background:#66b3ff;color:#000;padding:2px 8px;border-radius:4px;">EST/TP</span> '
+    '<span style="background:#ff6666;color:#fff;padding:2px 8px;border-radius:4px;">EST/FP</span>'
+    "</div>"
+)
+st.markdown(_legend_html, unsafe_allow_html=True)
+
+# ----------------------------
 # Plot (single or side-by-side for multiple runs)
 # ----------------------------
 if solo_run is not None:
@@ -663,7 +787,7 @@ if solo_run is not None:
     valid_n = int(((df_solo["length"] > 0) & (df_solo["width"] > 0)).sum()) if not df_solo.empty else 0
     title = f"Run {solo_run} only — {selected_scenario or 'Scene'}<br>Frame {frame} | Total {total_n:,}, Valid {valid_n:,}"
     st.plotly_chart(
-        _build_one_bev_figure(df_solo, title, show_invalid),
+        _build_one_bev_figure(df_solo, title, show_invalid, hover_extra_cols=hover_extra_cols, show_velocity_arrows=show_velocity_arrows),
         width='stretch',
     )
 elif len(files_to_load) > 1 and compare_view_mode == "overlay":
@@ -688,7 +812,7 @@ elif len(files_to_load) > 1 and compare_view_mode == "overlay":
     st.markdown(color_ref, unsafe_allow_html=True)
     title = f"Overlay: {selected_scenario or 'Scene'} — Frame {frame}"
     st.plotly_chart(
-        _build_overlay_bev_figure(df_frame, [f[1] for f in files_to_load], title, show_invalid),
+        _build_overlay_bev_figure(df_frame, [f[1] for f in files_to_load], title, show_invalid, hover_extra_cols=hover_extra_cols, show_velocity_arrows=show_velocity_arrows),
         width='stretch',
     )
 elif len(files_to_load) > 1:
@@ -702,7 +826,7 @@ elif len(files_to_load) > 1:
         title = f"Run {run_lbl} — {selected_scenario or 'Scene'}<br>Frame {frame} | Total {total_n:,}, Valid {valid_n:,}"
         with col:
             st.plotly_chart(
-                _build_one_bev_figure(df_fr, title, show_invalid, x_range=x_range, y_range=y_range),
+                _build_one_bev_figure(df_fr, title, show_invalid, x_range=x_range, y_range=y_range, hover_extra_cols=hover_extra_cols, show_velocity_arrows=show_velocity_arrows),
                 width='stretch',
             )
 else:
@@ -710,6 +834,8 @@ else:
         df_frame,
         f"{selected_scenario or 'Scene'} <br>Frame {frame} | Total {total_records:,}, Valid {valid_records:,}",
         show_invalid,
+        hover_extra_cols=hover_extra_cols,
+        show_velocity_arrows=show_velocity_arrows,
     )
     st.plotly_chart(fig, width="stretch")
 
@@ -739,8 +865,6 @@ frame_stats["TPR"] = np.where(
     np.nan
 )
 
-# Plotlyで折れ線プロット
-import plotly.express as px
 # --- 時系列グラフ (melt so we can color by run when both A and B) ---
 id_vars = ["frame_index", "run"] if "run" in frame_stats.columns else ["frame_index"]
 value_vars = [c for c in ["TP", "FN"] if c in frame_stats.columns]
