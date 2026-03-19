@@ -1,7 +1,17 @@
+import html
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 from lib.path_utils import path_display
+from lib.criteria_absolute_gates import (
+    MetricGateSpec,
+    evaluate_scenario_gates,
+    export_gate_result,
+    failing_scenarios_table,
+    gate_summary,
+    infer_criteria_count,
+)
 
 st.set_page_config(layout="wide")
 st.title("Criteria-based Evaluation Viewer")
@@ -51,8 +61,6 @@ CRITERIA_COLS = [
     "obj_cnts",
 ]
 
-CRITERIA_COUNT = 4
-
 BLOCK_COLS = [
     "distance",
     "nm",
@@ -69,12 +77,6 @@ BLOCK_COLS = [
 
 BLOCK_SIZE = len(CRITERIA_COLS)
 
-criteria_idx = st.sidebar.selectbox(
-    "Select Criteria",
-    list(range(CRITERIA_COUNT)),
-    format_func=lambda x: f"criteria{x}",
-)
-
 NUM_COLS = [
     "distance",
     "nm",
@@ -87,6 +89,19 @@ NUM_COLS = [
     "pass_rate",
     "max_dist_thresh",
 ]
+
+_criteria_n_a = infer_criteria_count(df_raw_A, BLOCK_SIZE)
+if mode == "Compare Mode" and df_raw_B is not None:
+    CRITERIA_COUNT = min(_criteria_n_a, infer_criteria_count(df_raw_B, BLOCK_SIZE))
+else:
+    CRITERIA_COUNT = _criteria_n_a
+
+criteria_idx = st.sidebar.selectbox(
+    "Select Criteria",
+    list(range(CRITERIA_COUNT)),
+    format_func=lambda x: f"criteria{x}",
+)
+
 show_debug = st.sidebar.checkbox("Show debug info", value=False)
 
 
@@ -118,6 +133,230 @@ group_by = st.sidebar.selectbox(
     ["GT_OBJ", "Option"],
 )
 
+with st.sidebar.expander("Absolute pass/fail gates", expanded=False):
+    abs_gates_enabled = st.checkbox(
+        "Enable scenario-level gates",
+        value=False,
+        help="Count scenarios that pass/fail fixed thresholds (pass rate 0–100; optional 2nd metric).",
+    )
+    abs_pass_min = st.number_input(
+        "Minimum pass rate (%)",
+        min_value=0.0,
+        max_value=100.0,
+        value=95.0,
+        step=0.1,
+        help="Scenario pass rate is from Score.csv (same scale as lsim / eval_summary: 0–100).",
+    )
+    abs_agg_mode = st.radio(
+        "Scenario aggregation",
+        ["mean", "all_rows"],
+        index=0,
+        format_func=lambda x: (
+            "Mean pass rate (per scenario)" if x == "mean" else "All rows must pass"
+        ),
+        help="Mean: use mean pass_rate per scenario; 2nd metric uses max (for ≤) or min (for ≥) across rows. "
+        "All rows: every Option×GT_OBJ row must satisfy both gates.",
+    )
+    abs_use_metric2 = st.checkbox("Second condition (numeric metric)", value=False)
+    abs_metric2_col = st.selectbox(
+        "Metric column",
+        NUM_COLS,
+        index=NUM_COLS.index("nm") if "nm" in NUM_COLS else 0,
+        disabled=not abs_use_metric2,
+    )
+    abs_metric2_op = st.selectbox(
+        "Operator",
+        ["<=", ">="],
+        index=0,
+        disabled=not abs_use_metric2,
+    )
+    abs_metric2_threshold = st.number_input(
+        "Metric threshold",
+        value=0.0,
+        format="%.6f",
+        disabled=not abs_use_metric2,
+    )
+
+
+def _df_for_absolute_gates(df: pd.DataFrame) -> pd.DataFrame:
+    """Columns needed for gating; drop Streamlit helper columns like Run."""
+    use = [c for c in BASE_COLS + NUM_COLS if c in df.columns]
+    return df.loc[:, use].copy()
+
+
+def _gate_verdict_banner_html(summ: dict, run_label: str) -> str:
+    """Large HTML banner: final gate verdict for one run."""
+    rl = html.escape(str(run_label))
+    n = summ["n_scenarios"]
+    if n == 0:
+        return (
+            '<div style="background: linear-gradient(135deg, #64748b 0%, #94a3b8 100%); color: white; '
+            "padding: 1.1rem 1.25rem; border-radius: 14px; text-align: center; margin-bottom: 0.75rem; "
+            'box-shadow: 0 4px 14px rgba(0,0,0,0.12);">'
+            f'<div style="font-size: 0.7rem; letter-spacing: 0.2em; opacity: 0.9;">{rl} · GATE VERDICT</div>'
+            '<div style="font-size: 1.6rem; font-weight: 800; margin: 0.35rem 0;">NO DATA</div>'
+            '<div style="font-size: 0.85rem; opacity: 0.92;">No scenarios to evaluate</div></div>'
+        )
+    if summ["all_pass"]:
+        return (
+            '<div style="background: linear-gradient(135deg, #047857 0%, #10b981 55%, #34d399 100%); color: white; '
+            "padding: 1.25rem 1.5rem; border-radius: 14px; text-align: center; margin-bottom: 0.75rem; "
+            'box-shadow: 0 6px 20px rgba(16,185,129,0.35); border: 2px solid rgba(255,255,255,0.25);">'
+            f'<div style="font-size: 0.72rem; letter-spacing: 0.18em; opacity: 0.92;">{rl} · FINAL GATE</div>'
+            '<div style="font-size: 2.35rem; font-weight: 900; margin: 0.2rem 0; line-height: 1.1; text-shadow: 0 2px 8px rgba(0,0,0,0.15);">'
+            "PASS</div>"
+            f'<div style="font-size: 1rem; font-weight: 600; opacity: 0.95;">All {n:,} scenario(s) meet your thresholds</div>'
+            '<div style="font-size: 0.8rem; opacity: 0.88; margin-top: 0.35rem;">Ready as a release-style checkpoint</div></div>'
+        )
+    nf = summ["n_fail"]
+    return (
+        '<div style="background: linear-gradient(135deg, #991b1b 0%, #dc2626 50%, #f87171 100%); color: white; '
+        "padding: 1.25rem 1.5rem; border-radius: 14px; text-align: center; margin-bottom: 0.75rem; "
+        'box-shadow: 0 6px 20px rgba(220,38,38,0.35); border: 2px solid rgba(255,255,255,0.2);">'
+        f'<div style="font-size: 0.72rem; letter-spacing: 0.18em; opacity: 0.92;">{rl} · FINAL GATE</div>'
+        '<div style="font-size: 2.35rem; font-weight: 900; margin: 0.2rem 0; line-height: 1.1; text-shadow: 0 2px 8px rgba(0,0,0,0.15);">'
+        "FAIL</div>"
+        f'<div style="font-size: 1rem; font-weight: 600; opacity: 0.95;">{nf:,} of {n:,} scenario(s) below threshold</div>'
+        '<div style="font-size: 0.8rem; opacity: 0.88; margin-top: 0.35rem;">Review failing scenarios below</div></div>'
+    )
+
+
+def _gate_verdict_donut_fig(summ: dict) -> go.Figure:
+    """Donut chart Pass vs Fail — strong visual share."""
+    n = summ["n_scenarios"]
+    npass = summ["n_pass"]
+    nfail = summ["n_fail"]
+    pct = summ["pass_pct"]
+    fig = go.Figure(
+        data=[
+            go.Pie(
+                labels=["Pass", "Fail"],
+                values=[npass, nfail],
+                hole=0.58,
+                marker=dict(colors=["#22c55e", "#ef4444"], line=dict(color="#ffffff", width=2)),
+                textinfo="value",
+                textposition="outside",
+                textfont=dict(size=15),
+                hovertemplate="<b>%{label}</b><br>Scenarios: %{value}<br>%{percent}<extra></extra>",
+            )
+        ]
+    )
+    center = f"<b>{pct:.1f}%</b><br><span style='font-size:0.65em;font-weight:normal'>pass</span>"
+    if n == 0:
+        center = "—"
+    fig.update_layout(
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=-0.05, xanchor="center", x=0.5),
+        margin=dict(t=30, b=40, l=24, r=24),
+        height=300,
+        annotations=[
+            dict(text=center, x=0.5, y=0.5, font_size=22, showarrow=False, font_color="#0f172a")
+        ],
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
+    return fig
+
+
+def _render_absolute_gates_section(runs: list):
+    """runs: list of (label, df_view) — df may include Run; it is stripped."""
+    if not abs_gates_enabled:
+        return
+
+    spec = None
+    if abs_use_metric2:
+        op = "<=" if abs_metric2_op == "<=" else ">="
+        spec = MetricGateSpec(abs_metric2_col, op, float(abs_metric2_threshold))
+
+    st.markdown("---")
+    st.subheader("Final gate verdict (scenario level)")
+    st.caption(
+        "Pass rate **0–100** (Score.csv / lsim). Thresholds from the sidebar. "
+        "This block is meant as the **last checkpoint** before sign-off."
+    )
+
+    gate_results = []
+    cols = st.columns(len(runs))
+    for i, (label, dfv) in enumerate(runs):
+        with cols[i]:
+            try:
+                result = evaluate_scenario_gates(
+                    _df_for_absolute_gates(dfv),
+                    float(abs_pass_min),
+                    abs_agg_mode,
+                    spec,
+                )
+            except Exception as e:
+                st.error(f"Gate evaluation failed: {e}")
+                continue
+            summ = gate_summary(result)
+            st.markdown(_gate_verdict_banner_html(summ, label), unsafe_allow_html=True)
+
+            if summ["n_scenarios"] > 0:
+                st.markdown("**Scenario pass rate (bar)**")
+                pct_frac = min(1.0, max(0.0, summ["pass_pct"] / 100.0))
+                st.progress(pct_frac)
+                st.caption(
+                    f"{summ['pass_pct']:.1f}% scenarios pass ({summ['n_pass']:,} / {summ['n_scenarios']:,})"
+                )
+                st.plotly_chart(
+                    _gate_verdict_donut_fig(summ),
+                    use_container_width=True,
+                    key=f"gate_donut_{i}",
+                    config={"displayModeBar": False},
+                )
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Scenarios", f"{summ['n_scenarios']:,}")
+            m2.metric("Pass", f"{summ['n_pass']:,}")
+            m3.metric("Fail", f"{summ['n_fail']:,}")
+            m4.metric("Pass %", f"{summ['pass_pct']:.1f}%")
+
+            if summ["n_scenarios"] > 0:
+                if summ["all_pass"]:
+                    st.success("**Gate cleared** — every scenario satisfies the configured thresholds.")
+                else:
+                    st.error(
+                        f"**Gate not cleared** — {summ['n_fail']:,} scenario(s) still outside thresholds."
+                    )
+
+            fails = failing_scenarios_table(result)
+            if not fails.empty:
+                st.markdown(
+                    f'<p style="color:#b91c1c;font-weight:700;font-size:1rem;margin:0.75rem 0 0.35rem 0;">'
+                    f"Failing scenarios ({len(fails):,})</p>",
+                    unsafe_allow_html=True,
+                )
+                st.dataframe(fails, width="stretch")
+            gate_results.append((label, result, spec))
+
+    if len(gate_results) == 1:
+        label, result, sp = gate_results[0]
+        exp = export_gate_result(result, sp)
+        exp.insert(0, "run", label)
+        st.download_button(
+            "Download per-scenario gate results (CSV)",
+            exp.to_csv(index=False).encode("utf-8"),
+            file_name="criteria_absolute_gates.csv",
+            mime="text/csv",
+            key="dl_abs_gates_single",
+        )
+    elif len(gate_results) > 1:
+        parts = []
+        for label, result, sp in gate_results:
+            exp = export_gate_result(result, sp)
+            exp.insert(0, "run", label)
+            parts.append(exp)
+        combined = pd.concat(parts, ignore_index=True)
+        st.download_button(
+            "Download per-scenario gate results (CSV)",
+            combined.to_csv(index=False).encode("utf-8"),
+            file_name="criteria_absolute_gates_compare.csv",
+            mime="text/csv",
+            key="dl_abs_gates_compare",
+        )
+
+
 if mode == "Compare Mode":
     df_view_A = build_view(df_raw_A, criteria_idx)
     df_view_B = build_view(df_raw_B, criteria_idx)
@@ -147,6 +386,13 @@ if mode == "Compare Mode":
     col2.metric("Rows (B)", f"{count_b:,}")
     col3.metric("Pass rate mean (A)", f"{mean_a:.3f}")
     col4.metric("Pass rate mean (B)", f"{mean_b:.3f}", f"{delta_mean:+.3f}")
+
+    _render_absolute_gates_section(
+        [
+            ("Baseline (A)", df_view_A),
+            ("Candidate (B)", df_view_B),
+        ]
+    )
 
     compare_view = st.sidebar.radio(
         "Compare View",
@@ -369,6 +615,8 @@ else:
     col1.metric("Rows", f"{count:,}")
     col2.metric("Pass rate mean", f"{mean_pass:.3f}")
     col3.metric("Pass rate median", f"{median_pass:.3f}")
+
+    _render_absolute_gates_section([("Current run", df_view)])
 
     st.subheader(f"{metric} Distribution")
     fig = px.histogram(
