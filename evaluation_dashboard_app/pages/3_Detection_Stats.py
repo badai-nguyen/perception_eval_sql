@@ -412,22 +412,25 @@ def _render_kpi_card(title: str, kpi: dict, css_id: str = "", deltas: dict | Non
 
 _KPI_CSS = """
 <style>
-.kpi-wrap { display: flex; flex-wrap: wrap; gap: 1.5rem; align-items: flex-start; margin-bottom: 1.5rem; }
+.kpi-wrap { display: flex; flex-wrap: wrap; gap: 1.5rem; align-items: stretch; margin-bottom: 1.5rem; }
 .kpi-card {
     background: linear-gradient(180deg, #f8f9fa 0%, #f0f2f5 100%);
     border: 1px solid #dee2e6;
     border-radius: 12px;
     padding: 1.5rem 2rem;
     min-width: 360px;
+    min-height: 200px;
     box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+    display: flex;
+    flex-direction: column;
 }
 .kpi-title { font-size: 0.9rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: #495057; margin-bottom: 1rem; }
 .kpi-row { display: flex; gap: 2rem; margin-bottom: 0.85rem; }
 .kpi-row:last-child { margin-bottom: 0; }
-.kpi-cell { display: flex; flex-direction: column; align-items: flex-start; min-width: 4.5rem; }
+.kpi-cell { display: flex; flex-direction: column; align-items: flex-start; min-width: 4.5rem; min-height: 2.6rem; }
 .kpi-label { font-size: 0.8rem; color: #6c757d; text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 0.25rem; }
 .kpi-value { font-size: 1.5rem; font-weight: 700; color: #212529; font-variant-numeric: tabular-nums; line-height: 1.2; }
-.kpi-delta-inline { display: block; font-size: 0.8rem; font-weight: 600; margin-top: 0.2rem; font-variant-numeric: tabular-nums; }
+.kpi-delta-inline { display: block; font-size: 0.8rem; font-weight: 600; margin-top: 0.2rem; font-variant-numeric: tabular-nums; min-height: 1.1rem; }
 .kpi-delta-inline.delta-pos { color: #0d6b0d; }
 .kpi-delta-inline.delta-neg { color: #b02a37; }
 .kpi-empty { font-size: 1rem; color: #6c757d; font-style: italic; }
