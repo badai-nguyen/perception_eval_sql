@@ -13,8 +13,148 @@ from lib.criteria_absolute_gates import (
     infer_criteria_count,
 )
 
-st.set_page_config(layout="wide")
-st.title("Criteria-based Evaluation Viewer")
+st.set_page_config(
+    layout="wide",
+    page_title="Criteria Score",
+    page_icon="📊",
+    initial_sidebar_state="expanded",
+)
+
+
+# --- Design system: shared visuals -------------------------------------------
+def _inject_criteria_page_styles() -> None:
+    st.markdown(
+        """
+        <style>
+        /* Tabular numbers in metrics for calmer scanning */
+        [data-testid="stMetricValue"] { font-variant-numeric: tabular-nums; }
+        /* Slightly round default buttons in this page’s download row */
+        .stDownloadButton button { border-radius: 10px !important; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_hero(mode: str, criteria_idx: int, n_criteria: int) -> None:
+    badge = "Compare A vs B" if mode == "Compare Mode" else "Single run"
+    st.markdown(
+        f"""
+        <div style="
+            background: linear-gradient(135deg, #f8fafc 0%, #ecfeff 45%, #e0f2fe 100%);
+            border: 1px solid #cbd5e1;
+            border-radius: 18px;
+            padding: 1.35rem 1.6rem;
+            margin-bottom: 1.1rem;
+            box-shadow: 0 10px 40px -12px rgba(15, 23, 42, 0.12);
+        ">
+          <div style="display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:space-between;gap:1rem;">
+            <div style="flex:1;min-width:220px;">
+              <div style="font-size:0.72rem;letter-spacing:0.14em;color:#64748b;text-transform:uppercase;font-weight:700;">
+                Criteria-based evaluation
+              </div>
+              <h1 style="margin:0.35rem 0 0 0;font-size:clamp(1.45rem, 2.5vw, 1.95rem);font-weight:800;color:#0f172a;letter-spacing:-0.03em;line-height:1.15;">
+                Score &amp; pass-rate insight
+              </h1>
+              <p style="margin:0.55rem 0 0 0;color:#475569;font-size:0.96rem;max-width:36rem;line-height:1.5;">
+                Distributions, grouped averages, scenario-level comparisons — and optional <strong>absolute gates</strong> for a clear pass/fail sign-off.
+              </p>
+            </div>
+            <div style="display:flex;flex-direction:column;align-items:flex-end;gap:0.45rem;">
+              <span style="background:#0f172a;color:#fff;padding:0.4rem 1rem;border-radius:999px;font-size:0.78rem;font-weight:700;letter-spacing:0.04em;">
+                {html.escape(badge)}
+              </span>
+              <span style="background:#fff;border:1px solid #94a3b8;color:#334155;padding:0.4rem 0.9rem;border-radius:10px;font-size:0.82rem;font-weight:600;">
+                Active block · <strong>criteria{criteria_idx}</strong> ({n_criteria} available)
+              </span>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_loaded_runs_strip(run_a_path: str, run_b_path: str | None, is_compare: bool) -> None:
+    st.markdown(
+        '<p style="margin:0 0 0.5rem 0;font-size:0.7rem;letter-spacing:0.12em;color:#64748b;text-transform:uppercase;font-weight:700;">Loaded data</p>',
+        unsafe_allow_html=True,
+    )
+    if is_compare and run_b_path:
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown(
+                f"""
+                <div style="border-radius:14px;border-left:5px solid #312e81;background:linear-gradient(90deg,#f8fafc 0%,#fff 100%);padding:0.95rem 1.1rem;min-height:4.5rem;">
+                  <div style="font-size:0.68rem;text-transform:uppercase;letter-spacing:0.1em;color:#64748b;font-weight:700;">Baseline · A</div>
+                  <div style="margin-top:0.35rem;font-family:ui-monospace,monospace;font-size:0.82rem;color:#0f172a;word-break:break-all;line-height:1.4;">{html.escape(run_a_path)}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with c2:
+            st.markdown(
+                f"""
+                <div style="border-radius:14px;border-left:5px solid #0f766e;background:linear-gradient(90deg,#f0fdfa 0%,#fff 100%);padding:0.95rem 1.1rem;min-height:4.5rem;">
+                  <div style="font-size:0.68rem;text-transform:uppercase;letter-spacing:0.1em;color:#64748b;font-weight:700;">Candidate · B</div>
+                  <div style="margin-top:0.35rem;font-family:ui-monospace,monospace;font-size:0.82rem;color:#0f172a;word-break:break-all;line-height:1.4;">{html.escape(run_b_path)}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+    else:
+        st.markdown(
+            f"""
+            <div style="border-radius:14px;border-left:5px solid #1d4ed8;background:linear-gradient(90deg,#eff6ff 0%,#fff 100%);padding:0.95rem 1.1rem;">
+              <div style="font-size:0.68rem;text-transform:uppercase;letter-spacing:0.1em;color:#64748b;font-weight:700;">Current run</div>
+              <div style="margin-top:0.35rem;font-family:ui-monospace,monospace;font-size:0.82rem;color:#0f172a;word-break:break-all;line-height:1.4;">{html.escape(run_a_path)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+def _section_header(title: str, description: str | None = None) -> None:
+    st.markdown(
+        f"""
+        <div style="margin:1.5rem 0 0.5rem 0;padding:0 0 0 0.65rem;border-left:4px solid #0d9488;">
+          <div style="font-size:1.12rem;font-weight:800;color:#0f172a;letter-spacing:-0.02em;">{html.escape(title)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if description:
+        st.caption(description)
+
+
+# Plotly theme (A/B palette aligned with run cards)
+_PX_COLOR_RUN = {"Baseline (A)": "#312e81", "Candidate (B)": "#0f766e"}
+_PX_COLOR_QUAL = px.colors.qualitative.Bold
+
+
+def _plotly_apply_theme(fig, title: str, height: int = 440) -> None:
+    fig.update_layout(
+        template="plotly_white",
+        title=dict(text=title, font=dict(size=16, color="#0f172a"), x=0, xanchor="left", pad=dict(t=8, b=12)),
+        font=dict(family="system-ui, -apple-system, 'Segoe UI', sans-serif", size=12, color="#334155"),
+        paper_bgcolor="rgba(248, 250, 252, 0.92)",
+        plot_bgcolor="rgba(255, 255, 255, 0.95)",
+        margin=dict(l=56, r=28, t=72, b=52),
+        height=height,
+        hoverlabel=dict(bgcolor="white", font_size=13, font_family="system-ui"),
+        legend=dict(
+            title_text="",
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+            bgcolor="rgba(255,255,255,0.7)",
+        ),
+    )
+    fig.update_xaxes(showgrid=True, gridcolor="rgba(148,163,184,0.25)", zeroline=False)
+    fig.update_yaxes(showgrid=True, gridcolor="rgba(148,163,184,0.25)", zeroline=False)
+
 
 # =========================
 # Safety check
@@ -34,10 +174,15 @@ if df_raw_A is None:
 runB = st.session_state.get("runB")
 df_raw_B = runB["score"] if runB else None
 
-st.subheader("Loaded Runs")
-st.markdown(f"**Baseline (A):** `{path_display(runA['path'])}`")
+_inject_criteria_page_styles()
+
+_path_b = path_display(runB["path"]) if runB else None
+_render_loaded_runs_strip(
+    path_display(runA["path"]),
+    _path_b,
+    mode == "Compare Mode",
+)
 if mode == "Compare Mode":
-    st.markdown(f"**Candidate (B):** `{path_display(runB['path'])}`")
     if df_raw_B is None:
         st.warning("Compare Mode requires a Candidate (B) run from the Overview page.")
         st.stop()
@@ -96,13 +241,14 @@ if mode == "Compare Mode" and df_raw_B is not None:
 else:
     CRITERIA_COUNT = _criteria_n_a
 
+st.sidebar.markdown("##### Scope")
 criteria_idx = st.sidebar.selectbox(
-    "Select Criteria",
+    "Criteria block",
     list(range(CRITERIA_COUNT)),
     format_func=lambda x: f"criteria{x}",
+    help="Each block is one criteria set from Score.csv (distance, NM, pass rate, …).",
 )
-
-show_debug = st.sidebar.checkbox("Show debug info", value=False)
+show_debug = st.sidebar.checkbox("Show debug tables", value=False)
 
 
 def build_view(df_raw, criteria_idx):
@@ -121,18 +267,21 @@ def build_view(df_raw, criteria_idx):
     return df_view
 
 
-st.sidebar.subheader("Visualization Controls")
+st.sidebar.divider()
+st.sidebar.markdown("##### Charts")
 metric = st.sidebar.selectbox(
-    "Metric",
+    "Y-axis metric",
     NUM_COLS,
     index=NUM_COLS.index("pass_rate"),
+    help="Used for histograms and bar charts (pass rate is 0–100).",
 )
 
 group_by = st.sidebar.selectbox(
-    "Group by",
+    "Color / group by",
     ["GT_OBJ", "Option"],
 )
 
+st.sidebar.divider()
 with st.sidebar.expander("Absolute pass/fail gates", expanded=False):
     abs_gates_enabled = st.checkbox(
         "Enable scenario-level gates",
@@ -175,6 +324,18 @@ with st.sidebar.expander("Absolute pass/fail gates", expanded=False):
         value=0.0,
         format="%.6f",
         disabled=not abs_use_metric2,
+    )
+
+_render_hero(mode, criteria_idx, CRITERIA_COUNT)
+
+with st.expander("How to use this page", expanded=False):
+    st.markdown(
+        """
+        1. **Pick a criteria block** in the sidebar — each block matches one criteria index from your evaluation pipeline.
+        2. **Charts** show how the chosen metric spreads and how it differs by `GT_OBJ` or `Option`.
+        3. In **Compare** mode, use the **Overlay / Delta** tabs to see distributions side-by-side or row-level **B − A** changes.
+        4. Enable **Absolute pass/fail gates** when you need a binary, scenario-level verdict (e.g. min pass rate %) for sign-off.
+        """
     )
 
 
@@ -268,11 +429,13 @@ def _render_absolute_gates_section(runs: list):
         op = "<=" if abs_metric2_op == "<=" else ">="
         spec = MetricGateSpec(abs_metric2_col, op, float(abs_metric2_threshold))
 
-    st.markdown("---")
-    st.subheader("Final gate verdict (scenario level)")
-    st.caption(
-        "Pass rate **0–100** (Score.csv / lsim). Thresholds from the sidebar. "
-        "This block is meant as the **last checkpoint** before sign-off."
+    st.markdown(
+        '<hr style="border:none;height:2px;background:linear-gradient(90deg,transparent,#94a3b1,#0d9488,#94a3b1,transparent);margin:2rem 0 1.25rem 0;border-radius:2px;"/>',
+        unsafe_allow_html=True,
+    )
+    _section_header(
+        "Final gate verdict",
+        "Pass rate **0–100** (Score.csv / lsim). Thresholds from the sidebar — **last checkpoint** before sign-off.",
     )
 
     gate_results = []
@@ -335,11 +498,12 @@ def _render_absolute_gates_section(runs: list):
         exp = export_gate_result(result, sp)
         exp.insert(0, "run", label)
         st.download_button(
-            "Download per-scenario gate results (CSV)",
+            "Download gate results (CSV)",
             exp.to_csv(index=False).encode("utf-8"),
             file_name="criteria_absolute_gates.csv",
             mime="text/csv",
             key="dl_abs_gates_single",
+            type="primary",
         )
     elif len(gate_results) > 1:
         parts = []
@@ -349,11 +513,12 @@ def _render_absolute_gates_section(runs: list):
             parts.append(exp)
         combined = pd.concat(parts, ignore_index=True)
         st.download_button(
-            "Download per-scenario gate results (CSV)",
+            "Download gate results (CSV)",
             combined.to_csv(index=False).encode("utf-8"),
             file_name="criteria_absolute_gates_compare.csv",
             mime="text/csv",
             key="dl_abs_gates_compare",
+            type="primary",
         )
 
 
@@ -375,7 +540,7 @@ if mode == "Compare Mode":
         st.subheader(f"Criteria {criteria_idx} Data — Candidate (B)")
         st.dataframe(df_view_B, width="stretch")
 
-    st.subheader("Summary")
+    _section_header("Run summary", "Rows loaded and **mean pass rate** (practical pass %, 0–100) per run.")
     count_a = len(df_view_A)
     count_b = len(df_view_B)
     mean_a = df_view_A["pass_rate"].mean() if count_a else 0.0
@@ -394,26 +559,31 @@ if mode == "Compare Mode":
         ]
     )
 
-    compare_view = st.sidebar.radio(
-        "Compare View",
-        ["Overlay", "Delta"],
-        horizontal=True,
+    st.markdown(
+        '<p style="margin:0.5rem 0 0.35rem 0;font-size:1.05rem;font-weight:800;color:#0f172a;">Compare workspace</p>'
+        '<p style="margin:0 0 0.6rem 0;color:#64748b;font-size:0.9rem;">'
+        "<strong>Overlay</strong> — A and B on the same charts · "
+        "<strong>Delta</strong> — row-wise <strong>B − A</strong> after matching keys.</p>",
+        unsafe_allow_html=True,
     )
+    tab_ov, tab_dl = st.tabs(["Overlay: A vs B", "Delta: B − A"])
 
-    if compare_view == "Overlay":
-        st.subheader(f"{metric} Distribution (A vs B)")
+    with tab_ov:
+        _section_header(f"{metric} distribution", "Semi-transparent overlay — Baseline (indigo) vs Candidate (teal).")
         fig = px.histogram(
             df_compare,
             x=metric,
             color="Run",
+            color_discrete_map=_PX_COLOR_RUN,
             nbins=30,
             barmode="overlay",
             opacity=0.55,
             marginal="box",
         )
+        _plotly_apply_theme(fig, f"{metric} · row-level distribution")
         st.plotly_chart(fig, width="stretch")
 
-        st.subheader(f"Average {metric} by {group_by} (A vs B)")
+        _section_header(f"Average {metric} by {group_by}", "Grouped means — compare runs side-by-side.")
         df_avg = (
             df_compare
             .groupby([group_by, "Run"], as_index=False)[metric]
@@ -425,23 +595,27 @@ if mode == "Compare Mode":
             x=group_by,
             y=metric,
             color="Run",
+            color_discrete_map=_PX_COLOR_RUN,
             barmode="group",
             text_auto=".2f",
         )
+        _plotly_apply_theme(fig, f"Mean {metric} by {group_by}")
         st.plotly_chart(fig, width="stretch")
 
-        st.subheader("Pass Rate Overview (A vs B)")
+        _section_header("Pass rate by group", "Box + points — useful for spotting spread and outliers (0–100 scale).")
         fig = px.box(
             df_compare,
             x=group_by,
             y="pass_rate",
             color="Run",
+            color_discrete_map=_PX_COLOR_RUN,
             points="all",
         )
+        _plotly_apply_theme(fig, "Pass rate overview")
         st.plotly_chart(fig, width="stretch")
 
         # ---- Improved Per Scenario Pass Rate Compare Plot ----
-        st.subheader("Per Scenario Pass Rate Comparison (A vs B)")
+        _section_header("Per-scenario pass rate", "Same scenario on both runs — filter to focus on regressions or wins.")
 
         per_scenario_A = df_view_A.groupby("Scenario", as_index=False)["pass_rate"].mean()
         per_scenario_B = df_view_B.groupby("Scenario", as_index=False)["pass_rate"].mean()
@@ -485,14 +659,15 @@ if mode == "Compare Mode":
             x="Scenario",
             y="pass_rate",
             color="Run",
+            color_discrete_map=_PX_COLOR_RUN,
             barmode="group",
             text_auto=".2f",
-            title="Per Scenario Pass Rate by Run (filtered)",
         )
+        _plotly_apply_theme(fig, "Per-scenario pass rate (filtered)")
         st.plotly_chart(fig, width="stretch")
 
         # Show the delta for each scenario as a separate barplot below, sorted by delta
-        st.subheader("Per Scenario Pass Rate Delta (B - A)")
+        _section_header("Per-scenario delta (B − A)", "Green = improvement on B; red = regression vs baseline.")
         fig2 = px.bar(
             per_scenario_vis.sort_values("delta", key=abs, ascending=False),
             x="Scenario",
@@ -500,8 +675,8 @@ if mode == "Compare Mode":
             color="delta",
             color_continuous_scale="RdYlGn",
             text_auto=".2f",
-            title="Delta (B - A)"
         )
+        _plotly_apply_theme(fig2, "Pass rate delta by scenario")
         st.plotly_chart(fig2, width="stretch")
 
         # Optionally show a table for the user to inspect
@@ -525,24 +700,39 @@ if mode == "Compare Mode":
                 },
                 title="Per Scenario Pass Rate: Baseline (A) vs Candidate (B) (filtered)",
             )
+            lim = float(
+                max(
+                    per_scenario_vis["pass_rate_A"].max(),
+                    per_scenario_vis["pass_rate_B"].max(),
+                    100.0,
+                )
+            )
             scatter_fig.add_shape(
                 type="line",
-                x0=0, y0=0, x1=1, y1=1,
-                line=dict(dash='dash', color='gray'),
-                xref="x", yref="y"
+                x0=0,
+                y0=0,
+                x1=lim,
+                y1=lim,
+                line=dict(dash="dash", color="rgba(100,116,139,0.8)", width=2),
+                xref="x",
+                yref="y",
             )
-            scatter_fig.update_traces(textposition="top center")
+            scatter_fig.update_xaxes(range=[0, lim])
+            scatter_fig.update_yaxes(range=[0, lim])
+            scatter_fig.update_traces(textposition="top center", marker=dict(size=10, line=dict(width=0.5, color="white")))
+            _plotly_apply_theme(scatter_fig, "A vs B pass rate (parity line = equal)")
             st.plotly_chart(scatter_fig, width="stretch")
         # ---- End Improved Per Scenario Pass Rate Compare Plot ----
 
         st.download_button(
-            "Download filtered data as CSV",
+            "Download overlay data (CSV)",
             df_compare.to_csv(index=False).encode("utf-8"),
             file_name="criteria_compare_filtered.csv",
             mime="text/csv",
+            type="primary",
         )
 
-    else:
+    with tab_dl:
         merged = df_view_A.merge(
             df_view_B,
             on=BASE_COLS,
@@ -552,16 +742,18 @@ if mode == "Compare Mode":
         merged[f"{metric}_delta"] = merged[f"{metric}_B"] - merged[f"{metric}_A"]
         merged["pass_rate_delta"] = merged["pass_rate_B"] - merged["pass_rate_A"]
 
-        st.subheader(f"{metric} Delta Distribution (B - A)")
+        _section_header(f"{metric} delta distribution", "How much B differs from A on the same row (inner join on Scenario/Option/GT_OBJ).")
         fig = px.histogram(
             merged,
             x=f"{metric}_delta",
             nbins=30,
             marginal="box",
+            color_discrete_sequence=["#0d9488"],
         )
+        _plotly_apply_theme(fig, f"Δ {metric} (B − A)")
         st.plotly_chart(fig, width="stretch")
 
-        st.subheader(f"Average {metric} Delta by {group_by}")
+        _section_header(f"Mean Δ {metric} by {group_by}", "Where the shift concentrates across labels.")
         df_delta = (
             merged
             .groupby(group_by, as_index=False)[f"{metric}_delta"]
@@ -573,19 +765,25 @@ if mode == "Compare Mode":
             x=group_by,
             y=f"{metric}_delta",
             text_auto=".2f",
+            color_discrete_sequence=["#312e81"],
         )
+        _plotly_apply_theme(fig, f"Grouped mean · Δ {metric}")
+        fig.update_layout(showlegend=False)
         st.plotly_chart(fig, width="stretch")
 
-        st.subheader("Pass Rate Delta Overview")
+        _section_header("Pass rate delta overview", "Distribution of per-row pass rate change.")
         fig = px.box(
             merged,
             x=group_by,
             y="pass_rate_delta",
             points="all",
+            color_discrete_sequence=["#0369a1"],
         )
+        _plotly_apply_theme(fig, "Δ pass rate by group")
+        fig.update_layout(showlegend=False)
         st.plotly_chart(fig, width="stretch")
 
-        st.subheader("Largest Absolute Deltas")
+        _section_header("Largest changes", "Top 20 rows by |Δ metric| — inspect regressions or improvements.")
         top_changes = merged.copy()
         top_changes["abs_delta"] = top_changes[f"{metric}_delta"].abs()
         top_changes = top_changes.sort_values("abs_delta", ascending=False).head(20)
@@ -607,7 +805,7 @@ else:
         st.subheader(f"Criteria {criteria_idx} Data")
         st.dataframe(df_view, width="stretch")
 
-    st.subheader("Summary")
+    _section_header("Run summary", "Dataset size and central pass-rate tendency (0–100 scale).")
     count = len(df_view)
     mean_pass = df_view["pass_rate"].mean() if count else 0.0
     median_pass = df_view["pass_rate"].median() if count else 0.0
@@ -618,17 +816,19 @@ else:
 
     _render_absolute_gates_section([("Current run", df_view)])
 
-    st.subheader(f"{metric} Distribution")
+    _section_header(f"{metric} distribution", f"How **{metric}** spreads across all rows; colored by **{group_by}**.")
     fig = px.histogram(
         df_view,
         x=metric,
         color=group_by,
         nbins=30,
         marginal="box",
+        color_discrete_sequence=_PX_COLOR_QUAL,
     )
+    _plotly_apply_theme(fig, f"{metric} · histogram")
     st.plotly_chart(fig, width="stretch")
 
-    st.subheader(f"Average {metric} by {group_by}")
+    _section_header(f"Mean {metric} by {group_by}", "Ranked bars — quick read on which labels drive the metric.")
     df_avg = (
         df_view
         .groupby(group_by, as_index=False)[metric]
@@ -640,19 +840,27 @@ else:
         x=group_by,
         y=metric,
         text_auto=".2f",
+        color=group_by,
+        color_discrete_sequence=_PX_COLOR_QUAL,
     )
+    _plotly_apply_theme(fig, f"Mean {metric}")
+    fig.update_layout(showlegend=False)
     st.plotly_chart(fig, width="stretch")
 
-    st.subheader("Pass Rate Overview")
+    _section_header("Pass rate overview", "Spread and outliers of pass rate (0–100) within each group.")
     fig = px.box(
         df_view,
         x=group_by,
         y="pass_rate",
         points="all",
+        color=group_by,
+        color_discrete_sequence=_PX_COLOR_QUAL,
     )
+    _plotly_apply_theme(fig, "Pass rate by group")
+    fig.update_layout(showlegend=False)
     st.plotly_chart(fig, width="stretch")
 
-    st.subheader("Top / Bottom Scenarios by Pass Rate")
+    _section_header("Scenario leaderboard", "Mean pass rate per scenario — tune N and sort direction.")
     scenario_metric = df_view.groupby("Scenario", as_index=False)["pass_rate"].mean()
     top_n = st.number_input("Top N scenarios", min_value=5, max_value=100, value=20, key="single_top_n")
     sort_order = st.radio("Order", ["Highest first", "Lowest first"], horizontal=True, key="single_scen_order")
