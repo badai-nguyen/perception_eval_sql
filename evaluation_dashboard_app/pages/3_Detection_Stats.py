@@ -19,6 +19,47 @@ DEGRADED_SCALE = [[0.0, "#fff5f0"], [1.0, DEGRADED_COLOR]]
 # Run-series colors (Panels 2–4, 6–8) — consistent across page
 RUN_COLORS = ["#4A90D9", "#E86A33", "#2d8f47", "#9B59B6", "#1ABC9C", "#95a5a6"]
 
+# Unified Plotly layout theme for all charts
+PLOTLY_LAYOUT_THEME = dict(
+    font=dict(family='"Inter", "Segoe UI", sans-serif', size=11),
+    title=dict(font=dict(size=14, color="#1f2937")),
+    paper_bgcolor="rgba(0,0,0,0)",
+    plot_bgcolor="rgba(248,250,252,0.6)",
+    margin=dict(t=48, b=40, l=52, r=24),
+    height=380,
+    xaxis=dict(
+        tickfont=dict(size=11),
+        title_font=dict(size=12),
+        gridcolor="rgba(0,0,0,0.08)",
+        zeroline=True,
+        zerolinecolor="rgba(0,0,0,0.15)",
+    ),
+    yaxis=dict(
+        tickfont=dict(size=11),
+        title_font=dict(size=12),
+        gridcolor="rgba(0,0,0,0.08)",
+        zeroline=True,
+        zerolinecolor="rgba(0,0,0,0.15)",
+    ),
+    legend=dict(
+        orientation="h",
+        yanchor="bottom",
+        y=1.02,
+        xanchor="right",
+        x=1,
+        font=dict(size=11),
+    ),
+    showlegend=True,
+)
+
+
+def apply_chart_theme(fig, **overrides):
+    """Apply unified theme to a Plotly figure; overrides (e.g. height, margin) take precedence."""
+    layout_update = {**PLOTLY_LAYOUT_THEME, **overrides}
+    fig.update_layout(**layout_update)
+    return fig
+
+
 st.set_page_config(layout="wide", page_title="Object Detection")
 
 # =============================
@@ -237,13 +278,28 @@ for i, (r, pl) in enumerate(zip(runs, parquet_lists)):
         st.stop()
 
 # =============================
+# Page-level CSS for section headers (inject once)
+# =============================
+_SECTION_CSS = """
+<style>
+.section-header { border-left: 4px solid #4A90D9; padding-left: 12px; font-weight: 600; font-size: 1rem; color: #1f2937; margin: 1.25rem 0 0.75rem 0; }
+.section-block { margin-bottom: 1.5rem; }
+.run-chip { display: inline-block; background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 999px; padding: 0.35rem 0.85rem; font-size: 0.875rem; margin: 0.25rem 0.25rem 0.25rem 0; }
+.run-chip strong { color: #334155; }
+</style>
+"""
+st.markdown(_SECTION_CSS, unsafe_allow_html=True)
+
+# =============================
 # Loaded Runs (from Overview)
 # =============================
-st.subheader("Loaded Runs")
+st.markdown('<div class="section-header">Loaded Runs</div>', unsafe_allow_html=True)
+chips = []
 for i, r in enumerate(runs):
     lbl = run_labels_list[i] if i < len(run_labels_list) else str(i)
-    prefix = "Baseline (A):" if lbl == "A" else f"Candidate ({lbl}):"
-    st.markdown(f"**{prefix}** `{path_display(r['path'])}`")
+    prefix = "A" if lbl == "A" else lbl
+    chips.append(f'<span class="run-chip"><strong>{prefix}:</strong> {path_display(r["path"])}</span>')
+st.markdown('<div style="margin-bottom: 1rem;">' + " ".join(chips) + "</div>", unsafe_allow_html=True)
 
 # =============================
 # Sidebar - Filters
@@ -438,10 +494,17 @@ _KPI_CSS = """
 """
 
 
+def _section_header(title: str, caption: str = "") -> str:
+    """HTML for a styled section header with optional caption."""
+    if caption:
+        return f'<div class="section-header">{title}</div><p style="margin-top: 0.25rem; margin-bottom: 0.75rem; font-size: 0.9rem; color: #6b7280;">{caption}</p>'
+    return f'<div class="section-header">{title}</div>'
+
+
 # =============================
 # Panel 1: t4dataset Summary
 # =============================
-st.subheader("Summary")
+st.markdown(_section_header("Summary", "Within selected filters and max evaluation range."), unsafe_allow_html=True)
 if single_mode:
     fc = build_filter_clause(filters_base)
     kpi = _kpi_row_for_view(con, "view_eval_flat", fc)
@@ -490,7 +553,7 @@ if st.checkbox("Debug: Inspect Parquet (All Runs)" if not single_mode else "Debu
             schema_results.append((label, schema_df))
             st.write("**Schema (Column Names, Types)**")
             st.markdown("Shows the schema (column names and their DuckDB/Parquet data types) of the selected Parquet file. Useful to check data structure and types as interpreted by DuckDB.")
-            st.dataframe(schema_df)
+            st.dataframe(schema_df, use_container_width=True, hide_index=True)
 
             # Preview rows
             row_options = [10, 20, 50, 100, 200, "All"]
@@ -507,7 +570,7 @@ if st.checkbox("Debug: Inspect Parquet (All Runs)" if not single_mode else "Debu
             """, [file_path]).df()
             st.write(f"**Preview (First {row_choice} rows)**")
             st.markdown(f"Shows the first {row_choice} preview rows from the Parquet file. Use this preview to examine example data contents and check that your file is as expected.")
-            st.dataframe(preview_df)
+            st.dataframe(preview_df, use_container_width=True, hide_index=True)
 
             # Stats
             stats_df = con.execute("""
@@ -525,7 +588,7 @@ if st.checkbox("Debug: Inspect Parquet (All Runs)" if not single_mode else "Debu
 
             This helps rapidly assess the completeness and distribution of the key ID field.
             """)
-            st.dataframe(stats_df)
+            st.dataframe(stats_df, use_container_width=True, hide_index=True)
 
     # --- Show info about schema differences (compare mode only) ---
     if not single_mode and len(schema_results) >= 2:
@@ -549,7 +612,7 @@ if st.checkbox("Debug: Inspect Parquet (All Runs)" if not single_mode else "Debu
                         st.error(f"Columns only in `{label1}`: {', '.join(sorted(removed))}")
                     if dtype_changes:
                         st.warning("Columns with different types:")
-                        st.dataframe(pd.DataFrame(dtype_changes, columns=["Column", f"Type in {label1}", f"Type in {label2}"]), hide_index=True)
+                        st.dataframe(pd.DataFrame(dtype_changes, columns=["Column", f"Type in {label1}", f"Type in {label2}"]), use_container_width=True, hide_index=True)
             else:
                 st.info(f"{len(schema_results)} runs loaded. Compare schemas per run in the columns above.")
 
@@ -582,7 +645,7 @@ try:
             if st.checkbox("Debug: Inspect Status Count (All Runs)" if not single_mode else "Debug: Inspect Status Count"):
                 df_status_wide = df_status.pivot_table(index='label', columns='status', values='num', fill_value=0).reset_index()
                 st.download_button("Download status count (CSV)", data=df_status_wide.to_csv(index=False).encode("utf-8"), file_name="detection_status_count.csv", mime="text/csv", key="dl_status_count")
-                st.dataframe(df_status_wide)
+                st.dataframe(df_status_wide, use_container_width=True, hide_index=True)
             fig2 = px.bar(
                 df_status,
                 x="label",
@@ -592,6 +655,7 @@ try:
                 title="Status Distribution per Label",
                 labels={"num": "Count", "label": "Label", "status": "Status"}
             )
+            apply_chart_theme(fig2)
             st.plotly_chart(fig2, width="stretch")
         else:
             st.info("No status count data available")
@@ -602,7 +666,7 @@ try:
                 df_status_wide = df_status.pivot_table(index='label', columns=['dataset', 'status'], values='num', fill_value=0)
                 df_status_wide.columns = [f"{col[0]} {col[1]}" for col in df_status_wide.columns]
                 df_status_wide = df_status_wide.reset_index()
-                st.dataframe(df_status_wide)
+                st.dataframe(df_status_wide, use_container_width=True, hide_index=True)
             fig2 = px.bar(
                 df_status,
                 x="label",
@@ -614,6 +678,7 @@ try:
                 category_orders={"dataset": run_labels_list},
                 labels={"num": "Count", "label": "Label", "status": "Status"}
             )
+            apply_chart_theme(fig2)
             st.plotly_chart(fig2, width="stretch")
         else:
             st.info("No status count data available")
@@ -625,7 +690,7 @@ except Exception as e:
 # Panel 2: TP Rate (single) / TP Rate Comparison (compare)
 # =============================
 st.divider()
-st.subheader("TP Rate" + (" Comparison" if not single_mode else ""))
+st.markdown(_section_header("TP Rate" + (" Comparison" if not single_mode else "")), unsafe_allow_html=True)
 
 _tpr_query = """
 SELECT
@@ -654,7 +719,9 @@ if single_mode:
                 title=f"Total TP rate within {max_eval_range} [m]",
                 labels={'tpr': 'TP Rate', 'label': 'Label'}
             )
+            apply_chart_theme(fig)
             fig.update_layout(yaxis_range=[0, 1.2])
+            fig.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.2)")
             st.plotly_chart(fig, width="stretch")
         else:
             st.info("No data available")
@@ -681,7 +748,9 @@ else:
                 labels={"tpr": "TP Rate", "label": "Label", "run": "Run"},
                 color_discrete_sequence=RUN_COLORS,
             )
+            apply_chart_theme(fig)
             fig.update_layout(yaxis_range=[0, 1.2])
+            fig.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.2)")
             st.plotly_chart(fig, width="stretch")
         else:
             st.info("No data available")
@@ -691,43 +760,138 @@ else:
 def _tpr_fpr_view(i: int) -> str:
     return "view_tpr_fpr_by_class_dist_topic" if i == 0 else f"view_tpr_fpr_{i}"
 
+
+def _distance_bin_order_and_label(bin_str: str) -> Tuple[int, str]:
+    """Parse distance_bin e.g. '[0,10)' -> (0, '0–10 m'). Used for sorting and axis labels."""
+    import re
+    s = str(bin_str).strip()
+    m = re.match(r"\[(\d+)\s*,\s*(\d+)\)", s)
+    if m:
+        lo, hi = int(m.group(1)), int(m.group(2))
+        return (lo, f"{lo}–{hi} m")
+    m = re.match(r"\[(\d+)\s*,\s*inf\)", s, re.I)
+    if m:
+        return (int(m.group(1)), f"{m.group(1)}+ m")
+    return (0, s)
+
+
 # =============================
-# Panel 3: TP Rate by Distance Bin
+# Panel 3 & 4: TP & FP Rate by Distance — line+area or bar (user choice)
 # =============================
-st.subheader("TP Rate by Distance Bin")
+st.markdown(
+    _section_header(
+        "TP & FP rate by distance",
+        "How detection performance changes with distance. Choose chart style below.",
+    ),
+    unsafe_allow_html=True,
+)
+rate_by_dist_style = st.radio(
+    "Chart style",
+    options=["Line chart (trend)", "Bar chart (histogram)"],
+    index=0,
+    horizontal=True,
+    key="tp_fp_rate_by_dist_style",
+)
 
 try:
     filter_clause_base = build_filter_clause(filters_base, enable_dist_h=False)
+    use_line_chart = rate_by_dist_style == "Line chart (trend)"
+
     if single_mode:
-        query = f"""
+        # Fetch both TP and FP rate by distance
+        query_both = f"""
         SELECT
             distance_bin,
-            CASE WHEN SUM(gt_total) > 0 THEN CAST(SUM(tp_gt) AS DOUBLE) / SUM(gt_total) ELSE 0 END AS tpr
+            CASE WHEN SUM(gt_total) > 0 THEN CAST(SUM(tp_gt) AS DOUBLE) / SUM(gt_total) ELSE 0 END AS tpr,
+            CASE WHEN SUM(est_total) > 0 THEN CAST(SUM(fp_est) AS DOUBLE) / SUM(est_total) ELSE 0 END AS fpr
         FROM view_tpr_fpr_by_class_dist_topic
         WHERE {filter_clause_base}
         GROUP BY distance_bin
         ORDER BY CAST(REPLACE(SPLIT_PART(distance_bin, ',', 1), '[', ' ') AS INTEGER)
         """
-        df_tpr_dist = con.execute(query).df()
-        if not df_tpr_dist.empty:
-            fig = go.Figure()
-            fig.add_trace(go.Bar(
-                x=df_tpr_dist['distance_bin'],
-                y=df_tpr_dist['tpr'],
-                name='TP Rate',
-                marker_color=RUN_COLORS[0],
-            ))
-            fig.update_layout(
-                title="TP Rate by Distance Bin",
-                xaxis_title="Distance Bin",
-                yaxis_title="TP Rate",
-                yaxis_range=[0, 1]
+        df_both = con.execute(query_both).df()
+        if not df_both.empty:
+            df_both["bin_order"], df_both["bin_label"] = zip(
+                *df_both["distance_bin"].map(_distance_bin_order_and_label)
             )
-            st.plotly_chart(fig, width="stretch")
+            df_both = df_both.sort_values("bin_order")
+            x_labels = df_both["bin_label"].tolist()
+
+            if use_line_chart:
+                fig = go.Figure()
+                fig.add_trace(
+                    go.Scatter(
+                        x=x_labels,
+                        y=df_both["tpr"],
+                        name="TP rate",
+                        mode="lines",
+                        line=dict(color=RUN_COLORS[0], width=2.5, shape="spline"),
+                        fill="tozeroy",
+                        fillcolor="rgba(74, 144, 217, 0.2)",
+                        hovertemplate="%{x}<br>TP rate: %{y:.2%}<extra></extra>",
+                    )
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=x_labels,
+                        y=df_both["fpr"],
+                        name="FP rate",
+                        mode="lines",
+                        line=dict(color=RUN_COLORS[1], width=2.5, shape="spline"),
+                        fill="tozeroy",
+                        fillcolor="rgba(232, 106, 51, 0.2)",
+                        hovertemplate="%{x}<br>FP rate: %{y:.2%}<extra></extra>",
+                    )
+                )
+                apply_chart_theme(fig, height=420)
+                fig.update_layout(
+                    title=f"TP & FP rate by distance (within {max_eval_range} m)",
+                    xaxis_title="Distance bin",
+                    yaxis_title="Rate",
+                    yaxis_range=[0, 1],
+                    xaxis=dict(tickangle=-35),
+                    hovermode="x unified",
+                )
+                fig.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.25)")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                # Bar chart (histogram): combined TP + FP grouped bars
+                fig = go.Figure()
+                fig.add_trace(
+                    go.Bar(
+                        x=x_labels,
+                        y=df_both["tpr"],
+                        name="TP rate",
+                        marker_color=RUN_COLORS[0],
+                        hovertemplate="%{x}<br>TP rate: %{y:.2%}<extra></extra>",
+                    )
+                )
+                fig.add_trace(
+                    go.Bar(
+                        x=x_labels,
+                        y=df_both["fpr"],
+                        name="FP rate",
+                        marker_color=RUN_COLORS[1],
+                        hovertemplate="%{x}<br>FP rate: %{y:.2%}<extra></extra>",
+                    )
+                )
+                apply_chart_theme(fig, height=420)
+                fig.update_layout(
+                    title=f"TP & FP rate by distance (within {max_eval_range} m)",
+                    xaxis_title="Distance bin",
+                    yaxis_title="Rate",
+                    yaxis_range=[0, 1],
+                    barmode="group",
+                    xaxis=dict(tickangle=-35),
+                    hovermode="x unified",
+                )
+                fig.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.25)")
+                st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("No data available")
+            st.info("No distance-bin data available.")
     else:
-        dfs_dist = []
+        # Compare mode: fetch TP and FP by distance per run
+        dfs_tpr = []
         for i in range(len(runs)):
             fc = build_filter_clause(filters_list[i], enable_dist_h=False)
             q = f"""
@@ -740,66 +904,11 @@ try:
             """
             df_i = con.execute(q).df()
             df_i["run"] = run_labels_list[i]
-            dfs_dist.append(df_i)
-        df_tpr_dist = pd.concat(dfs_dist, ignore_index=True)
-        if not df_tpr_dist.empty:
-            fig = go.Figure()
-            for i, lbl in enumerate(run_labels_list):
-                d = df_tpr_dist[df_tpr_dist["run"] == lbl]
-                fig.add_trace(go.Bar(
-                    x=d["distance_bin"],
-                    y=d["tpr"],
-                    name=f"TP Rate ({lbl})",
-                    marker_color=RUN_COLORS[i % len(RUN_COLORS)],
-                ))
-            fig.update_layout(
-                title="TP Rate by Distance Bin (all runs)",
-                xaxis_title="Distance Bin",
-                yaxis_title="TP Rate",
-                barmode="group",
-                yaxis_range=[0, 1]
-            )
-            st.plotly_chart(fig, width="stretch")
-        else:
-            st.info("No data available")
-except Exception as e:
-    st.error(f"Error: {e}")
+            df_i["bin_order"], df_i["bin_label"] = zip(*df_i["distance_bin"].map(_distance_bin_order_and_label))
+            df_i = df_i.sort_values("bin_order")
+            dfs_tpr.append(df_i)
+        df_tpr_dist = pd.concat(dfs_tpr, ignore_index=True)
 
-# =============================
-# Panel 4: FP Rate by Distance Bin
-# =============================
-st.subheader("FP Rate by Distance Bin")
-
-try:
-    if single_mode:
-        query = f"""
-        SELECT
-            distance_bin,
-            CASE WHEN SUM(est_total) > 0 THEN CAST(SUM(fp_est) AS DOUBLE) / SUM(est_total) ELSE 0 END AS fpr
-        FROM view_tpr_fpr_by_class_dist_topic
-        WHERE {filter_clause_base}
-        GROUP BY distance_bin
-        ORDER BY CAST(REPLACE(SPLIT_PART(distance_bin, ',', 1), '[', ' ') AS INTEGER)
-        """
-        df_fpr_dist = con.execute(query).df()
-        if not df_fpr_dist.empty:
-            fig = go.Figure()
-            fig.add_trace(go.Bar(
-                x=df_fpr_dist['distance_bin'],
-                y=df_fpr_dist['fpr'],
-                name='FP Rate',
-                marker_color=RUN_COLORS[0],
-            ))
-            fig.update_layout(
-                title="FP Rate by Distance Bin",
-                xaxis_title="Distance Bin",
-                yaxis_title="FP Rate",
-                yaxis_range=[0, 1]
-            )
-            st.plotly_chart(fig, width="stretch")
-        else:
-            st.info("No data available")
-    else:
         dfs_fpr = []
         for i in range(len(runs)):
             fc = build_filter_clause(filters_list[i], enable_dist_h=False)
@@ -813,28 +922,132 @@ try:
             """
             df_i = con.execute(q).df()
             df_i["run"] = run_labels_list[i]
+            df_i["bin_order"], df_i["bin_label"] = zip(*df_i["distance_bin"].map(_distance_bin_order_and_label))
+            df_i = df_i.sort_values("bin_order")
             dfs_fpr.append(df_i)
         df_fpr_dist = pd.concat(dfs_fpr, ignore_index=True)
-        if not df_fpr_dist.empty:
-            fig = go.Figure()
-            for i, lbl in enumerate(run_labels_list):
-                d = df_fpr_dist[df_fpr_dist["run"] == lbl]
-                fig.add_trace(go.Bar(
-                    x=d["distance_bin"],
-                    y=d["fpr"],
-                    name=f"FP Rate ({lbl})",
-                    marker_color=RUN_COLORS[i % len(RUN_COLORS)],
-                ))
-            fig.update_layout(
-                title="FP Rate by Distance Bin (all runs)",
-                xaxis_title="Distance Bin",
-                yaxis_title="FP Rate",
-                barmode="group",
-                yaxis_range=[0, 1]
-            )
-            st.plotly_chart(fig, width="stretch")
+
+        if use_line_chart:
+            if not df_tpr_dist.empty:
+                fig_tpr = go.Figure()
+                for i, lbl in enumerate(run_labels_list):
+                    d = df_tpr_dist[df_tpr_dist["run"] == lbl].sort_values("bin_order")
+                    c = RUN_COLORS[i % len(RUN_COLORS)]
+                    r, g, b = int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16)
+                    fig_tpr.add_trace(
+                        go.Scatter(
+                            x=d["bin_label"],
+                            y=d["tpr"],
+                            name=lbl,
+                            mode="lines",
+                            line=dict(color=c, width=2.2, shape="spline"),
+                            fill="tozeroy",
+                            fillcolor=f"rgba({r},{g},{b},0.15)",
+                            hovertemplate=f"{lbl}<br>%{{x}}<br>TP rate: %{{y:.2%}}<extra></extra>",
+                        )
+                    )
+                apply_chart_theme(fig_tpr, height=420)
+                fig_tpr.update_layout(
+                    title=f"TP rate by distance (all runs, within {max_eval_range} m)",
+                    xaxis_title="Distance bin",
+                    yaxis_title="TP rate",
+                    yaxis_range=[0, 1],
+                    xaxis=dict(tickangle=-35),
+                    hovermode="x unified",
+                )
+                fig_tpr.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.25)")
+                st.plotly_chart(fig_tpr, use_container_width=True)
+            else:
+                st.info("No TP rate by distance data.")
+
+            if not df_fpr_dist.empty:
+                fig_fpr = go.Figure()
+                for i, lbl in enumerate(run_labels_list):
+                    d = df_fpr_dist[df_fpr_dist["run"] == lbl].sort_values("bin_order")
+                    c = RUN_COLORS[i % len(RUN_COLORS)]
+                    r, g, b = int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16)
+                    fig_fpr.add_trace(
+                        go.Scatter(
+                            x=d["bin_label"],
+                            y=d["fpr"],
+                            name=lbl,
+                            mode="lines",
+                            line=dict(color=c, width=2.2, shape="spline"),
+                            fill="tozeroy",
+                            fillcolor=f"rgba({r},{g},{b},0.15)",
+                            hovertemplate=f"{lbl}<br>%{{x}}<br>FP rate: %{{y:.2%}}<extra></extra>",
+                        )
+                    )
+                apply_chart_theme(fig_fpr, height=420)
+                fig_fpr.update_layout(
+                    title=f"FP rate by distance (all runs, within {max_eval_range} m)",
+                    xaxis_title="Distance bin",
+                    yaxis_title="FP rate",
+                    yaxis_range=[0, 1],
+                    xaxis=dict(tickangle=-35),
+                    hovermode="x unified",
+                )
+                fig_fpr.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.25)")
+                st.plotly_chart(fig_fpr, use_container_width=True)
+            else:
+                st.info("No FP rate by distance data.")
         else:
-            st.info("No data available")
+            # Bar chart (histogram) for compare: TP then FP, grouped by run
+            if not df_tpr_dist.empty:
+                fig_tpr = go.Figure()
+                for i, lbl in enumerate(run_labels_list):
+                    d = df_tpr_dist[df_tpr_dist["run"] == lbl].sort_values("bin_order")
+                    fig_tpr.add_trace(
+                        go.Bar(
+                            x=d["bin_label"],
+                            y=d["tpr"],
+                            name=lbl,
+                            marker_color=RUN_COLORS[i % len(RUN_COLORS)],
+                            hovertemplate=f"{lbl}<br>%{{x}}<br>TP rate: %{{y:.2%}}<extra></extra>",
+                        )
+                    )
+                apply_chart_theme(fig_tpr, height=420)
+                fig_tpr.update_layout(
+                    title=f"TP rate by distance (all runs, within {max_eval_range} m)",
+                    xaxis_title="Distance bin",
+                    yaxis_title="TP rate",
+                    yaxis_range=[0, 1],
+                    barmode="group",
+                    xaxis=dict(tickangle=-35),
+                    hovermode="x unified",
+                )
+                fig_tpr.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.25)")
+                st.plotly_chart(fig_tpr, use_container_width=True)
+            else:
+                st.info("No TP rate by distance data.")
+
+            if not df_fpr_dist.empty:
+                fig_fpr = go.Figure()
+                for i, lbl in enumerate(run_labels_list):
+                    d = df_fpr_dist[df_fpr_dist["run"] == lbl].sort_values("bin_order")
+                    fig_fpr.add_trace(
+                        go.Bar(
+                            x=d["bin_label"],
+                            y=d["fpr"],
+                            name=lbl,
+                            marker_color=RUN_COLORS[i % len(RUN_COLORS)],
+                            hovertemplate=f"{lbl}<br>%{{x}}<br>FP rate: %{{y:.2%}}<extra></extra>",
+                        )
+                    )
+                apply_chart_theme(fig_fpr, height=420)
+                fig_fpr.update_layout(
+                    title=f"FP rate by distance (all runs, within {max_eval_range} m)",
+                    xaxis_title="Distance bin",
+                    yaxis_title="FP rate",
+                    yaxis_range=[0, 1],
+                    barmode="group",
+                    xaxis=dict(tickangle=-35),
+                    hovermode="x unified",
+                )
+                fig_fpr.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.25)")
+                st.plotly_chart(fig_fpr, use_container_width=True)
+            else:
+                st.info("No FP rate by distance data.")
 except Exception as e:
     st.error(f"Error: {e}")
 
@@ -843,9 +1056,7 @@ except Exception as e:
 # Panel 4b: Confidence distribution (EST only, when column exists)
 # =============================
 if schema.get("has_confidence"):
-    st.divider()
-    st.subheader("Confidence distribution (EST)")
-    st.caption("Detection confidence for estimated objects. Use threshold below to see Precision/Recall at that cutoff.")
+    st.markdown(_section_header("Confidence distribution (EST)", "Detection confidence for estimated objects. Use threshold below to see Precision/Recall at that cutoff."), unsafe_allow_html=True)
     try:
         fc = build_filter_clause(filters_base)
         if single_mode:
@@ -861,6 +1072,7 @@ if schema.get("has_confidence"):
                     title="EST confidence distribution",
                     labels={"conf": "Confidence"},
                 )
+                apply_chart_theme(fig_conf)
                 fig_conf.update_layout(yaxis_title="Count")
                 st.plotly_chart(fig_conf, use_container_width=True)
                 thresh = st.slider("Confidence threshold", 0.0, 1.0, 0.5, 0.05, key="conf_thresh")
@@ -904,6 +1116,7 @@ if schema.get("has_confidence"):
                     labels={"conf": "Confidence"},
                     color_discrete_sequence=RUN_COLORS,
                 )
+                apply_chart_theme(fig_conf)
                 st.plotly_chart(fig_conf, use_container_width=True)
             else:
                 st.info("No EST confidence data.")
@@ -1051,20 +1264,18 @@ def _plot_comparison_lens_treemap(
         marker_line_color="rgba(255,255,255,0.45)",
         root_color="rgba(240,240,245,0.95)",
     )
-    fig.update_layout(
-        margin=dict(t=4, l=2, r=2, b=2),
-        height=430,
-        paper_bgcolor="rgba(0,0,0,0)",
-    )
+    apply_chart_theme(fig, height=430, margin=dict(t=4, l=2, r=2, b=2), paper_bgcolor="rgba(0,0,0,0)")
     st.plotly_chart(fig, use_container_width=True, key=st_key)
 
 
 if not single_mode:
     st.divider()
-    st.subheader("Perception diff (vs baseline A)")
-    st.caption(
-        "Per-GT-object comparison vs baseline A: **degraded** = was TP on A and FN on candidate; "
-        "**improved** = was FN on A and TP on candidate. Hotspots prioritize regressions."
+    st.markdown(
+        _section_header(
+            "Perception diff (vs baseline A)",
+            "Per-GT-object comparison vs baseline A: degraded = was TP on A and FN on candidate; improved = was FN on A and TP on candidate. Hotspots prioritize regressions.",
+        ),
+        unsafe_allow_html=True,
     )
     for idx in range(1, len(runs)):
         lbl = run_labels_list[idx]
@@ -1372,10 +1583,7 @@ if not single_mode:
                                     title=title,
                                 )
                                 h_sb = 480 if pair_both else 620
-                                fig_b.update_layout(
-                                    margin=dict(t=36, l=4, r=4, b=4),
-                                    height=h_sb,
-                                )
+                                apply_chart_theme(fig_b, height=h_sb, margin=dict(t=36, l=4, r=4, b=4))
                             else:
                                 fig_b = px.treemap(
                                     hdf,
@@ -1386,10 +1594,7 @@ if not single_mode:
                                     title=title,
                                 )
                                 h_tr = 440 if pair_both else 520
-                                fig_b.update_layout(
-                                    margin=dict(t=40, l=4, r=4, b=4),
-                                    height=h_tr,
-                                )
+                                apply_chart_theme(fig_b, height=h_tr, margin=dict(t=40, l=4, r=4, b=4))
                             plot_entries.append((ct, fig_b))
 
                         two_up = (
@@ -1579,22 +1784,22 @@ if not single_mode:
                             st.markdown("**Per label**")
                             st.dataframe(
                                 df_by_label,
+                                use_container_width=True,
                                 hide_index=True,
-                                width="stretch",
                             )
                         if not scen_agg.empty:
                             st.markdown("**Per scenario**")
-                            st.dataframe(scen_agg, hide_index=True, width="stretch")
+                            st.dataframe(scen_agg, use_container_width=True, hide_index=True)
                         if not df_frame_sorted.empty:
                             st.markdown("**Per frame** (sorted by degraded)")
                             st.dataframe(
                                 df_frame_sorted.head(200),
+                                use_container_width=True,
                                 hide_index=True,
-                                width="stretch",
                             )
 
                     with st.expander("Full dataset breakdown (per t4dataset_id row)"):
-                        st.dataframe(df_improved, width="stretch")
+                        st.dataframe(df_improved, use_container_width=True, hide_index=True)
 
                     # --- Drill-down: filters + objects ---
                     st.markdown("**Drill-down: objects**")
@@ -1799,15 +2004,15 @@ if not single_mode:
                         )
                         st.dataframe(
                             df_obj_show.head(n_show),
+                            use_container_width=True,
                             hide_index=True,
-                            width="stretch",
                         )
                     else:
                         st.caption("No objects match filters.")
 
                     with st.expander("Full frame table (sort: degraded desc)"):
                         if not df_frame_sorted.empty:
-                            st.dataframe(df_frame_sorted, hide_index=True, width="stretch")
+                            st.dataframe(df_frame_sorted, use_container_width=True, hide_index=True)
                             row0 = df_frame_sorted.iloc[0]
                             suite_val = str(row0.get("suite_name", "") or "")
                             scenario_val = str(row0.get("scenario_name", "") or "")
@@ -1836,9 +2041,8 @@ if not single_mode:
 # =============================
 # Single mode: Frame / Object level — Where are the misses?
 # =============================
-st.divider()
 if single_mode:
-    st.subheader("Frame / Object level: Where are the misses?")
+    st.markdown(_section_header("Frame / Object level: Where are the misses?"), unsafe_allow_html=True)
     try:
         with st.expander("FN by frame and by object", expanded=True):
             query_fn_frame = f"""
@@ -1872,7 +2076,7 @@ if single_mode:
             if not df_fn_frame.empty:
                 st.markdown("**FN count by frame**")
                 st.download_button("Download FN by frame (CSV)", data=df_fn_frame.to_csv(index=False).encode("utf-8"), file_name="fn_by_frame.csv", mime="text/csv", key="dl_fn_frame")
-                st.dataframe(df_fn_frame, hide_index=True)
+                st.dataframe(df_fn_frame, use_container_width=True, hide_index=True)
                 # View in BEV for top FN frame
                 row0 = df_fn_frame.iloc[0]
                 suite_val = str(row0.get("suite_name", "") or "")
@@ -1898,9 +2102,9 @@ if single_mode:
                 st.markdown("**FN objects**")
                 if len(df_fn_object) > 500:
                     st.caption(f"Showing first 500 of {len(df_fn_object)} FN objects.")
-                    st.dataframe(df_fn_object.head(500), hide_index=True)
+                    st.dataframe(df_fn_object.head(500), use_container_width=True, hide_index=True)
                 else:
-                    st.dataframe(df_fn_object, hide_index=True)
+                    st.dataframe(df_fn_object, use_container_width=True, hide_index=True)
             else:
                 st.caption("No FN objects.")
     except Exception as e:
@@ -1910,7 +2114,7 @@ if single_mode:
 # Panel 6: Mean Error (single) / Mean Error Comparison (compare)
 # =============================
 st.divider()
-st.subheader("Mean Error" + (" Comparison" if not single_mode else ""))
+st.markdown(_section_header("Mean Error" + (" Comparison" if not single_mode else "")), unsafe_allow_html=True)
 
 try:
     sample_query = "SELECT * FROM view_eval_flat LIMIT 1"
@@ -1962,6 +2166,7 @@ else:
                     name='Yaw Error',
                     marker_color=RUN_COLORS[2],
                 ))
+                apply_chart_theme(fig)
                 fig.update_layout(
                     title=f"Mean Error within {max_eval_range} [m]",
                     xaxis_title="Label",
@@ -2005,13 +2210,14 @@ else:
                         labels={"label": "Label", col: err_type, "run": "Run"},
                         color_discrete_sequence=RUN_COLORS,
                     )
+                    apply_chart_theme(fig)
                     st.plotly_chart(fig, width="stretch")
             else:
                 st.info("No data available")
         except Exception as e:
             st.error(f"Error: {e}")
 
-        st.subheader("Difference of mean absolute error (each run − Baseline A)")
+        st.markdown(_section_header("Difference of mean absolute error (each run − Baseline A)"), unsafe_allow_html=True)
         for idx in range(1, len(runs)):
             lbl = run_labels_list[idx]
             try:
@@ -2050,6 +2256,7 @@ else:
                         fig.add_trace(go.Bar(x=df_ed["label"], y=df_ed["x_diff"], name="X Diff", marker_color=RUN_COLORS[0]))
                         fig.add_trace(go.Bar(x=df_ed["label"], y=df_ed["y_diff"], name="Y Diff", marker_color=RUN_COLORS[1]))
                         fig.add_trace(go.Bar(x=df_ed["label"], y=df_ed["yaw_diff"], name="Yaw Diff", marker_color=RUN_COLORS[2]))
+                        apply_chart_theme(fig)
                         fig.update_layout(title=f"Error diff ({lbl} − A) within {max_eval_range} [m]", xaxis_title="Label", yaxis_title="Error Difference [m] or [rad]", barmode="group")
                         st.plotly_chart(fig, width="stretch")
             except Exception as e:
@@ -2059,7 +2266,7 @@ else:
 # Panel 8: Object Count with Distance
 # =============================
 st.divider()
-st.subheader("Object count with distance")
+st.markdown(_section_header("Object count with distance"), unsafe_allow_html=True)
 
 try:
     if single_mode:
@@ -2100,6 +2307,7 @@ try:
                 labels={'dist_h': 'Distance [m]', 'run': 'Run'},
                 color_discrete_sequence=RUN_COLORS,
             )
+        apply_chart_theme(fig)
         st.plotly_chart(fig, width="stretch")
     else:
         st.info("No data available")
