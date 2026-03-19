@@ -1110,14 +1110,35 @@ def _distance_bin_order_and_label(bin_str: str) -> Tuple[int, str]:
     return (0, s)
 
 
+# Same 10 m bins as view_tpr_fpr / eval_flat (used for object-count alignment)
+_DIST_BIN_CASE = """CASE
+  WHEN dist_h >= 0 AND dist_h < 10 THEN '[0,10)'
+  WHEN dist_h >= 10 AND dist_h < 20 THEN '[10,20)'
+  WHEN dist_h >= 20 AND dist_h < 30 THEN '[20,30)'
+  WHEN dist_h >= 30 AND dist_h < 40 THEN '[30,40)'
+  WHEN dist_h >= 40 AND dist_h < 50 THEN '[40,50)'
+  WHEN dist_h >= 50 AND dist_h < 60 THEN '[50,60)'
+  WHEN dist_h >= 60 AND dist_h < 70 THEN '[60,70)'
+  WHEN dist_h >= 70 AND dist_h < 80 THEN '[70,80)'
+  WHEN dist_h >= 80 AND dist_h < 90 THEN '[80,90)'
+  WHEN dist_h >= 90 AND dist_h < 100 THEN '[90,100)'
+  WHEN dist_h >= 100 AND dist_h < 110 THEN '[100,110)'
+  WHEN dist_h >= 110 AND dist_h < 120 THEN '[110,120)'
+  WHEN dist_h >= 120 AND dist_h < 130 THEN '[120,130)'
+  WHEN dist_h >= 130 AND dist_h < 140 THEN '[130,140)'
+  WHEN dist_h >= 140 AND dist_h < 150 THEN '[140,150)'
+  WHEN dist_h >= 150 THEN '[150,inf)'
+  ELSE '[unknown]' END"""
+
+
 # =============================
-# Panel 3 & 4: TP & FP Rate by Distance — line+area or bar (user choice)
+# Panel 3–5: Distance — TP/FP rates by bin + object count vs range
 # =============================
 st.divider()
 st.markdown(
     _section_header(
-        "TP & FP rate by distance",
-        "How detection performance changes with distance. Choose chart style below.",
+        "Distance: TP/FP rates & object count",
+        "Same distance bins and chart style (line or bar) for rates and object counts; x-axis order matches across charts.",
     ),
     unsafe_allow_html=True,
 )
@@ -1129,9 +1150,10 @@ rate_by_dist_style = st.radio(
     key="tp_fp_rate_by_dist_style",
 )
 
+filter_clause_base = build_filter_clause(filters_base, enable_dist_h=False)
 try:
-    filter_clause_base = build_filter_clause(filters_base, enable_dist_h=False)
     use_line_chart = rate_by_dist_style == "Line chart (trend)"
+    rate_bin_labels_order: Optional[List[str]] = None
 
     if single_mode:
         # Fetch both TP and FP rate by distance
@@ -1152,6 +1174,7 @@ try:
             )
             df_both = df_both.sort_values("bin_order")
             x_labels = df_both["bin_label"].tolist()
+            rate_bin_labels_order = x_labels
 
             if use_line_chart:
                 fig = go.Figure()
@@ -1185,7 +1208,11 @@ try:
                     xaxis_title="Distance bin",
                     yaxis_title="Rate",
                     yaxis_range=[0, 1],
-                    xaxis=dict(tickangle=-35),
+                    xaxis=dict(
+                        tickangle=-35,
+                        categoryorder="array",
+                        categoryarray=x_labels,
+                    ),
                     hovermode="x unified",
                 )
                 fig.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.25)")
@@ -1218,7 +1245,11 @@ try:
                     yaxis_title="Rate",
                     yaxis_range=[0, 1],
                     barmode="group",
-                    xaxis=dict(tickangle=-35),
+                    xaxis=dict(
+                        tickangle=-35,
+                        categoryorder="array",
+                        categoryarray=x_labels,
+                    ),
                     hovermode="x unified",
                 )
                 fig.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.25)")
@@ -1263,6 +1294,18 @@ try:
             dfs_fpr.append(df_i)
         df_fpr_dist = pd.concat(dfs_fpr, ignore_index=True)
 
+        if not df_tpr_dist.empty:
+            rate_bin_labels_order = (
+                df_tpr_dist[df_tpr_dist["run"] == run_labels_list[0]]
+                .sort_values("bin_order")["bin_label"]
+                .tolist()
+            )
+        _xaxis_dist_bins = (
+            dict(tickangle=-35, categoryorder="array", categoryarray=rate_bin_labels_order)
+            if rate_bin_labels_order
+            else dict(tickangle=-35)
+        )
+
         if use_line_chart:
             if not df_tpr_dist.empty:
                 fig_tpr = go.Figure()
@@ -1284,11 +1327,11 @@ try:
                     )
                 apply_chart_theme(fig_tpr, height=420)
                 fig_tpr.update_layout(
-                    title=f"TP rate by distance (all runs, within {max_eval_range} m)",
+                    title=f"TP rate by distance",
                     xaxis_title="Distance bin",
                     yaxis_title="TP rate",
                     yaxis_range=[0, 1],
-                    xaxis=dict(tickangle=-35),
+                    xaxis=_xaxis_dist_bins,
                     hovermode="x unified",
                 )
                 fig_tpr.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.25)")
@@ -1316,11 +1359,11 @@ try:
                     )
                 apply_chart_theme(fig_fpr, height=420)
                 fig_fpr.update_layout(
-                    title=f"FP rate by distance (all runs, within {max_eval_range} m)",
+                    title=f"FP rate by distance",
                     xaxis_title="Distance bin",
                     yaxis_title="FP rate",
                     yaxis_range=[0, 1],
-                    xaxis=dict(tickangle=-35),
+                    xaxis=_xaxis_dist_bins,
                     hovermode="x unified",
                 )
                 fig_fpr.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.25)")
@@ -1344,12 +1387,12 @@ try:
                     )
                 apply_chart_theme(fig_tpr, height=420)
                 fig_tpr.update_layout(
-                    title=f"TP rate by distance (all runs, within {max_eval_range} m)",
+                    title=f"TP rate by distance",
                     xaxis_title="Distance bin",
                     yaxis_title="TP rate",
                     yaxis_range=[0, 1],
                     barmode="group",
-                    xaxis=dict(tickangle=-35),
+                    xaxis=_xaxis_dist_bins,
                     hovermode="x unified",
                 )
                 fig_tpr.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.25)")
@@ -1372,18 +1415,157 @@ try:
                     )
                 apply_chart_theme(fig_fpr, height=420)
                 fig_fpr.update_layout(
-                    title=f"FP rate by distance (all runs, within {max_eval_range} m)",
+                    title=f"FP rate by distance",
                     xaxis_title="Distance bin",
                     yaxis_title="FP rate",
                     yaxis_range=[0, 1],
                     barmode="group",
-                    xaxis=dict(tickangle=-35),
+                    xaxis=_xaxis_dist_bins,
                     hovermode="x unified",
                 )
                 fig_fpr.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.25)")
                 st.plotly_chart(fig_fpr, use_container_width=True)
             else:
                 st.info("No FP rate by distance data.")
+
+    # Object count by same distance bins as TP/FP; same line vs bar style; aligned x-axis
+
+    try:
+        if single_mode:
+            q_oc = f"""
+            SELECT ({_DIST_BIN_CASE}) AS distance_bin, label, COUNT(*) AS n
+            FROM view_eval_flat
+            WHERE {filter_clause_base}
+            GROUP BY 1, 2
+            """
+            df_oc = con.execute(q_oc).df()
+        else:
+            dfs_oc = []
+            for i in range(len(runs)):
+                fc_oc = build_filter_clause(filters_list[i], enable_dist_h=False)
+                q_oc_i = f"""
+                SELECT ({_DIST_BIN_CASE}) AS distance_bin, COUNT(*) AS n
+                FROM {_flat_view(i)}
+                WHERE {fc_oc}
+                GROUP BY 1
+                """
+                df_oci = con.execute(q_oc_i).df()
+                df_oci["run"] = run_labels_list[i]
+                dfs_oc.append(df_oci)
+            df_oc = pd.concat(dfs_oc, ignore_index=True)
+
+        if df_oc.empty:
+            st.info("No object count data by distance bin.")
+        else:
+            df_oc = df_oc.copy()
+            df_oc["bin_order"], df_oc["bin_label"] = zip(*df_oc["distance_bin"].map(_distance_bin_order_and_label))
+            if rate_bin_labels_order:
+                align_x = list(rate_bin_labels_order)
+            else:
+                align_x = (
+                    df_oc.drop_duplicates("distance_bin")
+                    .sort_values("bin_order")["bin_label"]
+                    .tolist()
+                )
+
+            xaxis_oc = dict(tickangle=-35, categoryorder="array", categoryarray=align_x)
+
+            if single_mode:
+                pivot_oc = df_oc.pivot_table(
+                    index="bin_label", columns="label", values="n", aggfunc="sum", fill_value=0
+                )
+                pivot_oc = pivot_oc.reindex(align_x, fill_value=0)
+
+                fig_oc = go.Figure()
+                if use_line_chart:
+                    for j, lab in enumerate(pivot_oc.columns):
+                        c = RUN_COLORS[j % len(RUN_COLORS)]
+                        r, g, b = int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16)
+                        nm = str(lab)
+                        fig_oc.add_trace(
+                            go.Scatter(
+                                x=align_x,
+                                y=pivot_oc[lab].values,
+                                name=nm,
+                                mode="lines",
+                                line=dict(color=c, width=2.2, shape="spline"),
+                                fill="tozeroy",
+                                fillcolor=f"rgba({r},{g},{b},0.12)",
+                                hovertemplate=f"{nm}<br>%{{x}}<br>Count: %{{y:.0f}}<extra></extra>",
+                            )
+                        )
+                else:
+                    for j, lab in enumerate(pivot_oc.columns):
+                        c = RUN_COLORS[j % len(RUN_COLORS)]
+                        nm = str(lab)
+                        fig_oc.add_trace(
+                            go.Bar(
+                                x=align_x,
+                                y=pivot_oc[lab].values,
+                                name=nm,
+                                marker_color=c,
+                                hovertemplate=f"{nm}<br>%{{x}}<br>Count: %{{y:.0f}}<extra></extra>",
+                            )
+                        )
+                apply_chart_theme(fig_oc, height=420)
+                fig_oc.update_layout(
+                    title=f"Object count by distance bin (within {max_eval_range} m)",
+                    xaxis_title="Distance bin",
+                    yaxis_title="Count",
+                    xaxis=xaxis_oc,
+                    hovermode="x unified",
+                    **({"barmode": "group"} if not use_line_chart else {}),
+                )
+                st.plotly_chart(fig_oc, use_container_width=True)
+            else:
+                pivot_oc = df_oc.pivot_table(
+                    index="bin_label", columns="run", values="n", aggfunc="sum", fill_value=0
+                )
+                pivot_oc = pivot_oc.reindex(align_x, fill_value=0)
+                run_cols = [r for r in run_labels_list if r in pivot_oc.columns]
+
+                fig_oc = go.Figure()
+                if use_line_chart:
+                    for j, rl in enumerate(run_cols):
+                        c = RUN_COLORS[j % len(RUN_COLORS)]
+                        r, g, b = int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16)
+                        fig_oc.add_trace(
+                            go.Scatter(
+                                x=align_x,
+                                y=pivot_oc[rl].values,
+                                name=str(rl),
+                                mode="lines",
+                                line=dict(color=c, width=2.2, shape="spline"),
+                                fill="tozeroy",
+                                fillcolor=f"rgba({r},{g},{b},0.15)",
+                                hovertemplate=f"{rl}<br>%{{x}}<br>Count: %{{y:.0f}}<extra></extra>",
+                            )
+                        )
+                else:
+                    for j, rl in enumerate(run_cols):
+                        c = RUN_COLORS[j % len(RUN_COLORS)]
+                        fig_oc.add_trace(
+                            go.Bar(
+                                x=align_x,
+                                y=pivot_oc[rl].values,
+                                name=str(rl),
+                                marker_color=c,
+                                hovertemplate=f"{rl}<br>%{{x}}<br>Count: %{{y:.0f}}<extra></extra>",
+                            )
+                        )
+                apply_chart_theme(fig_oc, height=420)
+                fig_oc.update_layout(
+                    title=f"Object count by distance bin",
+                    xaxis_title="Distance bin",
+                    yaxis_title="Count",
+                    xaxis=xaxis_oc,
+                    hovermode="x unified",
+                    **({"barmode": "group"} if not use_line_chart else {}),
+                )
+                st.plotly_chart(fig_oc, use_container_width=True)
+    except Exception as e_oc:
+        st.error(f"Error (object count by distance bin): {e_oc}")
+
 except Exception as e:
     st.error(f"Error: {e}")
 # =============================
@@ -1574,26 +1756,6 @@ else:
 # =============================
 # Panel 5: Perception diff vs baseline A (compare mode only)
 # =============================
-_DIST_BIN_CASE = """CASE
-  WHEN dist_h >= 0 AND dist_h < 10 THEN '[0,10)'
-  WHEN dist_h >= 10 AND dist_h < 20 THEN '[10,20)'
-  WHEN dist_h >= 20 AND dist_h < 30 THEN '[20,30)'
-  WHEN dist_h >= 30 AND dist_h < 40 THEN '[30,40)'
-  WHEN dist_h >= 40 AND dist_h < 50 THEN '[40,50)'
-  WHEN dist_h >= 50 AND dist_h < 60 THEN '[50,60)'
-  WHEN dist_h >= 60 AND dist_h < 70 THEN '[60,70)'
-  WHEN dist_h >= 70 AND dist_h < 80 THEN '[70,80)'
-  WHEN dist_h >= 80 AND dist_h < 90 THEN '[80,90)'
-  WHEN dist_h >= 90 AND dist_h < 100 THEN '[90,100)'
-  WHEN dist_h >= 100 AND dist_h < 110 THEN '[100,110)'
-  WHEN dist_h >= 110 AND dist_h < 120 THEN '[110,120)'
-  WHEN dist_h >= 120 AND dist_h < 130 THEN '[120,130)'
-  WHEN dist_h >= 130 AND dist_h < 140 THEN '[130,140)'
-  WHEN dist_h >= 140 AND dist_h < 150 THEN '[140,150)'
-  WHEN dist_h >= 150 THEN '[150,inf)'
-  ELSE '[unknown]' END"""
-
-
 def _baobab_hierarchy_from_objects(
     df_obj: pd.DataFrame,
     change_type: str,
@@ -2250,213 +2412,213 @@ if not single_mode:
                         st.dataframe(df_improved, use_container_width=True, hide_index=True)
 
                     # --- Drill-down: filters + objects ---
-                    st.markdown("**Drill-down: objects**")
-                    scen_key = f"p5_scen_{lbl}_{idx}"
-                    t4_key = f"p5_t4_{lbl}_{idx}"
-                    lab_key = f"p5_lab_{lbl}_{idx}"
-                    for k, default in ((scen_key, []), (t4_key, []), (lab_key, [])):
-                        if k not in st.session_state:
-                            st.session_state[k] = default
+                    with st.expander("Drill-down: objects"):
+                        scen_key = f"p5_scen_{lbl}_{idx}"
+                        t4_key = f"p5_t4_{lbl}_{idx}"
+                        lab_key = f"p5_lab_{lbl}_{idx}"
+                        for k, default in ((scen_key, []), (t4_key, []), (lab_key, [])):
+                            if k not in st.session_state:
+                                st.session_state[k] = default
 
-                    scenarios_all = sorted(
-                        df_improved["scenario_name"].dropna().astype(str).unique().tolist()
-                    )
-                    t4_all = sorted(
-                        df_improved["t4dataset_name"].dropna().astype(str).unique().tolist()
-                    )
-                    labels_all = (
-                        sorted(df_by_object_full["label"].dropna().astype(str).unique().tolist())
-                        if not df_by_object_full.empty
-                        else []
-                    )
-                    # Keep prior picks valid so Streamlit does not reset widgets when options refresh
-                    scenarios_opts = sorted(
-                        set(scenarios_all) | set(st.session_state.get(scen_key, []) or [])
-                    )
-                    t4_opts = sorted(set(t4_all) | set(st.session_state.get(t4_key, []) or []))
-                    labels_opts = sorted(
-                        set(labels_all) | set(st.session_state.get(lab_key, []) or [])
-                    )
+                        scenarios_all = sorted(
+                            df_improved["scenario_name"].dropna().astype(str).unique().tolist()
+                        )
+                        t4_all = sorted(
+                            df_improved["t4dataset_name"].dropna().astype(str).unique().tolist()
+                        )
+                        labels_all = (
+                            sorted(df_by_object_full["label"].dropna().astype(str).unique().tolist())
+                            if not df_by_object_full.empty
+                            else []
+                        )
+                        # Keep prior picks valid so Streamlit does not reset widgets when options refresh
+                        scenarios_opts = sorted(
+                            set(scenarios_all) | set(st.session_state.get(scen_key, []) or [])
+                        )
+                        t4_opts = sorted(set(t4_all) | set(st.session_state.get(t4_key, []) or []))
+                        labels_opts = sorted(
+                            set(labels_all) | set(st.session_state.get(lab_key, []) or [])
+                        )
 
-                    pr1, pr2 = st.columns(2)
-                    with pr1:
-                        if st.button(
-                            "Preset: top 5 degraded scenarios",
-                            key=f"p5_pre_scen_{lbl}_{idx}",
-                        ):
-                            if not df_improved.empty:
-                                sa = (
-                                    df_improved.groupby("scenario_name", dropna=False)[
-                                        "degraded_cnt"
+                        pr1, pr2 = st.columns(2)
+                        with pr1:
+                            if st.button(
+                                "Preset: top 5 degraded scenarios",
+                                key=f"p5_pre_scen_{lbl}_{idx}",
+                            ):
+                                if not df_improved.empty:
+                                    sa = (
+                                        df_improved.groupby("scenario_name", dropna=False)[
+                                            "degraded_cnt"
+                                        ]
+                                        .sum()
+                                        .sort_values(ascending=False)
+                                        .head(5)
+                                    )
+                                    st.session_state[scen_key] = [
+                                        str(x) for x in sa.index.tolist()
                                     ]
-                                    .sum()
-                                    .sort_values(ascending=False)
-                                    .head(5)
+                                    st.rerun()
+                        fr_multiselect_key = f"p5_frkeys_{lbl}_{idx}"
+                        if fr_multiselect_key not in st.session_state:
+                            st.session_state[fr_multiselect_key] = []
+                        frame_key_labels = {}
+                        if not df_frame_sorted.empty:
+                            for _, rw in df_frame_sorted.head(40).iterrows():
+                                fk = f"{rw['t4dataset_id']}|{rw['frame_index']}"
+                                # Use scenario_name (not suite_name) for frame option labels
+                                frame_key_labels[fk] = (
+                                    f"{str(rw.get('scenario_name', ''))[:36]} | "
+                                    f"f{rw['frame_index']} | deg {int(rw['degraded_cnt'])}"
                                 )
-                                st.session_state[scen_key] = [
-                                    str(x) for x in sa.index.tolist()
+                        with pr2:
+                            if st.button(
+                                "Preset: top 10 degraded frames (object filter)",
+                                key=f"p5_pre_fr_{lbl}_{idx}",
+                            ):
+                                if frame_key_labels:
+                                    topk = list(frame_key_labels.keys())[:10]
+                                    st.session_state[fr_multiselect_key] = topk
+                                    st.rerun()
+
+                        colf1, colf2, colf3 = st.columns(3)
+                        with colf1:
+                            if scenarios_opts:
+                                st.multiselect(
+                                    "Filter scenario_name",
+                                    scenarios_opts,
+                                    key=scen_key,
+                                )
+                            else:
+                                st.caption("No scenarios.")
+                        with colf2:
+                            if t4_opts:
+                                st.multiselect(
+                                    "Filter t4dataset_name",
+                                    t4_opts,
+                                    key=t4_key,
+                                )
+                            else:
+                                st.caption("No t4dataset_name.")
+                        with colf3:
+                            if labels_opts:
+                                st.multiselect(
+                                    "Filter label",
+                                    labels_opts,
+                                    key=lab_key,
+                                )
+                            else:
+                                st.caption("No labels.")
+
+                        prev_fr = st.session_state.get(fr_multiselect_key) or []
+                        base_frame_keys = list(frame_key_labels.keys())
+                        for k in prev_fr:
+                            if k not in frame_key_labels:
+                                frame_key_labels[k] = f"(selected) frame {str(k).split('|')[-1]}"
+                        frame_opts_keys = base_frame_keys + [
+                            k for k in prev_fr if k not in base_frame_keys
+                        ]
+                        if frame_opts_keys:
+                            st.multiselect(
+                                "Limit objects to frames (optional)",
+                                options=frame_opts_keys,
+                                format_func=lambda k: frame_key_labels.get(k, k),
+                                key=fr_multiselect_key,
+                            )
+
+                        change_type_filter = st.selectbox(
+                            "Change type",
+                            ["degraded", "improved", "all", "both_tp", "both_fn"],
+                            key=f"change_type_{lbl}_{idx}",
+                            help="Filter objects by TP change between runs.",
+                        )
+                        sort_obj = st.selectbox(
+                            "Sort objects by",
+                            [
+                                "degraded_priority_then_dist",
+                                "frame_then_uuid",
+                                "label_then_dist",
+                            ],
+                            key=f"p5_sort_{lbl}_{idx}",
+                        )
+
+                        df_obj_show = (
+                            df_by_object_full.copy()
+                            if not df_by_object_full.empty
+                            else pd.DataFrame()
+                        )
+                        if not df_obj_show.empty:
+                            ss = st.session_state.get(scen_key) or []
+                            if ss:
+                                df_obj_show = df_obj_show[
+                                    df_obj_show["scenario_name"].astype(str).isin(ss)
                                 ]
-                                st.rerun()
-                    fr_multiselect_key = f"p5_frkeys_{lbl}_{idx}"
-                    if fr_multiselect_key not in st.session_state:
-                        st.session_state[fr_multiselect_key] = []
-                    frame_key_labels = {}
-                    if not df_frame_sorted.empty:
-                        for _, rw in df_frame_sorted.head(40).iterrows():
-                            fk = f"{rw['t4dataset_id']}|{rw['frame_index']}"
-                            # Use scenario_name (not suite_name) for frame option labels
-                            frame_key_labels[fk] = (
-                                f"{str(rw.get('scenario_name', ''))[:36]} | "
-                                f"f{rw['frame_index']} | deg {int(rw['degraded_cnt'])}"
-                            )
-                    with pr2:
-                        if st.button(
-                            "Preset: top 10 degraded frames (object filter)",
-                            key=f"p5_pre_fr_{lbl}_{idx}",
-                        ):
-                            if frame_key_labels:
-                                topk = list(frame_key_labels.keys())[:10]
-                                st.session_state[fr_multiselect_key] = topk
-                                st.rerun()
+                            tt = st.session_state.get(t4_key) or []
+                            if tt:
+                                df_obj_show = df_obj_show[
+                                    df_obj_show["t4dataset_name"].astype(str).isin(tt)
+                                ]
+                            ll = st.session_state.get(lab_key) or []
+                            if ll:
+                                df_obj_show = df_obj_show[
+                                    df_obj_show["label"].astype(str).isin(ll)
+                                ]
+                            fk_sel = st.session_state.get(fr_multiselect_key) or []
+                            if fk_sel:
+                                fk_set = set(fk_sel)
+                                df_obj_show = df_obj_show[
+                                    (
+                                        df_obj_show["t4dataset_id"].astype(str)
+                                        + "|"
+                                        + df_obj_show["frame_index"].astype(str)
+                                    ).isin(fk_set)
+                                ]
+                            if change_type_filter != "all":
+                                df_obj_show = df_obj_show[
+                                    df_obj_show["change_type"] == change_type_filter
+                                ]
+                            if sort_obj == "degraded_priority_then_dist":
+                                df_obj_show = df_obj_show.copy()
+                                df_obj_show["_prio"] = df_obj_show["change_type"].map(
+                                    {
+                                        "degraded": 0,
+                                        "improved": 1,
+                                        "both_tp": 2,
+                                        "both_fn": 3,
+                                    }
+                                )
+                                df_obj_show = df_obj_show.sort_values(
+                                    by=["_prio", "dist_h"],
+                                    ascending=[True, True],
+                                ).drop(columns=["_prio"], errors="ignore")
+                            elif sort_obj == "frame_then_uuid":
+                                df_obj_show = df_obj_show.sort_values(
+                                    by=["t4dataset_id", "frame_index", "gt_uuid"]
+                                )
+                            else:
+                                df_obj_show = df_obj_show.sort_values(
+                                    by=["label", "dist_h", "t4dataset_id", "frame_index"]
+                                )
 
-                    colf1, colf2, colf3 = st.columns(3)
-                    with colf1:
-                        if scenarios_opts:
-                            st.multiselect(
-                                "Filter scenario_name",
-                                scenarios_opts,
-                                key=scen_key,
-                            )
-                        else:
-                            st.caption("No scenarios.")
-                    with colf2:
-                        if t4_opts:
-                            st.multiselect(
-                                "Filter t4dataset_name",
-                                t4_opts,
-                                key=t4_key,
-                            )
-                        else:
-                            st.caption("No t4dataset_name.")
-                    with colf3:
-                        if labels_opts:
-                            st.multiselect(
-                                "Filter label",
-                                labels_opts,
-                                key=lab_key,
-                            )
-                        else:
-                            st.caption("No labels.")
-
-                    prev_fr = st.session_state.get(fr_multiselect_key) or []
-                    base_frame_keys = list(frame_key_labels.keys())
-                    for k in prev_fr:
-                        if k not in frame_key_labels:
-                            frame_key_labels[k] = f"(selected) frame {str(k).split('|')[-1]}"
-                    frame_opts_keys = base_frame_keys + [
-                        k for k in prev_fr if k not in base_frame_keys
-                    ]
-                    if frame_opts_keys:
-                        st.multiselect(
-                            "Limit objects to frames (optional)",
-                            options=frame_opts_keys,
-                            format_func=lambda k: frame_key_labels.get(k, k),
-                            key=fr_multiselect_key,
+                        n_show = 200
+                        st.caption(
+                            f"Showing up to {n_show} rows; use **Download CSV** for the full filtered list."
                         )
-
-                    change_type_filter = st.selectbox(
-                        "Change type",
-                        ["degraded", "improved", "all", "both_tp", "both_fn"],
-                        key=f"change_type_{lbl}_{idx}",
-                        help="Filter objects by TP change between runs.",
-                    )
-                    sort_obj = st.selectbox(
-                        "Sort objects by",
-                        [
-                            "degraded_priority_then_dist",
-                            "frame_then_uuid",
-                            "label_then_dist",
-                        ],
-                        key=f"p5_sort_{lbl}_{idx}",
-                    )
-
-                    df_obj_show = (
-                        df_by_object_full.copy()
-                        if not df_by_object_full.empty
-                        else pd.DataFrame()
-                    )
-                    if not df_obj_show.empty:
-                        ss = st.session_state.get(scen_key) or []
-                        if ss:
-                            df_obj_show = df_obj_show[
-                                df_obj_show["scenario_name"].astype(str).isin(ss)
-                            ]
-                        tt = st.session_state.get(t4_key) or []
-                        if tt:
-                            df_obj_show = df_obj_show[
-                                df_obj_show["t4dataset_name"].astype(str).isin(tt)
-                            ]
-                        ll = st.session_state.get(lab_key) or []
-                        if ll:
-                            df_obj_show = df_obj_show[
-                                df_obj_show["label"].astype(str).isin(ll)
-                            ]
-                        fk_sel = st.session_state.get(fr_multiselect_key) or []
-                        if fk_sel:
-                            fk_set = set(fk_sel)
-                            df_obj_show = df_obj_show[
-                                (
-                                    df_obj_show["t4dataset_id"].astype(str)
-                                    + "|"
-                                    + df_obj_show["frame_index"].astype(str)
-                                ).isin(fk_set)
-                            ]
-                        if change_type_filter != "all":
-                            df_obj_show = df_obj_show[
-                                df_obj_show["change_type"] == change_type_filter
-                            ]
-                        if sort_obj == "degraded_priority_then_dist":
-                            df_obj_show = df_obj_show.copy()
-                            df_obj_show["_prio"] = df_obj_show["change_type"].map(
-                                {
-                                    "degraded": 0,
-                                    "improved": 1,
-                                    "both_tp": 2,
-                                    "both_fn": 3,
-                                }
+                        if not df_obj_show.empty:
+                            st.download_button(
+                                label="Download filtered objects (CSV)",
+                                data=df_obj_show.to_csv(index=False).encode("utf-8"),
+                                file_name=f"perception_diff_{lbl}_vs_A_objects.csv",
+                                mime="text/csv",
+                                key=f"p5_dl_{lbl}_{idx}",
                             )
-                            df_obj_show = df_obj_show.sort_values(
-                                by=["_prio", "dist_h"],
-                                ascending=[True, True],
-                            ).drop(columns=["_prio"], errors="ignore")
-                        elif sort_obj == "frame_then_uuid":
-                            df_obj_show = df_obj_show.sort_values(
-                                by=["t4dataset_id", "frame_index", "gt_uuid"]
+                            st.dataframe(
+                                df_obj_show.head(n_show),
+                                use_container_width=True,
+                                hide_index=True,
                             )
                         else:
-                            df_obj_show = df_obj_show.sort_values(
-                                by=["label", "dist_h", "t4dataset_id", "frame_index"]
-                            )
-
-                    n_show = 200
-                    st.caption(
-                        f"Showing up to {n_show} rows; use **Download CSV** for the full filtered list."
-                    )
-                    if not df_obj_show.empty:
-                        st.download_button(
-                            label="Download filtered objects (CSV)",
-                            data=df_obj_show.to_csv(index=False).encode("utf-8"),
-                            file_name=f"perception_diff_{lbl}_vs_A_objects.csv",
-                            mime="text/csv",
-                            key=f"p5_dl_{lbl}_{idx}",
-                        )
-                        st.dataframe(
-                            df_obj_show.head(n_show),
-                            use_container_width=True,
-                            hide_index=True,
-                        )
-                    else:
-                        st.caption("No objects match filters.")
+                            st.caption("No objects match filters.")
 
                     with st.expander("Full frame table (sort: degraded desc)"):
                         if not df_frame_sorted.empty:
@@ -2771,54 +2933,3 @@ else:
             except Exception as e:
                 st.error(f"Error (Run {lbl} − A): {e}")
 
-# =============================
-# Panel 8: Object Count with Distance
-# =============================
-st.divider()
-st.markdown(_section_header("Object count with distance"), unsafe_allow_html=True)
-
-try:
-    if single_mode:
-        query = f"""
-        SELECT dist_h, label
-        FROM view_eval_flat
-        WHERE {filter_clause_base}
-        """
-        df_dist = con.execute(query).df()
-    else:
-        dfs_d = []
-        for i in range(len(runs)):
-            fc = build_filter_clause(filters_list[i])
-            q = f"SELECT dist_h, label FROM {_flat_view(i)} WHERE {fc}"
-            df_i = con.execute(q).df()
-            df_i["run"] = run_labels_list[i]
-            dfs_d.append(df_i)
-        df_dist = pd.concat(dfs_d, ignore_index=True)
-    if not df_dist.empty:
-        if single_mode:
-            fig = px.histogram(
-                df_dist,
-                x='dist_h',
-                color='label',
-                nbins=50,
-                title="Object Count by Distance",
-                labels={'dist_h': 'Distance [m]', 'label': 'Label'}
-            )
-        else:
-            fig = px.histogram(
-                df_dist,
-                x='dist_h',
-                color='run',
-                nbins=50,
-                barmode='overlay',
-                opacity=0.6,
-                title="Object Count by Distance (by run)",
-                labels={'dist_h': 'Distance [m]', 'run': 'Run'},
-                color_discrete_sequence=RUN_COLORS,
-            )
-        apply_chart_theme(fig)
-        st.plotly_chart(fig, width="stretch")
-    else:
-        st.info("No data available")
-except Exception as e:
-    st.error(f"Error: {e}")
