@@ -1861,6 +1861,7 @@ def _plot_comparison_lens_treemap(
         values="n",
         color="side",
         color_discrete_map={"Improved": IMPROVED_COLOR, "Degraded": DEGRADED_COLOR},
+        #title = "test"
     )
     fig.update_traces(
         textfont_size=12,
@@ -1874,7 +1875,7 @@ def _plot_comparison_lens_treemap(
         marker_line_color="rgba(255,255,255,0.45)",
         root_color="rgba(240,240,245,0.95)",
     )
-    apply_chart_theme(fig, height=430, margin=dict(t=4, l=2, r=2, b=2), paper_bgcolor="rgba(0,0,0,0)")
+    apply_chart_theme(fig, height=430, margin=dict(t=30, l=2, r=2, b=2), paper_bgcolor="rgba(0,0,0,0)")
     st.plotly_chart(fig, use_container_width=True, key=st_key)
 
 
