@@ -2121,15 +2121,6 @@ if not single_mode:
                         f"**{int(tot_deg)}** degraded vs **{int(tot_imp)}** improved."
                     )
 
-                    st.markdown(
-                        "**Hierarchical view (scenario → frame → label)** — "
-                        "arc/tile size ∝ GT object count (like a disk-usage tree)."
-                    )
-                    st.caption(
-                        "Rings/tiles: **scenario** → **frame** (`fN` per scenario; under **Other scenarios**, "
-                        "`…dataset|fN` disambiguates) → **label**. "
-                        "**Other scenarios** / **Other frames** group smaller buckets (sliders below)."
-                    )
                     b_key = f"p5_baobab_{lbl}_{idx}"
                     c1b, c2b, c3b = st.columns([1, 1, 1])
                     with c1b:
@@ -2315,13 +2306,6 @@ if not single_mode:
                         ).reset_index(drop=True)
 
                     root_lens = f"{lbl} vs A"
-                    st.divider()
-                    st.markdown("##### Comparison lens")
-                    st.caption(
-                        "Same encoding as the hierarchical view above: **tile area ∝ GT count**, "
-                        "**green = improved**, **red = degraded**. "
-                        "Three zoom levels — **class**, **scenario**, **frame**."
-                    )
                     lc1, lc2, lc3 = st.columns(3, gap="small")
                     with lc1:
                         st.markdown("**By class**")
