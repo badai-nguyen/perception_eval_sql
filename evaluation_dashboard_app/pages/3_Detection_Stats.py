@@ -105,8 +105,13 @@ def _tpr_lollipop_single(df: pd.DataFrame, title: str) -> go.Figure:
     return fig
 
 
-def _tpr_radar_compare(
-    df_all: pd.DataFrame, categories: List[str], title: str, run_order: List[str]
+def _tpr_spider_compare(
+    df_all: pd.DataFrame,
+    categories: List[str],
+    title: str,
+    run_order: List[str],
+    *,
+    height: int = 440,
 ) -> go.Figure:
     """Closed polar lines: one trace per run (order matches run_order for colors)."""
     fig = go.Figure()
@@ -127,7 +132,7 @@ def _tpr_radar_compare(
                 hovertemplate="%{theta}<br>TP rate: %{r:.2%}<extra></extra>",
             )
         )
-    apply_chart_theme(fig, height=440)
+    apply_chart_theme(fig, height=height)
     fig.update_layout(
         title=title,
         polar=dict(
@@ -139,7 +144,7 @@ def _tpr_radar_compare(
     return fig
 
 
-def _count_radar_compare(
+def _count_spider_compare(
     df_all: pd.DataFrame,
     categories: List[str],
     title: str,
@@ -182,6 +187,71 @@ def _count_radar_compare(
                 visible=True,
                 range=[0, r_max],
                 tickformat=",.0f",
+                gridcolor="rgba(0,0,0,0.08)",
+            ),
+            angularaxis=dict(tickfont=dict(size=9)),
+        ),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.18, xanchor="center", x=0.5),
+    )
+    return fig
+
+
+def _scalar_metric_spider_compare(
+    df_all: pd.DataFrame,
+    categories: List[str],
+    title: str,
+    run_order: List[str],
+    value_col: str,
+    hover_metric: str,
+    *,
+    height: int = 380,
+    tickformat: str = ",.3f",
+) -> go.Figure:
+    """Polar chart: one polygon per run; r = numeric metric per label (e.g. mean |error|)."""
+    fig = go.Figure()
+    max_r = 0.0
+    traces_r: List[List[float]] = []
+    for run_lbl in run_order:
+        sub = df_all[df_all["run"] == run_lbl].drop_duplicates("label").set_index("label")
+        r_vals = []
+        for c in categories:
+            if c in sub.index:
+                v = sub.loc[c, value_col]
+                r_vals.append(0.0 if pd.isna(v) else float(v))
+            else:
+                r_vals.append(0.0)
+        traces_r.append(r_vals)
+        if r_vals:
+            max_r = max(max_r, max(r_vals))
+    r_max = max(max_r * 1.08, 1e-6)
+
+    for i, run_lbl in enumerate(run_order):
+        r_vals = traces_r[i]
+        r_closed = r_vals + r_vals[:1]
+        theta = categories + categories[:1]
+        c = RUN_COLORS[i % len(RUN_COLORS)]
+        fig.add_trace(
+            go.Scatterpolar(
+                r=r_closed,
+                theta=theta,
+                name=str(run_lbl),
+                line=dict(color=c, width=2),
+                fillcolor=f"rgba({int(c[1:3],16)},{int(c[3:5],16)},{int(c[5:7],16)},0.12)",
+                fill="toself",
+                hovertemplate="%{theta}<br>"
+                + hover_metric
+                + ": %{r:.4f}<extra></extra>",
+            )
+        )
+
+    apply_chart_theme(fig, height=height)
+    fig.update_layout(
+        title=title,
+        polar=dict(
+            radialaxis=dict(
+                visible=True,
+                range=[0, r_max],
+                tickformat=tickformat,
                 gridcolor="rgba(0,0,0,0.08)",
             ),
             angularaxis=dict(tickfont=dict(size=9)),
@@ -779,7 +849,7 @@ try:
                 st.dataframe(df_status_wide, use_container_width=True, hide_index=True)
             status_viz = st.radio(
                 "Status chart style",
-                options=["Stacked bar (counts)", "Treemap", "100% stacked (proportions)", "Radar / spider (TP, FP & FN)"],
+                options=["Stacked bar (counts)", "Treemap", "100% stacked (proportions)", "Spider chart (TP, FP & FN)"],
                 index=0,
                 horizontal=True,
                 key="status_dist_viz",
@@ -827,18 +897,18 @@ try:
                 )
                 apply_chart_theme(fig2, height=420)
                 st.plotly_chart(fig2, use_container_width=True)
-            elif status_viz == "Radar / spider (TP, FP & FN)":
+            elif status_viz == "Spider chart (TP, FP & FN)":
                 wide = df_status.pivot_table(index="label", columns="status", values="num", fill_value=0)
                 cats = sorted(wide.index.astype(str).unique())
                 if len(cats) > 16:
-                    st.caption("Radar works best with ≤16 labels; many classes may look crowded.")
+                    st.caption("Spider charts work best with ≤16 labels; many classes may look crowded.")
                 run_single = [os.path.basename(target_file) if target_file else "Run"]
                 rcols = st.columns(3)
                 for col_i, st_name in enumerate(["TP", "FP", "FN"]):
                     vals = wide[st_name] if st_name in wide.columns else pd.Series(0, index=wide.index)
                     df_m = pd.DataFrame({"label": wide.index.astype(str), "count": vals.values})
                     df_m["run"] = run_single[0]
-                    fig_r = _count_radar_compare(
+                    fig_r = _count_spider_compare(
                         df_m,
                         cats,
                         f"{st_name} count per label",
@@ -896,7 +966,7 @@ try:
                 st.dataframe(df_status_wide, use_container_width=True, hide_index=True)
             status_viz = st.radio(
                 "Status chart style",
-                options=["Stacked bar (counts)", "Treemap", "100% stacked (proportions)", "Radar / spider (TP, FP & FN)"],
+                options=["Stacked bar (counts)", "Treemap", "100% stacked (proportions)", "Spider chart (TP, FP & FN)"],
                 index=0,
                 horizontal=True,
                 key="status_dist_viz_compare",
@@ -916,14 +986,14 @@ try:
                 )
                 apply_chart_theme(fig2)
                 st.plotly_chart(fig2, use_container_width=True)
-            elif status_viz == "Radar / spider (TP, FP & FN)":
+            elif status_viz == "Spider chart (TP, FP & FN)":
                 # Same counts as stacked bar: one spider per status (TP / FP / FN), axes = labels, r = count
                 status_wide = df_status.pivot_table(
                     index=["dataset", "label"], columns="status", values="num", fill_value=0
                 ).reset_index()
                 cats = sorted(df_status["label"].astype(str).unique())
                 if len(cats) > 16:
-                    st.caption("Radar works best with ≤16 labels; many classes may look crowded.")
+                    st.caption("Spider charts work best with ≤16 labels; many classes may look crowded.")
                 rcols = st.columns(3)
                 for col_i, st_name in enumerate(["TP", "FP", "FN"]):
                     col_data = (
@@ -938,7 +1008,7 @@ try:
                             "count": col_data.values,
                         }
                     )
-                    fig_r = _count_radar_compare(
+                    fig_r = _count_spider_compare(
                         df_m,
                         cats,
                         f"{st_name} count per label (by run)",
@@ -1020,144 +1090,7 @@ try:
 except Exception as e:
     st.error(f"Error in summary: {e}")
 
-# =============================
-# Panel 2: TP Rate (single) / TP Rate Comparison (compare)
-# =============================
-st.divider()
-st.markdown(
-    _section_header(
-        "TP Rate" + (" Comparison" if not single_mode else ""),
-        "TP rate per object class (GT TP / (TP+FN)). Pick a chart style below.",
-    ),
-    unsafe_allow_html=True,
-)
 
-_tpr_query = """
-SELECT
-    label,
-    CASE
-        WHEN COUNT(*) FILTER (WHERE source='GT' AND status IN ('TP','FN')) > 0
-        THEN CAST(COUNT(*) FILTER (WHERE source='GT' AND status='TP') AS DOUBLE)
-             / COUNT(*) FILTER (WHERE source='GT' AND status IN ('TP','FN'))
-        ELSE 0
-    END AS tpr
-FROM {view}
-WHERE {filter_clause}
-GROUP BY label
-ORDER BY label
-"""
-
-if single_mode:
-    tpr_viz = st.radio(
-        "TP rate chart style",
-        options=["Bar chart", "Lollipop (ranked)"],
-        index=0,
-        horizontal=True,
-        key="tpr_viz_single",
-    )
-    try:
-        filter_clause = build_filter_clause(filters_base)
-        query = _tpr_query.format(view="view_eval_flat", filter_clause=filter_clause)
-        df_tpr_base = con.execute(query).df()
-        if not df_tpr_base.empty:
-            title = f"Total TP rate within {max_eval_range} [m]"
-            if tpr_viz == "Bar chart":
-                fig = px.bar(
-                    df_tpr_base,
-                    x="label",
-                    y="tpr",
-                    title=title,
-                    labels={"tpr": "TP Rate", "label": "Label"},
-                )
-                apply_chart_theme(fig)
-                fig.update_layout(yaxis_range=[0, 1.2])
-                fig.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.2)")
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                fig = _tpr_lollipop_single(df_tpr_base, title)
-                st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No data available")
-    except Exception as e:
-        st.error(f"Error: {e}")
-else:
-    tpr_opts = ["Radar / spider", "Grouped bar", "Heatmap (label × run)", "Line profile"]
-    tpr_viz = st.radio(
-        "TP rate chart style",
-        options=tpr_opts,
-        index=0,
-        horizontal=True,
-        key="tpr_viz_compare",
-    )
-    try:
-        dfs_tpr = []
-        for i in range(len(runs)):
-            fc = build_filter_clause(filters_list[i])
-            q = _tpr_query.format(view=_flat_view(i), filter_clause=fc)
-            df_i = con.execute(q).df()
-            df_i["run"] = run_labels_list[i]
-            dfs_tpr.append(df_i)
-        df_tpr_all = pd.concat(dfs_tpr, ignore_index=True)
-        if not df_tpr_all.empty:
-            title = f"Total TP rate within {max_eval_range} [m] by run"
-            if tpr_viz == "Radar / spider":
-                cats = sorted(df_tpr_all["label"].astype(str).unique())
-                if len(cats) > 16:
-                    st.caption("Radar works best with ≤16 labels; showing all classes may look crowded.")
-                fig = _tpr_radar_compare(df_tpr_all, cats, title, run_labels_list)
-                st.plotly_chart(fig, use_container_width=True)
-            elif tpr_viz == "Grouped bar":
-                fig = px.bar(
-                    df_tpr_all,
-                    x="label",
-                    y="tpr",
-                    color="run",
-                    barmode="group",
-                    title=title,
-                    labels={"tpr": "TP Rate", "label": "Label", "run": "Run"},
-                    color_discrete_sequence=RUN_COLORS,
-                )
-                apply_chart_theme(fig)
-                fig.update_layout(yaxis_range=[0, 1.2])
-                fig.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.2)")
-                st.plotly_chart(fig, use_container_width=True)
-            elif tpr_viz == "Heatmap (label × run)":
-                pivot = df_tpr_all.pivot_table(index="label", columns="run", values="tpr", aggfunc="first")
-                cols_present = [c for c in run_labels_list if c in pivot.columns]
-                if cols_present:
-                    pivot = pivot[cols_present]
-                fig = px.imshow(
-                    pivot,
-                    labels=dict(x="Run", y="Label", color="TP rate"),
-                    title=title,
-                    color_continuous_scale="RdYlGn",
-                    zmin=0,
-                    zmax=1,
-                    aspect="auto",
-                )
-                apply_chart_theme(fig, height=max(360, 32 + 22 * len(pivot.index)))
-                fig.update_layout(xaxis_side="top")
-                st.plotly_chart(fig, use_container_width=True)
-            elif tpr_viz == "Line profile":
-                fig = px.line(
-                    df_tpr_all,
-                    x="label",
-                    y="tpr",
-                    color="run",
-                    markers=True,
-                    title=title,
-                    labels={"tpr": "TP Rate", "label": "Label", "run": "Run"},
-                    color_discrete_sequence=RUN_COLORS,
-                )
-                fig.update_traces(line=dict(width=2.5), marker=dict(size=8))
-                apply_chart_theme(fig, height=400)
-                fig.update_layout(yaxis_range=[0, 1.15], xaxis_tickangle=-35, hovermode="x unified")
-                fig.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.2)")
-                st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No data available")
-    except Exception as e:
-        st.error(f"Error: {e}")
 
 def _tpr_fpr_view(i: int) -> str:
     return "view_tpr_fpr_by_class_dist_topic" if i == 0 else f"view_tpr_fpr_{i}"
@@ -1180,6 +1113,7 @@ def _distance_bin_order_and_label(bin_str: str) -> Tuple[int, str]:
 # =============================
 # Panel 3 & 4: TP & FP Rate by Distance — line+area or bar (user choice)
 # =============================
+st.divider()
 st.markdown(
     _section_header(
         "TP & FP rate by distance",
@@ -1452,7 +1386,191 @@ try:
                 st.info("No FP rate by distance data.")
 except Exception as e:
     st.error(f"Error: {e}")
+# =============================
+# Panel 2: TP Rate (single) / TP Rate Comparison (compare)
+# =============================
+st.markdown(
+    _section_header(
+        "TP Rate" + (" Comparison" if not single_mode else ""),
+        "TP rate per object class (GT TP / (TP+FN)). Pick a chart style below.",
+    ),
+    unsafe_allow_html=True,
+)
 
+_tpr_query = """
+SELECT
+    label,
+    CASE
+        WHEN COUNT(*) FILTER (WHERE source='GT' AND status IN ('TP','FN')) > 0
+        THEN CAST(COUNT(*) FILTER (WHERE source='GT' AND status='TP') AS DOUBLE)
+             / COUNT(*) FILTER (WHERE source='GT' AND status IN ('TP','FN'))
+        ELSE 0
+    END AS tpr
+FROM {view}
+WHERE {filter_clause}
+GROUP BY label
+ORDER BY label
+"""
+
+# Compare-mode TP rate spider charts: several distance caps + no cap (sidebar range not used for this view)
+TPR_COMPARE_SPIDER_RANGES: List[Tuple[Optional[int], str]] = [
+    (50, "≤50 m"),
+    (80, "≤80 m"),
+    (100, "≤100 m"),
+    (120, "≤120 m"),
+    (150, "≤150 m"),
+    (None, "All distances"),
+]
+
+if single_mode:
+    tpr_viz = st.radio(
+        "TP rate chart style",
+        options=["Bar chart", "Lollipop (ranked)"],
+        index=0,
+        horizontal=True,
+        key="tpr_viz_single",
+    )
+    try:
+        filter_clause = build_filter_clause(filters_base)
+        query = _tpr_query.format(view="view_eval_flat", filter_clause=filter_clause)
+        df_tpr_base = con.execute(query).df()
+        if not df_tpr_base.empty:
+            title = f"Total TP rate within {max_eval_range} [m]"
+            if tpr_viz == "Bar chart":
+                fig = px.bar(
+                    df_tpr_base,
+                    x="label",
+                    y="tpr",
+                    title=title,
+                    labels={"tpr": "TP Rate", "label": "Label"},
+                )
+                apply_chart_theme(fig)
+                fig.update_layout(yaxis_range=[0, 1.2])
+                fig.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.2)")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                fig = _tpr_lollipop_single(df_tpr_base, title)
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No data available")
+    except Exception as e:
+        st.error(f"Error: {e}")
+else:
+    tpr_opts = ["Spider chart", "Grouped bar", "Heatmap (label × run)", "Line profile"]
+    tpr_viz = st.radio(
+        "TP rate chart style",
+        options=tpr_opts,
+        index=0,
+        horizontal=True,
+        key="tpr_viz_compare",
+    )
+    try:
+        dfs_tpr = []
+        for i in range(len(runs)):
+            fc = build_filter_clause(filters_list[i])
+            q = _tpr_query.format(view=_flat_view(i), filter_clause=fc)
+            df_i = con.execute(q).df()
+            df_i["run"] = run_labels_list[i]
+            dfs_tpr.append(df_i)
+        df_tpr_all = pd.concat(dfs_tpr, ignore_index=True)
+        if tpr_viz == "Spider chart":
+            st.caption(
+                "Six spider charts use **fixed distance cutoffs** (50–150 m) plus **all distances**. "
+                "Topic / label / suite / visibility filters still apply. "
+                "Other chart types and the rest of the page use the sidebar **Max Evaluation Range**."
+            )
+            fb_all = {**filters_base, "max_eval_range": None}
+            label_union: set = set()
+            for i in range(len(runs)):
+                fc_a = build_filter_clause(fb_all)
+                q_a = _tpr_query.format(view=_flat_view(i), filter_clause=fc_a)
+                dfa = con.execute(q_a).df()
+                label_union |= set(dfa["label"].astype(str))
+            cats = sorted(label_union)
+            if not cats:
+                st.info("No TP rate data for any distance range with current filters.")
+            else:
+                if len(cats) > 16:
+                    st.caption("Spider charts work best with ≤16 labels; many classes may look crowded.")
+                for row_start in range(0, len(TPR_COMPARE_SPIDER_RANGES), 3):
+                    row_ranges = TPR_COMPARE_SPIDER_RANGES[row_start : row_start + 3]
+                    cols = st.columns(len(row_ranges))
+                    for col, (max_r, cap_lbl) in zip(cols, row_ranges):
+                        fb = {**filters_base, "max_eval_range": max_r}
+                        dfs_slice = []
+                        for i in range(len(runs)):
+                            fc = build_filter_clause(fb)
+                            q = _tpr_query.format(view=_flat_view(i), filter_clause=fc)
+                            dfi = con.execute(q).df()
+                            dfi["run"] = run_labels_list[i]
+                            dfs_slice.append(dfi)
+                        df_slice = pd.concat(dfs_slice, ignore_index=True)
+                        with col:
+                            if df_slice.empty:
+                                st.info(f"No data ({cap_lbl}).")
+                            else:
+                                fig = _tpr_spider_compare(
+                                    df_slice,
+                                    cats,
+                                    f"TP rate ({cap_lbl})",
+                                    run_labels_list,
+                                    height=360,
+                                )
+                                st.plotly_chart(fig, use_container_width=True)
+        elif not df_tpr_all.empty:
+            title = f"Total TP rate within {max_eval_range} [m] by run"
+            if tpr_viz == "Grouped bar":
+                fig = px.bar(
+                    df_tpr_all,
+                    x="label",
+                    y="tpr",
+                    color="run",
+                    barmode="group",
+                    title=title,
+                    labels={"tpr": "TP Rate", "label": "Label", "run": "Run"},
+                    color_discrete_sequence=RUN_COLORS,
+                )
+                apply_chart_theme(fig)
+                fig.update_layout(yaxis_range=[0, 1.2])
+                fig.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.2)")
+                st.plotly_chart(fig, use_container_width=True)
+            elif tpr_viz == "Heatmap (label × run)":
+                pivot = df_tpr_all.pivot_table(index="label", columns="run", values="tpr", aggfunc="first")
+                cols_present = [c for c in run_labels_list if c in pivot.columns]
+                if cols_present:
+                    pivot = pivot[cols_present]
+                fig = px.imshow(
+                    pivot,
+                    labels=dict(x="Run", y="Label", color="TP rate"),
+                    title=title,
+                    color_continuous_scale="RdYlGn",
+                    zmin=0,
+                    zmax=1,
+                    aspect="auto",
+                )
+                apply_chart_theme(fig, height=max(360, 32 + 22 * len(pivot.index)))
+                fig.update_layout(xaxis_side="top")
+                st.plotly_chart(fig, use_container_width=True)
+            elif tpr_viz == "Line profile":
+                fig = px.line(
+                    df_tpr_all,
+                    x="label",
+                    y="tpr",
+                    color="run",
+                    markers=True,
+                    title=title,
+                    labels={"tpr": "TP Rate", "label": "Label", "run": "Run"},
+                    color_discrete_sequence=RUN_COLORS,
+                )
+                fig.update_traces(line=dict(width=2.5), marker=dict(size=8))
+                apply_chart_theme(fig, height=400)
+                fig.update_layout(yaxis_range=[0, 1.15], xaxis_tickangle=-35, hovermode="x unified")
+                fig.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.2)")
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No data available")
+    except Exception as e:
+        st.error(f"Error: {e}")
 # =============================
 # Panel 5: Perception diff vs baseline A (compare mode only)
 # =============================
@@ -2444,7 +2562,14 @@ if single_mode:
 # Panel 6: Mean Error (single) / Mean Error Comparison (compare)
 # =============================
 st.divider()
-st.markdown(_section_header("Mean Error" + (" Comparison" if not single_mode else "")), unsafe_allow_html=True)
+st.markdown(
+    _section_header(
+        "Mean Error" + (" Comparison" if not single_mode else ""),
+        "Mean absolute error on TP matches (X/Y in m, Yaw in rad)."
+        + (" Compare mode: choose grouped bars or spider charts." if not single_mode else ""),
+    ),
+    unsafe_allow_html=True,
+)
 
 try:
     sample_query = "SELECT * FROM view_eval_flat LIMIT 1"
@@ -2529,19 +2654,73 @@ else:
                 dfs_err.append(df_i)
             df_err_melt = pd.concat(dfs_err, ignore_index=True)
             if not df_err_melt.empty:
-                for err_type, col in [("X Error", "mean_abs_x_error"), ("Y Error", "mean_abs_y_error"), ("Yaw Error", "mean_abs_yaw_error")]:
-                    fig = px.bar(
-                        df_err_melt,
-                        x="label",
-                        y=col,
-                        color="run",
-                        barmode="group",
-                        title=f"Mean {err_type} within {max_eval_range} [m] by run",
-                        labels={"label": "Label", col: err_type, "run": "Run"},
-                        color_discrete_sequence=RUN_COLORS,
+                mean_err_viz = st.radio(
+                    "Mean error chart style",
+                    options=["Spider chart (X, Y & Yaw)", "Grouped bar"],
+                    index=0,
+                    horizontal=True,
+                    key="mean_err_compare_viz",
+                )
+                if mean_err_viz == "Grouped bar":
+                    for err_type, col in [
+                        ("X Error", "mean_abs_x_error"),
+                        ("Y Error", "mean_abs_y_error"),
+                        ("Yaw Error", "mean_abs_yaw_error"),
+                    ]:
+                        fig = px.bar(
+                            df_err_melt,
+                            x="label",
+                            y=col,
+                            color="run",
+                            barmode="group",
+                            title=f"Mean {err_type} within {max_eval_range} [m] by run",
+                            labels={"label": "Label", col: err_type, "run": "Run"},
+                            color_discrete_sequence=RUN_COLORS,
+                        )
+                        apply_chart_theme(fig)
+                        st.plotly_chart(fig, width="stretch")
+                else:
+                    st.caption(
+                        f"Three spiders: mean |error| per label per run (TP only), within **{max_eval_range} m** "
+                        "(same as sidebar max range)."
                     )
-                    apply_chart_theme(fig)
-                    st.plotly_chart(fig, width="stretch")
+                    cats = sorted(df_err_melt["label"].astype(str).unique())
+                    if len(cats) > 16:
+                        st.caption("Spider charts work best with ≤16 labels; many classes may look crowded.")
+                    rcols = st.columns(3)
+                    err_specs = [
+                        (
+                            f"Mean |x error| (within {max_eval_range} m)",
+                            "mean_abs_x_error",
+                            "Mean |x error| (m)",
+                            ".3f",
+                        ),
+                        (
+                            f"Mean |y error| (within {max_eval_range} m)",
+                            "mean_abs_y_error",
+                            "Mean |y error| (m)",
+                            ".3f",
+                        ),
+                        (
+                            f"Mean |yaw error| (within {max_eval_range} m)",
+                            "mean_abs_yaw_error",
+                            "Mean |yaw error| (rad)",
+                            ".4f",
+                        ),
+                    ]
+                    for ci, (chart_title, col, hover_lbl, tfmt) in enumerate(err_specs):
+                        fig_r = _scalar_metric_spider_compare(
+                            df_err_melt,
+                            cats,
+                            chart_title,
+                            run_labels_list,
+                            col,
+                            hover_lbl,
+                            height=400,
+                            tickformat=tfmt,
+                        )
+                        with rcols[ci]:
+                            st.plotly_chart(fig_r, use_container_width=True)
             else:
                 st.info("No data available")
         except Exception as e:
