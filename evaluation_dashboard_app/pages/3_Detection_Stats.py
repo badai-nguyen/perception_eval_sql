@@ -10,6 +10,14 @@ from typing import Optional, List, Tuple
 
 from lib.path_utils import path_display
 
+# Perception diff: unified improved/degraded palette (Hierarchical view + Comparison lens)
+IMPROVED_COLOR = "#1a9850"
+DEGRADED_COLOR = "#d73027"
+IMPROVED_SCALE = [[0.0, "#f7fcf5"], [1.0, IMPROVED_COLOR]]
+DEGRADED_SCALE = [[0.0, "#fff5f0"], [1.0, DEGRADED_COLOR]]
+# Run-series colors (Panels 2–4, 6–8) — consistent across page
+RUN_COLORS = ["#4A90D9", "#E86A33", "#2d8f47", "#9B59B6", "#1ABC9C", "#95a5a6"]
+
 st.set_page_config(layout="wide", page_title="Object Detection")
 
 # =============================
@@ -512,7 +520,8 @@ else:
                 color="run",
                 barmode="group",
                 title=f"Total TP rate within {max_eval_range} [m] by run",
-                labels={"tpr": "TP Rate", "label": "Label", "run": "Run"}
+                labels={"tpr": "TP Rate", "label": "Label", "run": "Run"},
+                color_discrete_sequence=RUN_COLORS,
             )
             fig.update_layout(yaxis_range=[0, 1.2])
             st.plotly_chart(fig, width="stretch")
@@ -548,7 +557,7 @@ try:
                 x=df_tpr_dist['distance_bin'],
                 y=df_tpr_dist['tpr'],
                 name='TP Rate',
-                marker_color='lightblue'
+                marker_color=RUN_COLORS[0],
             ))
             fig.update_layout(
                 title="TP Rate by Distance Bin",
@@ -577,14 +586,13 @@ try:
         df_tpr_dist = pd.concat(dfs_dist, ignore_index=True)
         if not df_tpr_dist.empty:
             fig = go.Figure()
-            colors = ["lightblue", "lightcoral", "lightgreen", "#9B59B6", "#1ABC9C", "#E86A33"]
             for i, lbl in enumerate(run_labels_list):
                 d = df_tpr_dist[df_tpr_dist["run"] == lbl]
                 fig.add_trace(go.Bar(
                     x=d["distance_bin"],
                     y=d["tpr"],
                     name=f"TP Rate ({lbl})",
-                    marker_color=colors[i % len(colors)]
+                    marker_color=RUN_COLORS[i % len(RUN_COLORS)],
                 ))
             fig.update_layout(
                 title="TP Rate by Distance Bin (all runs)",
@@ -622,7 +630,7 @@ try:
                 x=df_fpr_dist['distance_bin'],
                 y=df_fpr_dist['fpr'],
                 name='FP Rate',
-                marker_color='lightcoral'
+                marker_color=RUN_COLORS[0],
             ))
             fig.update_layout(
                 title="FP Rate by Distance Bin",
@@ -651,14 +659,13 @@ try:
         df_fpr_dist = pd.concat(dfs_fpr, ignore_index=True)
         if not df_fpr_dist.empty:
             fig = go.Figure()
-            colors = ["lightblue", "lightcoral", "lightgreen", "#9B59B6", "#1ABC9C", "#E86A33"]
             for i, lbl in enumerate(run_labels_list):
                 d = df_fpr_dist[df_fpr_dist["run"] == lbl]
                 fig.add_trace(go.Bar(
                     x=d["distance_bin"],
                     y=d["fpr"],
                     name=f"FP Rate ({lbl})",
-                    marker_color=colors[i % len(colors)]
+                    marker_color=RUN_COLORS[i % len(RUN_COLORS)],
                 ))
             fig.update_layout(
                 title="FP Rate by Distance Bin (all runs)",
@@ -800,7 +807,7 @@ def _plot_comparison_lens_treemap(
         path=["root", "side", "item"],
         values="n",
         color="side",
-        color_discrete_map={"Improved": "#1a9850", "Degraded": "#d73027"},
+        color_discrete_map={"Improved": IMPROVED_COLOR, "Degraded": DEGRADED_COLOR},
     )
     fig.update_traces(
         textfont_size=12,
@@ -1117,8 +1124,8 @@ if not single_mode:
                         pair_both = (not h_imp.empty) and (not h_deg.empty)
                         plot_entries = []
                         for ct, hdf, cmap in (
-                            ("improved", h_imp, "Greens"),
-                            ("degraded", h_deg, "Reds"),
+                            ("improved", h_imp, IMPROVED_SCALE),
+                            ("degraded", h_deg, DEGRADED_SCALE),
                         ):
                             if hdf.empty:
                                 plot_entries.append((ct, None))
@@ -1669,19 +1676,19 @@ else:
                     x=df_error_base['label'],
                     y=df_error_base['mean_abs_x_error'],
                     name='X Error',
-                    marker_color='lightblue'
+                    marker_color=RUN_COLORS[0],
                 ))
                 fig.add_trace(go.Bar(
                     x=df_error_base['label'],
                     y=df_error_base['mean_abs_y_error'],
                     name='Y Error',
-                    marker_color='lightcoral'
+                    marker_color=RUN_COLORS[1],
                 ))
                 fig.add_trace(go.Bar(
                     x=df_error_base['label'],
                     y=df_error_base['mean_abs_yaw_error'],
                     name='Yaw Error',
-                    marker_color='lightgreen'
+                    marker_color=RUN_COLORS[2],
                 ))
                 fig.update_layout(
                     title=f"Mean Error within {max_eval_range} [m]",
@@ -1723,7 +1730,8 @@ else:
                         color="run",
                         barmode="group",
                         title=f"Mean {err_type} within {max_eval_range} [m] by run",
-                        labels={"label": "Label", col: err_type, "run": "Run"}
+                        labels={"label": "Label", col: err_type, "run": "Run"},
+                        color_discrete_sequence=RUN_COLORS,
                     )
                     st.plotly_chart(fig, width="stretch")
             else:
@@ -1767,9 +1775,9 @@ else:
                 if not df_ed.empty:
                     with st.expander(f"Run {lbl} − A", expanded=(len(runs) == 2)):
                         fig = go.Figure()
-                        fig.add_trace(go.Bar(x=df_ed["label"], y=df_ed["x_diff"], name="X Diff", marker_color="lightblue"))
-                        fig.add_trace(go.Bar(x=df_ed["label"], y=df_ed["y_diff"], name="Y Diff", marker_color="lightcoral"))
-                        fig.add_trace(go.Bar(x=df_ed["label"], y=df_ed["yaw_diff"], name="Yaw Diff", marker_color="lightgreen"))
+                        fig.add_trace(go.Bar(x=df_ed["label"], y=df_ed["x_diff"], name="X Diff", marker_color=RUN_COLORS[0]))
+                        fig.add_trace(go.Bar(x=df_ed["label"], y=df_ed["y_diff"], name="Y Diff", marker_color=RUN_COLORS[1]))
+                        fig.add_trace(go.Bar(x=df_ed["label"], y=df_ed["yaw_diff"], name="Yaw Diff", marker_color=RUN_COLORS[2]))
                         fig.update_layout(title=f"Error diff ({lbl} − A) within {max_eval_range} [m]", xaxis_title="Label", yaxis_title="Error Difference [m] or [rad]", barmode="group")
                         st.plotly_chart(fig, width="stretch")
             except Exception as e:
@@ -1816,7 +1824,8 @@ try:
                 barmode='overlay',
                 opacity=0.6,
                 title="Object Count by Distance (by run)",
-                labels={'dist_h': 'Distance [m]', 'run': 'Run'}
+                labels={'dist_h': 'Distance [m]', 'run': 'Run'},
+                color_discrete_sequence=RUN_COLORS,
             )
         st.plotly_chart(fig, width="stretch")
     else:
