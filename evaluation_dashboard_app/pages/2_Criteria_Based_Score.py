@@ -197,17 +197,10 @@ with st.sidebar.expander("Absolute pass/fail gates", expanded=False):
         max_value=100.0,
         value=95.0,
         step=0.1,
-        help="Scenario pass rate is from Score.csv (same scale as lsim / eval_summary: 0–100).",
-    )
-    abs_agg_mode = st.radio(
-        "Scenario aggregation",
-        ["mean", "all_rows"],
-        index=0,
-        format_func=lambda x: (
-            "Mean pass rate (per scenario)" if x == "mean" else "All rows must pass"
+        help=(
+            "Scenario pass rate is from Score.csv (same scale as lsim / eval_summary: 0–100). "
+            "If a scenario has multiple table rows, the **mean** pass_rate across those rows is used."
         ),
-        help="Mean: use mean pass_rate per scenario; 2nd metric uses max (for ≤) or min (for ≥) across rows. "
-        "All rows: every Option×GT_OBJ row must satisfy both gates.",
     )
     abs_use_metric2 = st.checkbox("Second condition (numeric metric)", value=False)
     abs_metric2_col = st.selectbox(
@@ -360,7 +353,6 @@ def _render_absolute_gates_section(runs: list):
                 result = evaluate_scenario_gates(
                     _df_for_absolute_gates(dfv),
                     float(abs_pass_min),
-                    abs_agg_mode,
                     spec,
                 )
             except Exception as e:

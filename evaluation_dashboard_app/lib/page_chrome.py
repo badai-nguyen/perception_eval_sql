@@ -187,11 +187,16 @@ def render_page_hero(
     badge = "Compare A vs B" if mode == "Compare Mode" else "Single run"
     k, t, d = html.escape(kicker), html.escape(title), html.escape(description)
     second = ""
-    if secondary_badge_inner_html:
+    has_secondary = bool(secondary_badge_inner_html)
+    if has_secondary:
         second = (
             f'<span style="background:#fff;border:1px solid #94a3b8;color:#334155;padding:0.4rem 0.9rem;'
             f'border-radius:10px;font-size:0.82rem;font-weight:600;">{secondary_badge_inner_html}</span>'
         )
+    else:
+        second = ("<!-- no secondary -->")
+    # Conditionally include the secondary badge <span> and only render HTML if present
+    # Also, avoid rendering an empty {second} or an extra </div>
     st.markdown(
         f"""
         <div style="
@@ -218,7 +223,7 @@ def render_page_hero(
               <span style="background:#0f172a;color:#fff;padding:0.4rem 1rem;border-radius:999px;font-size:0.78rem;font-weight:700;letter-spacing:0.04em;">
                 {html.escape(badge)}
               </span>
-              {second}
+              {second }
             </div>
           </div>
         </div>

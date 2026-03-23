@@ -11,7 +11,6 @@ from typing import Any, Dict, Literal, Optional
 
 import pandas as pd
 
-AggMode = Literal["mean", "all_rows"]
 MetricOp = Literal["<=", ">="]
 
 MAX_CRITERIA_DEFAULT = 32
@@ -42,17 +41,19 @@ class MetricGateSpec:
 def evaluate_scenario_gates(
     df_view: pd.DataFrame,
     pass_min: float,
-    agg_mode: AggMode,
     metric_gate: Optional[MetricGateSpec] = None,
 ) -> pd.DataFrame:
     """
     Per-scenario gate evaluation.
 
+    Pass rate is the **mean** ``pass_rate`` over all rows for that scenario; the optional
+    metric gate uses **max** (for <=) or **min** (for >=) across those rows.
+
     Returns columns:
       - Scenario
       - row_count
       - agg_pass_rate (mean pass_rate over rows in scenario)
-      - metric_agg (for mean mode: max/min aggregate used for gate 2; for all_rows: worst-case display)
+      - metric_agg (max of metric if op is <=, else min; NaN if no metric gate)
       - scenario_pass
       - pass_rate_gate_ok
       - metric_gate_ok (True if no metric_gate)
@@ -80,80 +81,35 @@ def evaluate_scenario_gates(
     if metric_gate is not None:
         d[metric_gate.column] = pd.to_numeric(d[metric_gate.column], errors="coerce")
 
-    if agg_mode == "all_rows":
-        pr = d["pass_rate"]
-        pass_rate_row_ok = pr.notna() & (pr >= pass_min)
-        if metric_gate is None:
-            metric_row_ok = pd.Series(True, index=d.index)
-        else:
-            mv = d[metric_gate.column]
-            if metric_gate.op == "<=":
-                metric_row_ok = mv.notna() & (mv <= metric_gate.threshold)
-            else:
-                metric_row_ok = mv.notna() & (mv >= metric_gate.threshold)
-
-        d["_pass_rate_row_ok"] = pass_rate_row_ok
-        d["_metric_row_ok"] = metric_row_ok
-        d["_row_ok"] = pass_rate_row_ok & metric_row_ok
-
-        row_count = d.groupby("Scenario", observed=True).size().reset_index(name="row_count")
-        agg_pass_rate = (
-            d.groupby("Scenario", observed=True)["pass_rate"].mean().reset_index(name="agg_pass_rate")
-        )
-        scenario_pass = d.groupby("Scenario", observed=True)["_row_ok"].all().reset_index(
-            name="scenario_pass"
-        )
-        pass_rate_gate_ok = (
-            d.groupby("Scenario", observed=True)["_pass_rate_row_ok"]
-            .all()
-            .reset_index(name="pass_rate_gate_ok")
-        )
-        metric_gate_ok = (
-            d.groupby("Scenario", observed=True)["_metric_row_ok"]
-            .all()
-            .reset_index(name="metric_gate_ok")
-        )
-
-        out = row_count.merge(agg_pass_rate, on="Scenario")
-        out = out.merge(scenario_pass, on="Scenario")
-        out = out.merge(pass_rate_gate_ok, on="Scenario")
-        out = out.merge(metric_gate_ok, on="Scenario")
-
-        if metric_gate is None:
-            out["metric_agg"] = float("nan")
-        else:
-            if metric_gate.op == "<=":
-                mag = d.groupby("Scenario", observed=True)[metric_gate.column].max()
-            else:
-                mag = d.groupby("Scenario", observed=True)[metric_gate.column].min()
-            out = out.merge(mag.reset_index(name="metric_agg"), on="Scenario")
-
-        out = out[empty_cols]
-        for c in ("scenario_pass", "pass_rate_gate_ok", "metric_gate_ok"):
-            out[c] = pd.Series([bool(x) for x in out[c].tolist()], dtype=object, index=out.index)
-        return out
-
-    # --- mean aggregation mode ---
-    rows = []
+    rows: list[dict[str, Any]] = []
     for scen, grp in d.groupby("Scenario", observed=True):
         rc = len(grp)
-        mean_pr = float(grp["pass_rate"].mean())
-        pr_ok = bool(not pd.isna(mean_pr) and mean_pr >= pass_min)
+        pr = grp["pass_rate"]
+        mean_pr = float(pr.mean())
+        pr_gate = bool(not pd.isna(mean_pr) and mean_pr >= pass_min)
 
         if metric_gate is None:
             m_agg = float("nan")
-            m_ok = True
+            m_gate = True
         else:
             col = grp[metric_gate.column]
-            if col.isna().all():
-                m_agg = float("nan")
-                m_ok = False
-            elif metric_gate.op == "<=":
+            if metric_gate.op == "<=":
                 m_agg = float(col.max())
-                m_ok = bool(not pd.isna(m_agg) and m_agg <= metric_gate.threshold)
             else:
                 m_agg = float(col.min())
-                m_ok = bool(not pd.isna(m_agg) and m_agg >= metric_gate.threshold)
+
+            if col.isna().all():
+                m_agg = float("nan")
+                m_gate = False
+            else:
+                m_gate = bool(
+                    not pd.isna(m_agg)
+                    and (
+                        m_agg <= metric_gate.threshold
+                        if metric_gate.op == "<="
+                        else m_agg >= metric_gate.threshold
+                    )
+                )
 
         rows.append(
             {
@@ -161,9 +117,9 @@ def evaluate_scenario_gates(
                 "row_count": rc,
                 "agg_pass_rate": mean_pr,
                 "metric_agg": m_agg,
-                "pass_rate_gate_ok": pr_ok,
-                "metric_gate_ok": m_ok,
-                "scenario_pass": bool(pr_ok and m_ok),
+                "pass_rate_gate_ok": pr_gate,
+                "metric_gate_ok": m_gate,
+                "scenario_pass": bool(pr_gate and m_gate),
             }
         )
 
