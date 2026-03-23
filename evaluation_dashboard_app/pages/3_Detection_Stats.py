@@ -1,3 +1,6 @@
+import html
+from contextlib import contextmanager
+
 import duckdb
 import streamlit as st
 import pandas as pd
@@ -579,11 +582,72 @@ _SECTION_CSS = """
   border: 2px solid rgba(255, 255, 255, 0.85);
   animation: ds-dot-beacon 1.5s ease-out infinite;
 }
+@keyframes ds-spot-bar-slide {
+  0% { transform: translateX(-130%); }
+  100% { transform: translateX(400%); }
+}
+.ds-spot-loader {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: 0.2rem 0 0.7rem 0;
+  padding: 0.5rem 0.75rem;
+  border-radius: 10px;
+  border: 1px solid rgba(13, 148, 136, 0.55);
+  background: linear-gradient(100deg, rgba(167, 243, 208, 0.55) 0%, rgba(240, 253, 250, 0.98) 55%, rgba(224, 242, 254, 0.5) 100%);
+  box-shadow: 0 2px 12px rgba(13, 148, 136, 0.14);
+}
+.ds-spot-loader .ds-spot-ping {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #0d9488;
+  flex-shrink: 0;
+  animation: ds-dot-beacon 1.35s ease-out infinite;
+}
+.ds-spot-loader .ds-spot-working {
+  font-size: 0.58rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #fff;
+  background: linear-gradient(135deg, #0f766e, #0e7490);
+  padding: 0.2rem 0.45rem;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.ds-spot-loader .ds-spot-label {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #134e4a;
+  letter-spacing: -0.015em;
+  flex: 1 1 120px;
+  min-width: 0;
+}
+.ds-spot-loader .ds-spot-bar {
+  flex: 1 1 72px;
+  max-width: 168px;
+  height: 5px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(13, 148, 136, 0.14);
+}
+.ds-spot-loader .ds-spot-bar-inner {
+  display: block;
+  height: 100%;
+  width: 34%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #0d9488, #06b6d4);
+  animation: ds-spot-bar-slide 1s ease-in-out infinite;
+}
 @media (prefers-reduced-motion: reduce) {
   .ds-page-loading-banner { animation: none; background-size: auto; }
   .ds-plb-shimmer { animation: none; opacity: 0.85; }
   .ds-plb-dot { animation: none; }
   .ds-plb-badge { animation: none; }
+  .ds-spot-loader .ds-spot-bar-inner { animation: none; transform: none; width: 100%; opacity: 0.4; }
+  .ds-spot-loader .ds-spot-ping { animation: none; }
 }
 </style>
 """
@@ -690,7 +754,7 @@ _ds_loading_banner.markdown(
           <span class="ds-plb-badge">In progress</span>
           <span class="ds-plb-text">Crunching detection stats…</span>
         </div>
-        <span class="ds-plb-sub">Hang tight — large Parquet files can take a moment. Charts and tables fill in below as they finish.</span>
+        <span class="ds-plb-sub">Hang tight — large Parquet files can take a moment. A teal <b>Working here</b> chip below jumps to whichever section is loading.</span>
         <div class="ds-plb-shimmer-wrap"><div class="ds-plb-shimmer"></div></div>
       </div>
     </div>
@@ -831,13 +895,35 @@ def _section_header(title: str, caption: str = "") -> str:
     return f'<div class="section-header">{title}</div>'
 
 
+def _ds_spot_loading_markup(label: str) -> str:
+    """Compact inline HTML: shows where the app is busy (Streamlit runs top-to-bottom, so this “moves” down the page)."""
+    safe = html.escape(label)
+    return f"""<div class="ds-spot-loader" role="status" aria-live="polite">
+  <span class="ds-spot-ping" aria-hidden="true"></span>
+  <span class="ds-spot-working">Working here</span>
+  <span class="ds-spot-label">{safe}</span>
+  <span class="ds-spot-bar"><span class="ds-spot-bar-inner"></span></span>
+</div>"""
+
+
+@contextmanager
+def _ds_spot_loading(label: str):
+    slot = st.empty()
+    slot.markdown(_ds_spot_loading_markup(label), unsafe_allow_html=True)
+    try:
+        yield
+    finally:
+        slot.empty()
+
+
 # =============================
 # Panel 1: t4dataset Summary
 # =============================
 st.markdown(_section_header("Summary", "Within selected filters and max evaluation range."), unsafe_allow_html=True)
 if single_mode:
-    fc = build_filter_clause(filters_base)
-    kpi = _kpi_row_for_view(con, "view_eval_flat", fc)
+    with _ds_spot_loading("Summary · KPI metrics"):
+        fc = build_filter_clause(filters_base)
+        kpi = _kpi_row_for_view(con, "view_eval_flat", fc)
     st.markdown(_KPI_CSS, unsafe_allow_html=True)
     if kpi:
         html = '<div class="kpi-wrap">' + _render_kpi_card("Metrics (within filters & max range)", kpi) + "</div>"
@@ -845,11 +931,12 @@ if single_mode:
     else:
         st.caption("No KPI data.")
 else:
-    kpis = []
-    for i in range(len(runs)):
-        fc = build_filter_clause(filters_list[i])
-        kpi = _kpi_row_for_view(con, _flat_view(i), fc)
-        kpis.append((run_labels_list[i], kpi))
+    with _ds_spot_loading("Summary · KPI metrics"):
+        kpis = []
+        for i in range(len(runs)):
+            fc = build_filter_clause(filters_list[i])
+            kpi = _kpi_row_for_view(con, _flat_view(i), fc)
+            kpis.append((run_labels_list[i], kpi))
     st.markdown(_KPI_CSS, unsafe_allow_html=True)
     baseline = kpis[0][1] if kpis else None
     cards_html_parts = []
@@ -883,7 +970,7 @@ if st.checkbox("Debug: Inspect Parquet (All Runs)" if not single_mode else "Debu
             schema_results.append((label, schema_df))
             st.write("**Schema (Column Names, Types)**")
             st.markdown("Shows the schema (column names and their DuckDB/Parquet data types) of the selected Parquet file. Useful to check data structure and types as interpreted by DuckDB.")
-            st.dataframe(schema_df, use_container_width=True, hide_index=True)
+            st.dataframe(schema_df, width='stretch', hide_index=True)
 
             # Preview rows
             row_options = [10, 20, 50, 100, 200, "All"]
@@ -900,7 +987,7 @@ if st.checkbox("Debug: Inspect Parquet (All Runs)" if not single_mode else "Debu
             """, [file_path]).df()
             st.write(f"**Preview (First {row_choice} rows)**")
             st.markdown(f"Shows the first {row_choice} preview rows from the Parquet file. Use this preview to examine example data contents and check that your file is as expected.")
-            st.dataframe(preview_df, use_container_width=True, hide_index=True)
+            st.dataframe(preview_df, width='stretch', hide_index=True)
 
             # Stats
             stats_df = con.execute("""
@@ -918,7 +1005,7 @@ if st.checkbox("Debug: Inspect Parquet (All Runs)" if not single_mode else "Debu
 
             This helps rapidly assess the completeness and distribution of the key ID field.
             """)
-            st.dataframe(stats_df, use_container_width=True, hide_index=True)
+            st.dataframe(stats_df, width='stretch', hide_index=True)
 
     # --- Show info about schema differences (compare mode only) ---
     if not single_mode and len(schema_results) >= 2:
@@ -942,40 +1029,41 @@ if st.checkbox("Debug: Inspect Parquet (All Runs)" if not single_mode else "Debu
                         st.error(f"Columns only in `{label1}`: {', '.join(sorted(removed))}")
                     if dtype_changes:
                         st.warning("Columns with different types:")
-                        st.dataframe(pd.DataFrame(dtype_changes, columns=["Column", f"Type in {label1}", f"Type in {label2}"]), use_container_width=True, hide_index=True)
+                        st.dataframe(pd.DataFrame(dtype_changes, columns=["Column", f"Type in {label1}", f"Type in {label2}"]), width='stretch', hide_index=True)
             else:
                 st.info(f"{len(schema_results)} runs loaded. Compare schemas per run in the columns above.")
 
 
 
 try:
-    if single_mode:
-        query_base = f"""
-        SELECT COUNT(DISTINCT t4dataset_id) AS id_num, '{os.path.basename(target_file)}' AS series
-        FROM view_eval_flat
-        """
-        df_summary = con.execute(query_base).df()
-        query_status = """
-        SELECT label, status, COUNT(*) AS num
-        FROM view_eval_flat
-        GROUP BY label, status
-        ORDER BY label, status
-        """
-        df_status = con.execute(query_status).df()
-    else:
-        parts = [f"SELECT COUNT(DISTINCT t4dataset_id) AS id_num, '{run_labels_list[i]}' AS series FROM {_flat_view(i)}" for i in range(len(runs))]
-        query_base = " UNION ALL ".join(parts)
-        df_summary = con.execute(query_base).df()
-        parts_status = [f"SELECT '{run_labels_list[i]}' AS dataset, label, status, COUNT(*) AS num FROM {_flat_view(i)} GROUP BY label, status" for i in range(len(runs))]
-        query_status = " UNION ALL ".join(parts_status) + " ORDER BY dataset, label, status"
-        df_status = con.execute(query_status).df()
+    with _ds_spot_loading("Dataset summary & status distribution"):
+        if single_mode:
+            query_base = f"""
+            SELECT COUNT(DISTINCT t4dataset_id) AS id_num, '{os.path.basename(target_file)}' AS series
+            FROM view_eval_flat
+            """
+            df_summary = con.execute(query_base).df()
+            query_status = """
+            SELECT label, status, COUNT(*) AS num
+            FROM view_eval_flat
+            GROUP BY label, status
+            ORDER BY label, status
+            """
+            df_status = con.execute(query_status).df()
+        else:
+            parts = [f"SELECT COUNT(DISTINCT t4dataset_id) AS id_num, '{run_labels_list[i]}' AS series FROM {_flat_view(i)}" for i in range(len(runs))]
+            query_base = " UNION ALL ".join(parts)
+            df_summary = con.execute(query_base).df()
+            parts_status = [f"SELECT '{run_labels_list[i]}' AS dataset, label, status, COUNT(*) AS num FROM {_flat_view(i)} GROUP BY label, status" for i in range(len(runs))]
+            query_status = " UNION ALL ".join(parts_status) + " ORDER BY dataset, label, status"
+            df_status = con.execute(query_status).df()
 
     if single_mode:
         if not df_status.empty:
             if st.checkbox("Debug: Inspect Status Count (All Runs)" if not single_mode else "Debug: Inspect Status Count"):
                 df_status_wide = df_status.pivot_table(index='label', columns='status', values='num', fill_value=0).reset_index()
                 st.download_button("Download status count (CSV)", data=df_status_wide.to_csv(index=False).encode("utf-8"), file_name="detection_status_count.csv", mime="text/csv", key="dl_status_count")
-                st.dataframe(df_status_wide, use_container_width=True, hide_index=True)
+                st.dataframe(df_status_wide, width='stretch', hide_index=True)
             status_viz = st.radio(
                 "Status chart style",
                 options=["Stacked bar (counts)", "Treemap", "100% stacked (proportions)", "Spider chart (TP, FP & FN)"],
@@ -1010,7 +1098,7 @@ try:
                         color_discrete_map=STATUS_COLORS,
                     )
                 apply_chart_theme(fig2)
-                st.plotly_chart(fig2, use_container_width=True)
+                st.plotly_chart(fig2, width='stretch')
             elif status_viz == "Treemap":
                 fig2 = px.treemap(
                     df_status,
@@ -1025,7 +1113,7 @@ try:
                     hovertemplate="%{label}<br>Count: %{value}<extra></extra>",
                 )
                 apply_chart_theme(fig2, height=420)
-                st.plotly_chart(fig2, use_container_width=True)
+                st.plotly_chart(fig2, width='stretch')
             elif status_viz == "Spider chart (TP, FP & FN)":
                 wide = df_status.pivot_table(index="label", columns="status", values="num", fill_value=0)
                 cats = sorted(wide.index.astype(str).unique())
@@ -1045,7 +1133,7 @@ try:
                         f"{st_name} count",
                     )
                     with rcols[col_i]:
-                        st.plotly_chart(fig_r, use_container_width=True)
+                        st.plotly_chart(fig_r, width='stretch')
             else:
                 # 100% stacked: proportion per label
                 wide = df_status.pivot_table(index="label", columns="status", values="num", fill_value=0)
@@ -1081,7 +1169,7 @@ try:
                         fig2.update_layout(xaxis_tickformat=".0%", xaxis_range=[0, 1])
                     else:
                         fig2.update_layout(yaxis_tickformat=".0%", yaxis_range=[0, 1])
-                    st.plotly_chart(fig2, use_container_width=True)
+                    st.plotly_chart(fig2, width='stretch')
                 else:
                     st.info("No data for proportions.")
         else:
@@ -1092,7 +1180,7 @@ try:
                 df_status_wide = df_status.pivot_table(index='label', columns=['dataset', 'status'], values='num', fill_value=0)
                 df_status_wide.columns = [f"{col[0]} {col[1]}" for col in df_status_wide.columns]
                 df_status_wide = df_status_wide.reset_index()
-                st.dataframe(df_status_wide, use_container_width=True, hide_index=True)
+                st.dataframe(df_status_wide, width='stretch', hide_index=True)
             status_viz = st.radio(
                 "Status chart style",
                 options=["Stacked bar (counts)", "Treemap", "100% stacked (proportions)", "Spider chart (TP, FP & FN)"],
@@ -1114,7 +1202,7 @@ try:
                     color_discrete_map=STATUS_COLORS,
                 )
                 apply_chart_theme(fig2)
-                st.plotly_chart(fig2, use_container_width=True)
+                st.plotly_chart(fig2, width='stretch')
             elif status_viz == "Spider chart (TP, FP & FN)":
                 # Same counts as stacked bar: one spider per status (TP / FP / FN), axes = labels, r = count
                 status_wide = df_status.pivot_table(
@@ -1145,7 +1233,7 @@ try:
                         f"{st_name} count",
                     )
                     with rcols[col_i]:
-                        st.plotly_chart(fig_r, use_container_width=True)
+                        st.plotly_chart(fig_r, width='stretch')
             elif status_viz == "Treemap":
                 n_runs = len(run_labels_list)
                 cols = st.columns(min(n_runs, 3))
@@ -1166,7 +1254,7 @@ try:
                         )
                         apply_chart_theme(fig_t, height=360)
                         with cols[idx % len(cols)]:
-                            st.plotly_chart(fig_t, use_container_width=True)
+                            st.plotly_chart(fig_t, width='stretch')
             else:
                 # 100% stacked per run (facet)
                 df_pct_list = []
@@ -1208,7 +1296,7 @@ try:
                         )
                         for ann in fig2.layout.annotations:
                             ann.text = ann.text.split("=")[-1]
-                        st.plotly_chart(fig2, use_container_width=True)
+                        st.plotly_chart(fig2, width='stretch')
                     else:
                         st.info("No data for proportions.")
                 else:
@@ -1280,6 +1368,8 @@ rate_by_dist_style = st.radio(
 )
 
 filter_clause_base = build_filter_clause(filters_base, enable_dist_h=False)
+_dist_slot = st.empty()
+_dist_slot.markdown(_ds_spot_loading_markup("Distance · TP/FP rates & object counts"), unsafe_allow_html=True)
 try:
     use_line_chart = rate_by_dist_style == "Line chart (trend)"
     rate_bin_labels_order: Optional[List[str]] = None
@@ -1345,7 +1435,7 @@ try:
                     hovermode="x unified",
                 )
                 fig.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.25)")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
             else:
                 # Bar chart (histogram): combined TP + FP grouped bars
                 fig = go.Figure()
@@ -1382,7 +1472,7 @@ try:
                     hovermode="x unified",
                 )
                 fig.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.25)")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
         else:
             st.info("No distance-bin data available.")
     else:
@@ -1464,7 +1554,7 @@ try:
                     hovermode="x unified",
                 )
                 fig_tpr.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.25)")
-                st.plotly_chart(fig_tpr, use_container_width=True)
+                st.plotly_chart(fig_tpr, width='stretch')
             else:
                 st.info("No TP rate by distance data.")
 
@@ -1496,7 +1586,7 @@ try:
                     hovermode="x unified",
                 )
                 fig_fpr.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.25)")
-                st.plotly_chart(fig_fpr, use_container_width=True)
+                st.plotly_chart(fig_fpr, width='stretch')
             else:
                 st.info("No FP rate by distance data.")
         else:
@@ -1525,7 +1615,7 @@ try:
                     hovermode="x unified",
                 )
                 fig_tpr.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.25)")
-                st.plotly_chart(fig_tpr, use_container_width=True)
+                st.plotly_chart(fig_tpr, width='stretch')
             else:
                 st.info("No TP rate by distance data.")
 
@@ -1553,7 +1643,7 @@ try:
                     hovermode="x unified",
                 )
                 fig_fpr.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.25)")
-                st.plotly_chart(fig_fpr, use_container_width=True)
+                st.plotly_chart(fig_fpr, width='stretch')
             else:
                 st.info("No FP rate by distance data.")
 
@@ -1645,7 +1735,7 @@ try:
                     hovermode="x unified",
                     **({"barmode": "group"} if not use_line_chart else {}),
                 )
-                st.plotly_chart(fig_oc, use_container_width=True)
+                st.plotly_chart(fig_oc, width='stretch')
             else:
                 pivot_oc = df_oc.pivot_table(
                     index="bin_label", columns="run", values="n", aggfunc="sum", fill_value=0
@@ -1691,12 +1781,14 @@ try:
                     hovermode="x unified",
                     **({"barmode": "group"} if not use_line_chart else {}),
                 )
-                st.plotly_chart(fig_oc, use_container_width=True)
+                st.plotly_chart(fig_oc, width='stretch')
     except Exception as e_oc:
         st.error(f"Error (object count by distance bin): {e_oc}")
 
 except Exception as e:
     st.error(f"Error: {e}")
+finally:
+    _dist_slot.empty()
 # =============================
 # Panel 2: TP Rate (single) / TP Rate Comparison (compare)
 # =============================
@@ -1742,9 +1834,10 @@ if single_mode:
         key="tpr_viz_single",
     )
     try:
-        filter_clause = build_filter_clause(filters_base)
-        query = _tpr_query.format(view="view_eval_flat", filter_clause=filter_clause)
-        df_tpr_base = con.execute(query).df()
+        with _ds_spot_loading("TP rate"):
+            filter_clause = build_filter_clause(filters_base)
+            query = _tpr_query.format(view="view_eval_flat", filter_clause=filter_clause)
+            df_tpr_base = con.execute(query).df()
         if not df_tpr_base.empty:
             title = f"Total TP rate within {max_eval_range} [m]"
             if tpr_viz == "Bar chart":
@@ -1758,10 +1851,10 @@ if single_mode:
                 apply_chart_theme(fig)
                 fig.update_layout(yaxis_range=[0, 1.2])
                 fig.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.2)")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
             else:
                 fig = _tpr_lollipop_single(df_tpr_base, title)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
         else:
             st.info("No data available")
     except Exception as e:
@@ -1776,14 +1869,15 @@ else:
         key="tpr_viz_compare",
     )
     try:
-        dfs_tpr = []
-        for i in range(len(runs)):
-            fc = build_filter_clause(filters_list[i])
-            q = _tpr_query.format(view=_flat_view(i), filter_clause=fc)
-            df_i = con.execute(q).df()
-            df_i["run"] = run_labels_list[i]
-            dfs_tpr.append(df_i)
-        df_tpr_all = pd.concat(dfs_tpr, ignore_index=True)
+        with _ds_spot_loading("TP rate"):
+            dfs_tpr = []
+            for i in range(len(runs)):
+                fc = build_filter_clause(filters_list[i])
+                q = _tpr_query.format(view=_flat_view(i), filter_clause=fc)
+                df_i = con.execute(q).df()
+                df_i["run"] = run_labels_list[i]
+                dfs_tpr.append(df_i)
+            df_tpr_all = pd.concat(dfs_tpr, ignore_index=True)
         if tpr_viz == "Spider chart":
             st.caption(
                 "Six spider charts use **fixed distance cutoffs** (50–150 m) plus **all distances**. "
@@ -1827,7 +1921,7 @@ else:
                                     run_labels_list,
                                     height=360,
                                 )
-                                st.plotly_chart(fig, use_container_width=True)
+                                st.plotly_chart(fig, width='stretch')
         elif not df_tpr_all.empty:
             title = f"Total TP rate within {max_eval_range} [m] by run"
             if tpr_viz == "Grouped bar":
@@ -1844,7 +1938,7 @@ else:
                 apply_chart_theme(fig)
                 fig.update_layout(yaxis_range=[0, 1.2])
                 fig.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.2)")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
             elif tpr_viz == "Heatmap (label × run)":
                 pivot = df_tpr_all.pivot_table(index="label", columns="run", values="tpr", aggfunc="first")
                 cols_present = [c for c in run_labels_list if c in pivot.columns]
@@ -1861,7 +1955,7 @@ else:
                 )
                 apply_chart_theme(fig, height=max(360, 32 + 22 * len(pivot.index)))
                 fig.update_layout(xaxis_side="top")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
             elif tpr_viz == "Line profile":
                 fig = px.line(
                     df_tpr_all,
@@ -1877,7 +1971,7 @@ else:
                 apply_chart_theme(fig, height=400)
                 fig.update_layout(yaxis_range=[0, 1.15], xaxis_tickangle=-35, hovermode="x unified")
                 fig.add_hline(y=0.5, line_dash="dash", line_color="rgba(0,0,0,0.2)")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
         else:
             st.info("No data available")
     except Exception as e:
@@ -2012,7 +2106,7 @@ def _plot_comparison_lens_treemap(
         paper_bgcolor="rgba(0,0,0,0)",
         title=_title_layout,
     )
-    st.plotly_chart(fig, use_container_width=True, key=st_key)
+    st.plotly_chart(fig, width='stretch', key=st_key)
 
 
 if not single_mode:
@@ -2026,6 +2120,8 @@ if not single_mode:
     )
     for idx in range(1, len(runs)):
         lbl = run_labels_list[idx]
+        _pd_slot = st.empty()
+        _pd_slot.markdown(_ds_spot_loading_markup(f"Perception diff · run {lbl}"), unsafe_allow_html=True)
         try:
             filter_clause_comp_p5 = build_filter_clause(filters_list[idx], enable_dist_h=False)
             comp_flat = _flat_view(idx)
@@ -2345,13 +2441,13 @@ if not single_mode:
                             with bc1:
                                 st.plotly_chart(
                                     plot_entries[0][1],
-                                    use_container_width=True,
+                                    width='stretch',
                                     key=f"{b_key}_fig_{plot_entries[0][0]}",
                                 )
                             with bc2:
                                 st.plotly_chart(
                                     plot_entries[1][1],
-                                    use_container_width=True,
+                                    width='stretch',
                                     key=f"{b_key}_fig_{plot_entries[1][0]}",
                                 )
                         else:
@@ -2359,7 +2455,7 @@ if not single_mode:
                                 if fig_b is not None:
                                     st.plotly_chart(
                                         fig_b,
-                                        use_container_width=True,
+                                        width='stretch',
                                         key=f"{b_key}_fig_{ct}",
                                     )
                                 else:
@@ -2518,22 +2614,22 @@ if not single_mode:
                             st.markdown("**Per label**")
                             st.dataframe(
                                 df_by_label,
-                                use_container_width=True,
+                                width='stretch',
                                 hide_index=True,
                             )
                         if not scen_agg.empty:
                             st.markdown("**Per scenario**")
-                            st.dataframe(scen_agg, use_container_width=True, hide_index=True)
+                            st.dataframe(scen_agg, width='stretch', hide_index=True)
                         if not df_frame_sorted.empty:
                             st.markdown("**Per frame** (sorted by degraded)")
                             st.dataframe(
                                 df_frame_sorted.head(200),
-                                use_container_width=True,
+                                width='stretch',
                                 hide_index=True,
                             )
 
                     with st.expander("Full dataset breakdown (per t4dataset_id row)"):
-                        st.dataframe(df_improved, use_container_width=True, hide_index=True)
+                        st.dataframe(df_improved, width='stretch', hide_index=True)
 
                     # --- Drill-down: filters + objects ---
                     with st.expander("Drill-down: objects"):
@@ -2738,7 +2834,7 @@ if not single_mode:
                             )
                             st.dataframe(
                                 df_obj_show.head(n_show),
-                                use_container_width=True,
+                                width='stretch',
                                 hide_index=True,
                             )
                         else:
@@ -2746,7 +2842,7 @@ if not single_mode:
 
                     with st.expander("Full frame table (sort: degraded desc)"):
                         if not df_frame_sorted.empty:
-                            st.dataframe(df_frame_sorted, use_container_width=True, hide_index=True)
+                            st.dataframe(df_frame_sorted, width='stretch', hide_index=True)
                             row0 = df_frame_sorted.iloc[0]
                             suite_val = str(row0.get("suite_name", "") or "")
                             scenario_val = str(row0.get("scenario_name", "") or "")
@@ -2771,12 +2867,16 @@ if not single_mode:
                 st.caption(f"Run {lbl} vs A: No data.")
         except Exception as e:
             st.error(f"Error (Run {lbl} vs A): {e}")
+        finally:
+            _pd_slot.empty()
 
 # =============================
 # Single mode: Frame / Object level — Where are the misses?
 # =============================
 if single_mode:
     st.markdown(_section_header("Frame / Object level: Where are the misses?"), unsafe_allow_html=True)
+    _fn_slot = st.empty()
+    _fn_slot.markdown(_ds_spot_loading_markup("FN by frame & object"), unsafe_allow_html=True)
     try:
         with st.expander("FN by frame and by object", expanded=True):
             query_fn_frame = f"""
@@ -2810,7 +2910,7 @@ if single_mode:
             if not df_fn_frame.empty:
                 st.markdown("**FN count by frame**")
                 st.download_button("Download FN by frame (CSV)", data=df_fn_frame.to_csv(index=False).encode("utf-8"), file_name="fn_by_frame.csv", mime="text/csv", key="dl_fn_frame")
-                st.dataframe(df_fn_frame, use_container_width=True, hide_index=True)
+                st.dataframe(df_fn_frame, width='stretch', hide_index=True)
                 # View in BEV for top FN frame
                 row0 = df_fn_frame.iloc[0]
                 suite_val = str(row0.get("suite_name", "") or "")
@@ -2836,13 +2936,15 @@ if single_mode:
                 st.markdown("**FN objects**")
                 if len(df_fn_object) > 500:
                     st.caption(f"Showing first 500 of {len(df_fn_object)} FN objects.")
-                    st.dataframe(df_fn_object.head(500), use_container_width=True, hide_index=True)
+                    st.dataframe(df_fn_object.head(500), width='stretch', hide_index=True)
                 else:
-                    st.dataframe(df_fn_object, use_container_width=True, hide_index=True)
+                    st.dataframe(df_fn_object, width='stretch', hide_index=True)
             else:
                 st.caption("No FN objects.")
     except Exception as e:
         st.error(f"Error in FN by frame/object: {e}")
+    finally:
+        _fn_slot.empty()
 
 # =============================
 # Panel 6: Mean Error (single) / Mean Error Comparison (compare)
@@ -2869,24 +2971,25 @@ if not has_error_cols:
 else:
     if single_mode:
         try:
-            query = f"""
-            SELECT
-                label,
-                AVG(ABS(CAST(x_error AS DOUBLE))) FILTER (
-                    WHERE status = 'TP' AND x_error IS NOT NULL
-                ) AS mean_abs_x_error,
-                AVG(ABS(CAST(y_error AS DOUBLE))) FILTER (
-                    WHERE status = 'TP' AND y_error IS NOT NULL
-                ) AS mean_abs_y_error,
-                AVG(ABS(CAST(yaw_error AS DOUBLE))) FILTER (
-                    WHERE status = 'TP' AND yaw_error IS NOT NULL
-                ) AS mean_abs_yaw_error
-            FROM view_eval_flat
-            WHERE {filter_clause_base}
-            GROUP BY label
-            ORDER BY label
-            """
-            df_error_base = con.execute(query).df()
+            with _ds_spot_loading("Mean error"):
+                query = f"""
+                SELECT
+                    label,
+                    AVG(ABS(CAST(x_error AS DOUBLE))) FILTER (
+                        WHERE status = 'TP' AND x_error IS NOT NULL
+                    ) AS mean_abs_x_error,
+                    AVG(ABS(CAST(y_error AS DOUBLE))) FILTER (
+                        WHERE status = 'TP' AND y_error IS NOT NULL
+                    ) AS mean_abs_y_error,
+                    AVG(ABS(CAST(yaw_error AS DOUBLE))) FILTER (
+                        WHERE status = 'TP' AND yaw_error IS NOT NULL
+                    ) AS mean_abs_yaw_error
+                FROM view_eval_flat
+                WHERE {filter_clause_base}
+                GROUP BY label
+                ORDER BY label
+                """
+                df_error_base = con.execute(query).df()
             if not df_error_base.empty:
                 fig = go.Figure()
                 fig.add_trace(go.Bar(
@@ -2921,24 +3024,25 @@ else:
             st.error(f"Error: {e}")
     else:
         try:
-            dfs_err = []
-            for i in range(len(runs)):
-                fc = build_filter_clause(filters_list[i])
-                q = f"""
-                SELECT
-                    label,
-                    AVG(ABS(CAST(x_error AS DOUBLE))) FILTER (WHERE status = 'TP' AND x_error IS NOT NULL) AS mean_abs_x_error,
-                    AVG(ABS(CAST(y_error AS DOUBLE))) FILTER (WHERE status = 'TP' AND y_error IS NOT NULL) AS mean_abs_y_error,
-                    AVG(ABS(CAST(yaw_error AS DOUBLE))) FILTER (WHERE status = 'TP' AND yaw_error IS NOT NULL) AS mean_abs_yaw_error
-                FROM {_flat_view(i)}
-                WHERE {fc}
-                GROUP BY label
-                ORDER BY label
-                """
-                df_i = con.execute(q).df()
-                df_i["run"] = run_labels_list[i]
-                dfs_err.append(df_i)
-            df_err_melt = pd.concat(dfs_err, ignore_index=True)
+            with _ds_spot_loading("Mean error"):
+                dfs_err = []
+                for i in range(len(runs)):
+                    fc = build_filter_clause(filters_list[i])
+                    q = f"""
+                    SELECT
+                        label,
+                        AVG(ABS(CAST(x_error AS DOUBLE))) FILTER (WHERE status = 'TP' AND x_error IS NOT NULL) AS mean_abs_x_error,
+                        AVG(ABS(CAST(y_error AS DOUBLE))) FILTER (WHERE status = 'TP' AND y_error IS NOT NULL) AS mean_abs_y_error,
+                        AVG(ABS(CAST(yaw_error AS DOUBLE))) FILTER (WHERE status = 'TP' AND yaw_error IS NOT NULL) AS mean_abs_yaw_error
+                    FROM {_flat_view(i)}
+                    WHERE {fc}
+                    GROUP BY label
+                    ORDER BY label
+                    """
+                    df_i = con.execute(q).df()
+                    df_i["run"] = run_labels_list[i]
+                    dfs_err.append(df_i)
+                df_err_melt = pd.concat(dfs_err, ignore_index=True)
             if not df_err_melt.empty:
                 mean_err_viz = st.radio(
                     "Mean error chart style",
@@ -3006,7 +3110,7 @@ else:
                             tickformat=tfmt,
                         )
                         with rcols[ci]:
-                            st.plotly_chart(fig_r, use_container_width=True)
+                            st.plotly_chart(fig_r, width='stretch')
             else:
                 st.info("No data available")
         except Exception as e:
@@ -3015,6 +3119,8 @@ else:
         st.markdown(_section_header("Difference of mean absolute error (each run − Baseline A)"), unsafe_allow_html=True)
         for idx in range(1, len(runs)):
             lbl = run_labels_list[idx]
+            _med_slot = st.empty()
+            _med_slot.markdown(_ds_spot_loading_markup(f"Mean error diff · run {lbl}"), unsafe_allow_html=True)
             try:
                 fc_c = build_filter_clause(filters_list[idx])
                 query = f"""
@@ -3056,5 +3162,7 @@ else:
                         st.plotly_chart(fig, width="stretch")
             except Exception as e:
                 st.error(f"Error (Run {lbl} − A): {e}")
+            finally:
+                _med_slot.empty()
 
 _ds_loading_banner.empty()

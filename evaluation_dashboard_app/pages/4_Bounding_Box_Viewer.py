@@ -1028,7 +1028,7 @@ with st.expander("Inspect another object (browse all or enter UUID)"):
     gt_for_browse = df_stats[df_stats["source"] == "GT"][["uuid", "label"] + (["run"] if "run" in df_stats.columns else [])].drop_duplicates()
     gt_for_browse = gt_for_browse.sort_values(["label", "uuid"]).reset_index(drop=True)
     st.caption("All GT UUIDs in this scene (select a cell to copy):")
-    st.dataframe(gt_for_browse, use_container_width=True, hide_index=True)
+    st.dataframe(gt_for_browse, width='stretch', hide_index=True)
 
 if custom_uuid_input and str(custom_uuid_input).strip():
     candidate = str(custom_uuid_input).strip()

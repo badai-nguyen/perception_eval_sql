@@ -810,7 +810,7 @@ def _render_gate_compare_overlap(gate_results: list, label_a: str, label_b: str)
                 label_b,
                 scenario_buckets=scenario_buckets,
             ),
-            use_container_width=True,
+            width='stretch',
             key="gate_compare_venn",
             config={"displayModeBar": False},
         )
@@ -822,7 +822,7 @@ def _render_gate_compare_overlap(gate_results: list, label_a: str, label_b: str)
                 label_b,
                 link_hover_html=sankey_link_hover,
             ),
-            use_container_width=True,
+            width='stretch',
             key="gate_compare_sankey",
             config={"displayModeBar": True},
         )
@@ -896,7 +896,7 @@ def _render_absolute_gates_section(
                 )
                 st.plotly_chart(
                     _gate_verdict_donut_fig(summ),
-                    use_container_width=True,
+                    width='stretch',
                     key=f"gate_donut_{i}",
                     config={"displayModeBar": False},
                 )
