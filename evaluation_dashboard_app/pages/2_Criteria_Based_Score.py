@@ -270,24 +270,25 @@ with st.sidebar.expander("Absolute pass/fail gates", expanded=abs_gates_enabled)
         ),
     )
     abs_use_metric2 = st.checkbox("Second condition (numeric metric)", value=False)
-    abs_metric2_col = st.selectbox(
-        "Metric column",
-        NUM_COLS,
-        index=NUM_COLS.index("nm") if "nm" in NUM_COLS else 0,
-        disabled=not abs_use_metric2,
-    )
-    abs_metric2_op = st.selectbox(
-        "Operator",
-        ["<=", ">="],
-        index=0,
-        disabled=not abs_use_metric2,
-    )
-    abs_metric2_threshold = st.number_input(
-        "Metric threshold",
-        value=0.0,
-        format="%.6f",
-        disabled=not abs_use_metric2,
-    )
+    if abs_use_metric2:
+        abs_metric2_col = st.selectbox(
+            "Metric column",
+            NUM_COLS,
+            index=NUM_COLS.index("nm") if "nm" in NUM_COLS else 0,
+            disabled=not abs_use_metric2,
+        )
+        abs_metric2_op = st.selectbox(
+            "Operator",
+            ["<=", ">="],
+            index=0,
+            disabled=not abs_use_metric2,
+        )
+        abs_metric2_threshold = st.number_input(
+            "Metric threshold",
+            value=0.0,
+            format="%.6f",
+            disabled=not abs_use_metric2,
+        )
 
 render_page_hero(
     kicker="Criteria-based evaluation",
@@ -393,6 +394,389 @@ def _gate_verdict_donut_fig(summ: dict) -> go.Figure:
     return fig
 
 
+def _gate_compare_overlap_stats(result_a: pd.DataFrame, result_b: pd.DataFrame) -> dict | None:
+    """Classify scenarios on inner join (same Scenario id in both gate tables)."""
+    if result_a is None or result_b is None or result_a.empty or result_b.empty:
+        return None
+    a = result_a[["Scenario", "scenario_pass"]].copy()
+    b = result_b[["Scenario", "scenario_pass"]].copy()
+    a["pass_a"] = a["scenario_pass"].map(bool)
+    b["pass_b"] = b["scenario_pass"].map(bool)
+    outer = a.drop(columns=["scenario_pass"]).merge(
+        b.drop(columns=["scenario_pass"]),
+        on="Scenario",
+        how="outer",
+        indicator=True,
+    )
+    n_only_a = int((outer["_merge"] == "left_only").sum())
+    n_only_b = int((outer["_merge"] == "right_only").sum())
+    both = outer.loc[outer["_merge"] == "both"].copy()
+    n_inner = len(both)
+    if n_inner == 0:
+        return {
+            "both_pass": 0,
+            "both_fail": 0,
+            "a_fail_b_pass": 0,
+            "a_pass_b_fail": 0,
+            "n_inner": 0,
+            "n_only_a": n_only_a,
+            "n_only_b": n_only_b,
+            "merged": both,
+        }
+    pa, pb = both["pass_a"], both["pass_b"]
+    return {
+        "both_pass": int((pa & pb).sum()),
+        "both_fail": int((~pa & ~pb).sum()),
+        "a_fail_b_pass": int((~pa & pb).sum()),
+        "a_pass_b_fail": int((pa & ~pb).sum()),
+        "n_inner": n_inner,
+        "n_only_a": n_only_a,
+        "n_only_b": n_only_b,
+        "merged": both,
+    }
+
+
+def _overlap_scenario_lists(merged: pd.DataFrame) -> dict[str, list[str]]:
+    """Sorted scenario names per overlap bucket (inner-joined rows only)."""
+    if merged is None or merged.empty:
+        return {
+            "both_pass": [],
+            "both_fail": [],
+            "a_fail_b_pass": [],
+            "a_pass_b_fail": [],
+        }
+    scen = merged["Scenario"].astype(str)
+    pa = merged["pass_a"].map(bool)
+    pb = merged["pass_b"].map(bool)
+    return {
+        "both_pass": sorted(scen[pa & pb].tolist()),
+        "both_fail": sorted(scen[~pa & ~pb].tolist()),
+        "a_fail_b_pass": sorted(scen[~pa & pb].tolist()),
+        "a_pass_b_fail": sorted(scen[pa & ~pb].tolist()),
+    }
+
+
+def _hover_html_for_scenarios(title: str, scenarios: list[str], *, max_lines: int = 45) -> str:
+    """Plotly hover HTML: title + count + newline-separated scenario names."""
+    n = len(scenarios)
+    esc_title = html.escape(title)
+    if n == 0:
+        return f"<b>{esc_title}</b><br><i>No scenarios</i>"
+    head = scenarios[:max_lines]
+    lines = "<br>".join(html.escape(s) for s in head)
+    more = ""
+    if n > max_lines:
+        more = f"<br><i>… +{n - max_lines:,} more (see table below)</i>"
+    return f"<b>{esc_title}</b> · {n:,} scenario{'s' if n != 1 else ''}<br>{lines}{more}"
+
+
+def _gate_compare_venn_style_fig(
+    stats: dict,
+    label_a: str,
+    label_b: str,
+    *,
+    scenario_buckets: dict[str, list[str]] | None = None,
+) -> go.Figure:
+    """
+    Euler-style diagram: left disk = failed baseline, right disk = failed candidate.
+    Regions: both pass (above), only-A fail, intersection both fail, only-B fail.
+    Invisible scatter markers carry hover with per-bucket scenario lists.
+    """
+    c_bp = stats["both_pass"]
+    c_ff = stats["both_fail"]
+    c_af = stats["a_fail_b_pass"]
+    c_pf = stats["a_pass_b_fail"]
+    la = html.escape(str(label_a))
+    lb = html.escape(str(label_b))
+
+    sb = scenario_buckets or {k: [] for k in ("both_pass", "both_fail", "a_fail_b_pass", "a_pass_b_fail")}
+
+    r = 0.52
+    cx1, cx2 = -0.34, 0.34
+    fig = go.Figure()
+    fig.add_shape(
+        type="circle",
+        xref="x",
+        yref="y",
+        x0=cx1 - r,
+        y0=-r,
+        x1=cx1 + r,
+        y1=r,
+        fillcolor="rgba(49, 46, 129, 0.22)",
+        line=dict(width=2.5, color="#312e81"),
+        layer="below",
+    )
+    fig.add_shape(
+        type="circle",
+        xref="x",
+        yref="y",
+        x0=cx2 - r,
+        y0=-r,
+        x1=cx2 + r,
+        y1=r,
+        fillcolor="rgba(15, 118, 110, 0.22)",
+        line=dict(width=2.5, color="#0f766e"),
+        layer="below",
+    )
+
+    def _bubble(x, y, n: int, title: str, subtitle: str, color: str) -> None:
+        fig.add_annotation(
+            x=x,
+            y=y,
+            text=f"<b style='font-size:22px;color:{color}'>{n:,}</b><br>"
+            f"<span style='font-size:12px;font-weight:700;color:#0f172a'>{title}</span><br>"
+            f"<span style='font-size:11px;color:#64748b'>{subtitle}</span>",
+            showarrow=False,
+            align="center",
+        )
+
+    bx_af, bx_ff, bx_pf, bx_bp = -0.58, 0.0, 0.58, 0.0
+    by_af, by_ff, by_pf, by_bp = 0.0, 0.0, 0.0, 0.78
+    _bubble(bx_af, by_af, c_af, "Baseline fail only", "Recovered on candidate", "#312e81")
+    _bubble(bx_ff, by_ff, c_ff, "Both fail", "Still failing A & B", "#b45309")
+    _bubble(bx_pf, by_pf, c_pf, "Candidate fail only", "Regression vs baseline", "#0f766e")
+    _bubble(bx_bp, by_bp, c_bp, "Both pass", "Clean on both runs", "#047857")
+
+    # Hit targets for hover (semi-transparent; shows scenario names on hover).
+    hover_titles = [
+        "Baseline fail only (recovered on candidate)",
+        "Both fail",
+        "Candidate fail only (regression)",
+        "Both pass",
+    ]
+    hover_bodies = [
+        _hover_html_for_scenarios(hover_titles[0], sb["a_fail_b_pass"]),
+        _hover_html_for_scenarios(hover_titles[1], sb["both_fail"]),
+        _hover_html_for_scenarios(hover_titles[2], sb["a_pass_b_fail"]),
+        _hover_html_for_scenarios(hover_titles[3], sb["both_pass"]),
+    ]
+    fig.add_trace(
+        go.Scatter(
+            x=[bx_af, bx_ff, bx_pf, bx_bp],
+            y=[by_af, by_ff, by_pf, by_bp],
+            mode="markers",
+            marker=dict(
+                size=100,
+                color=["rgba(49,46,129,0.12)", "rgba(180,83,9,0.14)", "rgba(15,118,110,0.12)", "rgba(4,120,87,0.12)"],
+                line=dict(width=0),
+            ),
+            hovertemplate="%{customdata}<extra></extra>",
+            customdata=hover_bodies,
+        )
+    )
+
+    fig.add_annotation(
+        x=cx1,
+        y=-0.72,
+        text=f"<b>{la}</b> · fail set",
+        showarrow=False,
+        font=dict(size=11, color="#312e81"),
+    )
+    fig.add_annotation(
+        x=cx2,
+        y=-0.72,
+        text=f"<b>{lb}</b> · fail set",
+        showarrow=False,
+        font=dict(size=11, color="#0f766e"),
+    )
+
+    fig.update_xaxes(visible=False, range=[-1.28, 1.28])
+    fig.update_yaxes(visible=False, range=[-0.95, 1.02], scaleanchor="x", scaleratio=1)
+    fig.update_layout(
+        height=440,
+        margin=dict(l=8, r=8, t=52, b=8),
+        paper_bgcolor="rgba(248, 250, 252, 0.85)",
+        plot_bgcolor="rgba(255,255,255,0.4)",
+        font=dict(family="system-ui, -apple-system, 'Segoe UI', sans-serif"),
+        title=dict(
+            text="<b>Overlap map</b> · hover a region for scenario names",
+            x=0.5,
+            xanchor="center",
+            font=dict(size=15, color="#0f172a"),
+        ),
+        hoverlabel=dict(align="left", bgcolor="white", font_size=12, font_family="system-ui, sans-serif"),
+    )
+    return fig
+
+
+def _gate_compare_sankey_fig(
+    stats: dict,
+    label_a: str,
+    label_b: str,
+    *,
+    link_hover_html: list[str] | None = None,
+) -> go.Figure:
+    """Baseline pass/fail → Candidate pass/fail flows (inner-joined scenarios)."""
+    bp, ff, af, pf = (
+        stats["both_pass"],
+        stats["both_fail"],
+        stats["a_fail_b_pass"],
+        stats["a_pass_b_fail"],
+    )
+    n_ap = bp + pf
+    n_af = af + ff
+    n_bp = bp + af
+    n_bf = pf + ff
+
+    la = str(label_a).replace("<", "")
+    lb = str(label_b).replace("<", "")
+
+    node_colors = ["#22c55e", "#fca5a5", "#22c55e", "#fca5a5"]
+    link_colors = [
+        "rgba(34, 197, 94, 0.35)",
+        "rgba(239, 68, 68, 0.45)",
+        "rgba(52, 211, 153, 0.45)",
+        "rgba(185, 28, 28, 0.4)",
+    ]
+    vals = [bp, pf, af, ff]
+    if sum(vals) == 0:
+        vals = [0, 0, 0, 0]
+
+    link_kw: dict = dict(
+        source=[0, 0, 1, 1],
+        target=[2, 3, 2, 3],
+        value=vals,
+        color=link_colors,
+    )
+    if link_hover_html and len(link_hover_html) == 4:
+        link_kw["customdata"] = link_hover_html
+        link_kw["hovertemplate"] = "%{customdata}<extra></extra>"
+    else:
+        link_kw["hovertemplate"] = "%{value:,} scenarios<extra></extra>"
+
+    fig = go.Figure(
+        data=[
+            go.Sankey(
+                arrangement="snap",
+                valueformat=",",
+                node=dict(
+                    pad=28,
+                    thickness=22,
+                    line=dict(color="rgba(15,23,42,0.35)", width=1),
+                    label=[
+                        f"{la}<br><b>Pass</b><br>{n_ap:,}",
+                        f"{la}<br><b>Fail</b><br>{n_af:,}",
+                        f"{lb}<br><b>Pass</b><br>{n_bp:,}",
+                        f"{lb}<br><b>Fail</b><br>{n_bf:,}",
+                    ],
+                    color=node_colors,
+                ),
+                link=link_kw,
+            )
+        ]
+    )
+    fig.update_layout(
+        height=420,
+        margin=dict(l=24, r=24, t=48, b=16),
+        font=dict(family="system-ui, -apple-system, 'Segoe UI', sans-serif", size=12, color="#334155"),
+        paper_bgcolor="rgba(248, 250, 252, 0.5)",
+        title=dict(
+            text="<b>Sankey</b> · hover a flow for scenario names",
+            x=0.5,
+            xanchor="center",
+            font=dict(size=15, color="#0f172a"),
+        ),
+        hoverlabel=dict(align="left", bgcolor="white", font_size=12, font_family="system-ui, sans-serif"),
+    )
+    return fig
+
+
+def _render_gate_compare_overlap(gate_results: list, label_a: str, label_b: str) -> None:
+    """Venn-style + Sankey when exactly two gate result frames exist."""
+    if len(gate_results) != 2:
+        return
+    _, res_a, _ = gate_results[0]
+    _, res_b, _ = gate_results[1]
+    stats = _gate_compare_overlap_stats(res_a, res_b)
+    if stats is None:
+        return
+
+    st.markdown(
+        '<p style="font-size:1.12rem;font-weight:800;color:#0f172a;margin:1.5rem 0 0.25rem 0;">'
+        "Compare · scenario overlap</p>"
+        '<p style="color:#64748b;font-size:0.9rem;margin:0 0 0.85rem 0;">'
+        "Same scenario IDs in both runs: <strong>who fails where</strong> — recovered, regressed, stable pass, or still failing.</p>",
+        unsafe_allow_html=True,
+    )
+
+    cap_parts = []
+    if stats["n_inner"]:
+        cap_parts.append(f"**{stats['n_inner']:,}** scenarios in both runs (inner join).")
+    if stats["n_only_a"]:
+        cap_parts.append(f"**{stats['n_only_a']:,}** only in {label_a} — excluded from overlap chart.")
+    if stats["n_only_b"]:
+        cap_parts.append(f"**{stats['n_only_b']:,}** only in {label_b} — excluded from overlap chart.")
+    if cap_parts:
+        st.caption(" ".join(cap_parts))
+
+    if stats["n_inner"] == 0:
+        st.info("No overlapping scenario names between the two gate tables — cannot draw compare overlap.")
+        return
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Both pass", f"{stats['both_pass']:,}")
+    m2.metric("Recovered (B)", f"{stats['a_fail_b_pass']:,}")
+    m3.metric("Regression (B)", f"{stats['a_pass_b_fail']:,}")
+    m4.metric("Both fail", f"{stats['both_fail']:,}")
+    st.caption(
+        "Recovered = failed baseline gate but passed candidate · Regression = passed baseline but failed candidate."
+    )
+
+    merged = stats["merged"]
+    scenario_buckets = _overlap_scenario_lists(merged)
+    sankey_link_hover = [
+        _hover_html_for_scenarios("Pass baseline → Pass candidate", scenario_buckets["both_pass"]),
+        _hover_html_for_scenarios("Pass baseline → Fail candidate (regression)", scenario_buckets["a_pass_b_fail"]),
+        _hover_html_for_scenarios("Fail baseline → Pass candidate (recovered)", scenario_buckets["a_fail_b_pass"]),
+        _hover_html_for_scenarios("Fail baseline → Fail candidate (both fail)", scenario_buckets["both_fail"]),
+    ]
+
+    c_venn, c_sankey = st.columns(2, gap="large")
+    with c_venn:
+        st.plotly_chart(
+            _gate_compare_venn_style_fig(
+                stats,
+                label_a,
+                label_b,
+                scenario_buckets=scenario_buckets,
+            ),
+            use_container_width=True,
+            key="gate_compare_venn",
+            config={"displayModeBar": False},
+        )
+    with c_sankey:
+        st.plotly_chart(
+            _gate_compare_sankey_fig(
+                stats,
+                label_a,
+                label_b,
+                link_hover_html=sankey_link_hover,
+            ),
+            use_container_width=True,
+            key="gate_compare_sankey",
+            config={"displayModeBar": True},
+        )
+    st.caption("Hover the **overlap disks** or **Sankey** flows to list scenarios in that bucket (truncated if very long; full list stays in the table below).")
+
+    merged = stats.get("merged")
+    if merged is not None and not merged.empty:
+        bucket_rows = []
+        for _, row in merged.iterrows():
+            pa, pb = bool(row["pass_a"]), bool(row["pass_b"])
+            if pa and pb:
+                b = "both_pass"
+            elif not pa and not pb:
+                b = "both_fail"
+            elif not pa and pb:
+                b = "recovered_on_candidate"
+            else:
+                b = "regression_on_candidate"
+            bucket_rows.append({"Scenario": row["Scenario"], "overlap_bucket": b})
+        buck_df = pd.DataFrame(bucket_rows).sort_values(["overlap_bucket", "Scenario"])
+        with st.expander("Scenario list by overlap bucket", expanded=False):
+            st.dataframe(buck_df, width="stretch", hide_index=True)
+
+
 def _render_absolute_gates_section(
     runs: list,
     *,
@@ -470,6 +854,13 @@ def _render_absolute_gates_section(
                 )
                 st.dataframe(fails, width="stretch")
             gate_results.append((label, result, spec))
+
+    if len(gate_results) == 2:
+        _render_gate_compare_overlap(
+            gate_results,
+            gate_results[0][0],
+            gate_results[1][0],
+        )
 
     if len(gate_results) == 1:
         label, result, sp = gate_results[0]

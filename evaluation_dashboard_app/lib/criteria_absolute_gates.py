@@ -51,12 +51,12 @@ def evaluate_scenario_gates(
 
     Returns columns:
       - Scenario
-      - row_count
       - agg_pass_rate (mean pass_rate over rows in scenario)
       - metric_agg (max of metric if op is <=, else min; NaN if no metric gate)
       - scenario_pass
       - pass_rate_gate_ok
       - metric_gate_ok (True if no metric_gate)
+      - row_count
     """
     required = {"Scenario", "pass_rate"}
     if not required.issubset(df_view.columns):
@@ -66,12 +66,12 @@ def evaluate_scenario_gates(
 
     empty_cols = [
         "Scenario",
-        "row_count",
         "agg_pass_rate",
         "metric_agg",
         "scenario_pass",
         "pass_rate_gate_ok",
         "metric_gate_ok",
+        "row_count",
     ]
     if df_view.empty:
         return pd.DataFrame(columns=empty_cols)
