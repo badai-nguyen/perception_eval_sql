@@ -185,12 +185,13 @@ group_by = st.sidebar.selectbox(
 )
 
 st.sidebar.divider()
-with st.sidebar.expander("Absolute pass/fail gates", expanded=False):
-    abs_gates_enabled = st.checkbox(
-        "Enable scenario-level gates",
-        value=False,
-        help="Count scenarios that pass/fail fixed thresholds (pass rate 0–100; optional 2nd metric).",
-    )
+abs_gates_enabled = st.sidebar.checkbox(
+    "Enable absolute pass/fail gates",
+    value=False,
+    help="Count scenarios that pass/fail fixed thresholds (pass rate 0–100; optional 2nd metric).",
+)
+with st.sidebar.expander("Absolute pass/fail gates", expanded=abs_gates_enabled):
+
     abs_pass_min = st.number_input(
         "Minimum pass rate (%)",
         min_value=0.0,
@@ -326,7 +327,12 @@ def _gate_verdict_donut_fig(summ: dict) -> go.Figure:
     return fig
 
 
-def _render_absolute_gates_section(runs: list):
+def _render_absolute_gates_section(
+    runs: list,
+    *,
+    criteria_idx: int,
+    criteria_count: int,
+):
     """runs: list of (label, df_view) — df may include Run; it is stripped."""
     if not abs_gates_enabled:
         return
@@ -462,7 +468,9 @@ if mode == "Compare Mode":
         [
             ("Baseline (A)", df_view_A),
             ("Candidate (B)", df_view_B),
-        ]
+        ],
+        criteria_idx=criteria_idx,
+        criteria_count=CRITERIA_COUNT,
     )
 
     st.markdown(
@@ -720,7 +728,11 @@ else:
     col2.metric("Pass rate mean", f"{mean_pass:.3f}")
     col3.metric("Pass rate median", f"{median_pass:.3f}")
 
-    _render_absolute_gates_section([("Current run", df_view)])
+    _render_absolute_gates_section(
+        [("Current run", df_view)],
+        criteria_idx=criteria_idx,
+        criteria_count=CRITERIA_COUNT,
+    )
 
     section_header(f"{metric} distribution", f"How **{metric}** spreads across all rows; colored by **{group_by}**.")
     fig = px.histogram(

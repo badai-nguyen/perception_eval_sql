@@ -3,6 +3,9 @@ Data Management: list runs, show size, delete runs, copy shareable links.
 For multi-user server deployment so users can manage evaluation data.
 """
 
+import io
+import re
+import zipfile
 import streamlit as st
 from pathlib import Path
 from datetime import datetime
@@ -14,6 +17,7 @@ from lib.path_utils import (
     get_run_info,
     delete_run,
     format_size,
+    resolve_run_subdirectory,
 )
 from lib.page_chrome import inject_app_page_styles, render_page_hero, section_header
 
@@ -29,8 +33,8 @@ render_page_hero(
     kicker="Workspace",
     title="Data management",
     description=(
-        "Browse runs under the data root, check Summary/Score/Parquet flags, copy shareable Overview links, "
-        "and delete runs to free disk space."
+        "Browse runs under the data root, check Summary/Score/Parquet flags, download those artifacts as one zip when present, "
+        "copy shareable Overview links, and delete runs to free disk space."
     ),
     mode="Single Run",
 )
@@ -60,7 +64,7 @@ section_header("Runs in data root", "Size, modified time, and which artifacts ex
 st.dataframe(rows, width="stretch", hide_index=True)
 
 # Shareable link builder
-section_header("Share with teammates", "Compose a query string for Overview — append it to your app base URL.")
+section_header("Share", "Compose a query string for Overview — append it to your app base URL.")
 col_a, col_b = st.columns(2)
 with col_a:
     run_names = [r["Run name"] for r in rows]
@@ -81,8 +85,58 @@ if mode == "compare":
 st.code(q, language=None)
 st.caption("Example: `https://your-server:8501/?` + the query above.")
 
+# Download generated artifacts (Summary.csv, Score.csv, Parquet) as one zip
+section_header(
+    "Download",
+    "Zip includes Summary.csv, Score.csv, and every `.parquet` in the run folder (only files that exist).",
+)
+dl_run_name = st.selectbox("Run to download", run_names, key="dl_run_select")
+dl_path, dl_err = resolve_run_subdirectory(dl_run_name)
+if dl_err:
+    st.error(dl_err)
+else:
+    assert dl_path is not None
+    to_zip: list[tuple[Path, str]] = []
+    summary_file = dl_path / "Summary.csv"
+    score_file = dl_path / "Score.csv"
+    if summary_file.is_file():
+        to_zip.append((summary_file, "Summary.csv"))
+    if score_file.is_file():
+        to_zip.append((score_file, "Score.csv"))
+    for pq in sorted(dl_path.glob("*.parquet"), key=lambda p: p.name.lower()):
+        to_zip.append((pq, pq.name))
+
+    if not to_zip:
+        st.info("This run has no Summary.csv, Score.csv, or `.parquet` files at the top level.")
+    else:
+        st.caption(f"**{len(to_zip)}** file(s) will be included: {', '.join(arc for _, arc in to_zip)}")
+        buf = io.BytesIO()
+        zip_errors: list[str] = []
+        included: list[str] = []
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for fpath, arcname in to_zip:
+                try:
+                    zf.write(fpath, arcname=arcname)
+                    included.append(arcname)
+                except OSError as e:
+                    zip_errors.append(f"{arcname}: {e}")
+        for msg in zip_errors:
+            st.warning(msg)
+        if included:
+            safe_stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", dl_run_name).strip() or "run"
+            zip_name = f"{safe_stem}_artifacts.zip"
+            st.download_button(
+                label=f"Download {zip_name}",
+                data=buf.getvalue(),
+                file_name=zip_name,
+                mime="application/zip",
+                key=f"dm_dl_zip_{dl_run_name}",
+            )
+        else:
+            st.error("Could not add any files to the zip.")
+
 # Delete section
-section_header("Delete a run", "Permanent — frees disk space. Use with care on shared servers.")
+section_header("Delete", "Permanent — frees disk space. Use with care on shared servers.")
 del_run_name = st.selectbox(
     "Run to delete",
     options=run_names,

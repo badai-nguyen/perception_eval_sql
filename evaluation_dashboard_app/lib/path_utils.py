@@ -184,26 +184,36 @@ def get_run_info(run_path: Path) -> dict:
     }
 
 
+def resolve_run_subdirectory(run_name: str) -> Tuple[Optional[Path], str]:
+    """
+    Resolve a run directory by name (must be a direct child of data root).
+    Returns (path, "") on success, or (None, error_message).
+    """
+    root = get_data_root()
+    if not run_name or run_name.strip() != run_name:
+        return None, "Invalid run name."
+    if os.sep in run_name or "/" in run_name or ".." in run_name:
+        return None, "Invalid run name."
+    run_path = root / run_name
+    if not run_path.exists():
+        return None, f"Run does not exist: {run_name}"
+    if not run_path.is_dir():
+        return None, "Not a directory."
+    try:
+        run_path.relative_to(root)
+    except ValueError:
+        return None, "Run is not under data root."
+    return run_path, ""
+
+
 def delete_run(run_name: str) -> Tuple[bool, str]:
     """
     Delete a run directory by name (must be a direct child of data root).
     Returns (success, message).
     """
-    root = get_data_root()
-    if not run_name or run_name.strip() != run_name:
-        return False, "Invalid run name."
-    # Avoid path traversal: only allow a single path component
-    if os.sep in run_name or "/" in run_name or ".." in run_name:
-        return False, "Invalid run name."
-    run_path = root / run_name
-    if not run_path.exists():
-        return False, f"Run does not exist: {run_name}"
-    if not run_path.is_dir():
-        return False, "Not a directory."
-    try:
-        run_path.relative_to(root)
-    except ValueError:
-        return False, "Run is not under data root."
+    run_path, err = resolve_run_subdirectory(run_name)
+    if err:
+        return False, err
     try:
         import shutil
         shutil.rmtree(run_path)
