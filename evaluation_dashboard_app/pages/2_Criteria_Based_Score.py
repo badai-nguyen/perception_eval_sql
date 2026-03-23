@@ -56,6 +56,50 @@ def _plotly_apply_theme(fig, title: str, height: int = 440) -> None:
     fig.update_yaxes(showgrid=True, gridcolor="rgba(148,163,184,0.25)", zeroline=False)
 
 
+def _safe_default(default_lst, options_lst):
+    """Keep only defaults that still exist in options (avoids Streamlit multiselect errors)."""
+    if not isinstance(default_lst, list):
+        default_lst = list(default_lst) if default_lst is not None else []
+    options_set = set(options_lst)
+    return [x for x in default_lst if x in options_set]
+
+
+def _perception_label_options_from_runs(*runs) -> list:
+    pl: set = set()
+    for run in runs:
+        if not run:
+            continue
+        summary = run.get("summary")
+        if summary is None or "perception_label" not in summary.columns:
+            continue
+        pl.update(
+            x for x in summary["perception_label"].dropna().unique() if str(x).strip() != ""
+        )
+    return sorted(pl)
+
+
+def _filter_df_view_by_perception_labels(
+    df_view: pd.DataFrame,
+    summary: pd.DataFrame | None,
+    selected_labels: list,
+) -> pd.DataFrame:
+    """Restrict Score rows to scenarios whose Summary perception_label is selected (Overview-style)."""
+    if not selected_labels or df_view is None or df_view.empty:
+        return df_view
+    if summary is None or summary.empty or "perception_label" not in summary.columns:
+        return df_view
+    if "id" not in summary.columns or "Scenario" not in df_view.columns:
+        return df_view
+    s = summary[["id", "perception_label"]].copy()
+    s["id"] = s["id"].astype(str)
+    s = s[s["perception_label"].notna() & (s["perception_label"].astype(str).str.strip() != "")]
+    s = s[s["perception_label"].isin(selected_labels)]
+    allowed = set(s["id"].unique())
+    if not allowed:
+        return df_view.iloc[0:0].copy()
+    return df_view.loc[df_view["Scenario"].astype(str).isin(allowed)].copy()
+
+
 # =========================
 # Safety check
 # =========================
@@ -191,6 +235,28 @@ abs_gates_enabled = st.sidebar.checkbox(
     help="Count scenarios that pass/fail fixed thresholds (pass rate 0–100; optional 2nd metric).",
 )
 with st.sidebar.expander("Absolute pass/fail gates", expanded=abs_gates_enabled):
+    _label_runs = [runA]
+    if mode == "Compare Mode" and runB:
+        _label_runs.append(runB)
+    perception_labels_gate = _perception_label_options_from_runs(*_label_runs)
+    if not perception_labels_gate:
+        st.caption("No perception labels in Summary.csv — gate filter unavailable for this run.")
+        abs_gate_perception_labels: list = []
+    else:
+        prev_pg = st.session_state.get("selected_perception_labels", perception_labels_gate)
+        safe_pg = _safe_default(prev_pg, perception_labels_gate)
+        st.session_state["selected_perception_labels"] = safe_pg
+        abs_gate_perception_labels = st.multiselect(
+            "Perception Label Filter",
+            perception_labels_gate,
+            default=safe_pg,
+            key="criteria_abs_gates_perception_filter",
+            help=(
+                "Limit gate evaluation to scenarios whose perception label appears in Summary.csv "
+                "(same idea as Overview). Clear all selections to include every scenario."
+            ),
+        )
+        st.session_state["selected_perception_labels"] = abs_gate_perception_labels
 
     abs_pass_min = st.number_input(
         "Minimum pass rate (%)",
@@ -466,8 +532,18 @@ if mode == "Compare Mode":
 
     _render_absolute_gates_section(
         [
-            ("Baseline (A)", df_view_A),
-            ("Candidate (B)", df_view_B),
+            (
+                "Baseline (A)",
+                _filter_df_view_by_perception_labels(
+                    df_view_A, runA.get("summary"), abs_gate_perception_labels
+                ),
+            ),
+            (
+                "Candidate (B)",
+                _filter_df_view_by_perception_labels(
+                    df_view_B, runB.get("summary"), abs_gate_perception_labels
+                ),
+            ),
         ],
         criteria_idx=criteria_idx,
         criteria_count=CRITERIA_COUNT,
@@ -729,7 +805,14 @@ else:
     col3.metric("Pass rate median", f"{median_pass:.3f}")
 
     _render_absolute_gates_section(
-        [("Current run", df_view)],
+        [
+            (
+                "Current run",
+                _filter_df_view_by_perception_labels(
+                    df_view, runA.get("summary"), abs_gate_perception_labels
+                ),
+            ),
+        ],
         criteria_idx=criteria_idx,
         criteria_count=CRITERIA_COUNT,
     )
