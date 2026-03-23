@@ -27,9 +27,15 @@ st.set_page_config(
 )
 
 
-# Plotly theme (A/B palette aligned with run cards)
-_PX_COLOR_RUN = {"Baseline (A)": "#312e81", "Candidate (B)": "#0f766e"}
+# Plotly theme (multi-run palette aligned with Overview / run cards)
+_COMPARE_RUN_COLORS = ["#312e81", "#0f766e", "#e86a33", "#6b8e23", "#9b59b6", "#1abc9c"]
 _PX_COLOR_QUAL = px.colors.qualitative.Bold
+
+
+def _px_color_map_for_runs(run_labels: list[str]) -> dict[str, str]:
+    """Map Run column values (Baseline (A), Candidate (B), …) to colors."""
+    names = [f"Baseline ({run_labels[0]})"] + [f"Candidate ({lbl})" for lbl in run_labels[1:]]
+    return {n: _COMPARE_RUN_COLORS[i % len(_COMPARE_RUN_COLORS)] for i, n in enumerate(names)}
 
 
 def _plotly_apply_theme(fig, title: str, height: int = 440) -> None:
@@ -140,24 +146,37 @@ if df_raw_A is None:
     st.warning("This run has no **Score.csv**. Load a run that includes Score.csv for this page. Detection Stats and Bounding Box Viewer work with parquet-only runs.")
     st.stop()
 
-runB = st.session_state.get("runB")
-df_raw_B = runB["score"] if runB else None
+compare_runs: list | None = None
+compare_labels: list[str] | None = None
+if mode == "Compare Mode":
+    all_runs = st.session_state.get("all_runs")
+    run_labels_ss = st.session_state.get("run_labels")
+    if (
+        all_runs
+        and run_labels_ss
+        and len(all_runs) == len(run_labels_ss)
+        and len(all_runs) >= 2
+        and all(r is not None and r.get("score") is not None for r in all_runs)
+    ):
+        compare_runs = all_runs
+        compare_labels = list(run_labels_ss)
+    else:
+        runB = st.session_state.get("runB")
+        if not runB or runB.get("score") is None:
+            st.warning("Compare Mode requires candidate run(s) with Score.csv from the Overview page.")
+            st.stop()
+        compare_runs = [runA, runB]
+        compare_labels = ["A", "B"]
 
 inject_app_page_styles()
 
-_path_b = path_display(runB["path"]) if runB else None
-if mode == "Compare Mode" and _path_b:
-    _ld_entries = [
-        ("Baseline · A", path_display(runA["path"])),
-        ("Candidate · B", _path_b),
-    ]
+if mode == "Compare Mode" and compare_runs and compare_labels:
+    _ld_entries = [(f"Baseline · {compare_labels[0]}", path_display(compare_runs[0]["path"]))]
+    for i in range(1, len(compare_runs)):
+        _ld_entries.append((f"Candidate · {compare_labels[i]}", path_display(compare_runs[i]["path"])))
+    render_loaded_data_section(_ld_entries)
 else:
-    _ld_entries = [("Current run", path_display(runA["path"]))]
-render_loaded_data_section(_ld_entries)
-if mode == "Compare Mode":
-    if df_raw_B is None:
-        st.warning("Compare Mode requires a Candidate (B) run from the Overview page.")
-        st.stop()
+    render_loaded_data_section([("Current run", path_display(runA["path"]))])
 # =========================
 # Constants
 # =========================
@@ -208,8 +227,8 @@ NUM_COLS = [
 ]
 
 _criteria_n_a = infer_criteria_count(df_raw_A, BLOCK_SIZE)
-if mode == "Compare Mode" and df_raw_B is not None:
-    CRITERIA_COUNT = min(_criteria_n_a, infer_criteria_count(df_raw_B, BLOCK_SIZE))
+if mode == "Compare Mode" and compare_runs:
+    CRITERIA_COUNT = min(infer_criteria_count(r["score"], BLOCK_SIZE) for r in compare_runs)
 else:
     CRITERIA_COUNT = _criteria_n_a
 
@@ -260,9 +279,7 @@ abs_gates_enabled = st.sidebar.checkbox(
     help="Count scenarios that pass/fail fixed thresholds (pass rate 0–100; optional 2nd metric).",
 )
 with st.sidebar.expander("Absolute pass/fail gates", expanded=abs_gates_enabled):
-    _label_runs = [runA]
-    if mode == "Compare Mode" and runB:
-        _label_runs.append(runB)
+    _label_runs = compare_runs if mode == "Compare Mode" and compare_runs else [runA]
     perception_labels_gate = _perception_label_options_from_runs(*_label_runs)
     if not perception_labels_gate:
         st.caption("No perception labels in Summary.csv — gate filter unavailable for this run.")
@@ -283,26 +300,25 @@ with st.sidebar.expander("Absolute pass/fail gates", expanded=abs_gates_enabled)
         )
         st.session_state["selected_perception_labels"] = abs_gate_perception_labels
 
-    _pool_a = _filter_df_view_by_perception_labels(
-        build_view(df_raw_A, criteria_idx),
-        runA.get("summary"),
-        abs_gate_perception_labels,
-    )
+    _pools = []
+    for run in _label_runs:
+        _pools.append(
+            _filter_df_view_by_perception_labels(
+                build_view(run["score"], criteria_idx),
+                run.get("summary"),
+                abs_gate_perception_labels,
+            )
+        )
     _scen_pool_a = (
-        sorted(_pool_a["Scenario"].astype(str).unique().tolist()) if not _pool_a.empty else []
+        sorted(_pools[0]["Scenario"].astype(str).unique().tolist()) if _pools and not _pools[0].empty else []
     )
-    if mode == "Compare Mode" and df_raw_B is not None:
-        _pool_b = _filter_df_view_by_perception_labels(
-            build_view(df_raw_B, criteria_idx),
-            runB.get("summary"),
-            abs_gate_perception_labels,
-        )
-        _scen_pool_b = (
-            sorted(_pool_b["Scenario"].astype(str).unique().tolist()) if not _pool_b.empty else []
-        )
-        # Candidate (B) is limited to scenarios in the baseline perception-filtered pool, then
-        # scenario list is the overlap (both runs, each after its own label filter).
-        scenario_gate_options = sorted(set(_scen_pool_a) & set(_scen_pool_b))
+    if len(_pools) > 1:
+        set_lists = [
+            set(p["Scenario"].astype(str).unique())
+            for p in _pools
+            if not p.empty and "Scenario" in p.columns
+        ]
+        scenario_gate_options = sorted(set.intersection(*set_lists)) if set_lists else []
     else:
         scenario_gate_options = _scen_pool_a
 
@@ -961,58 +977,65 @@ def _render_absolute_gates_section(
         )
 
 
-if mode == "Compare Mode":
-    df_view_A = build_view(df_raw_A, criteria_idx)
-    df_view_B = build_view(df_raw_B, criteria_idx)
-
-    df_view_A["Run"] = "Baseline (A)"
-    df_view_B["Run"] = "Candidate (B)"
-    df_compare = pd.concat([df_view_A, df_view_B], axis=0, ignore_index=True)
+if mode == "Compare Mode" and compare_runs and compare_labels:
+    cl = compare_labels
+    _px_map = _px_color_map_for_runs(cl)
+    run_names = [f"Baseline ({cl[0]})"] + [f"Candidate ({cl[i]})" for i in range(1, len(cl))]
+    df_views = [build_view(r["score"], criteria_idx) for r in compare_runs]
+    for dv, rn in zip(df_views, run_names):
+        dv["Run"] = rn
+    df_compare = pd.concat(df_views, axis=0, ignore_index=True)
+    df_view_A = df_views[0]
+    cand_only = cl[1:]
+    if len(cand_only) > 1:
+        focus_cand = st.selectbox(
+            "Candidate for Δ vs baseline (Delta tab & per-scenario Δ chart)",
+            cand_only,
+            index=0,
+            key="criteria_delta_focus_candidate",
+        )
+    else:
+        focus_cand = cand_only[0]
+    focus_idx = cl.index(focus_cand)
+    df_view_focus = df_views[focus_idx]
 
     if show_debug:
-        st.subheader("Raw Data Check — Baseline (A)")
-        st.dataframe(df_raw_A.head(10), width="stretch")
-        st.subheader("Raw Data Check — Candidate (B)")
-        st.dataframe(df_raw_B.head(10), width="stretch")
-        st.subheader(f"Criteria {criteria_idx} Data — Baseline (A)")
-        st.dataframe(df_view_A, width="stretch")
-        st.subheader(f"Criteria {criteria_idx} Data — Candidate (B)")
-        st.dataframe(df_view_B, width="stretch")
+        for i, r in enumerate(compare_runs):
+            tag = run_names[i]
+            st.subheader(f"Raw Data Check — {tag}")
+            st.dataframe(r["score"].head(10), width="stretch")
+            st.subheader(f"Criteria {criteria_idx} Data — {tag}")
+            st.dataframe(df_views[i], width="stretch")
 
     section_header("Run summary", "Rows loaded and **mean pass rate** (practical pass %, 0–100) per run.")
-    count_a = len(df_view_A)
-    count_b = len(df_view_B)
-    mean_a = df_view_A["pass_rate"].mean() if count_a else 0.0
-    mean_b = df_view_B["pass_rate"].mean() if count_b else 0.0
-    delta_mean = mean_b - mean_a
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Rows (A)", f"{count_a:,}")
-    col2.metric("Rows (B)", f"{count_b:,}")
-    col3.metric("Pass rate mean (A)", f"{mean_a:.3f}")
-    col4.metric("Pass rate mean (B)", f"{mean_b:.3f}", f"{delta_mean:+.3f}")
+    n_r = len(df_views)
+    row_cols = st.columns(min(n_r, 6))
+    for i, dv in enumerate(df_views):
+        with row_cols[i % len(row_cols)]:
+            st.metric(f"Rows ({cl[i]})", f"{len(dv):,}")
+    mean_base = df_views[0]["pass_rate"].mean() if len(df_views[0]) else 0.0
+    pr_cols_m = st.columns(min(n_r, 6))
+    for i, dv in enumerate(df_views):
+        with pr_cols_m[i % len(pr_cols_m)]:
+            m = dv["pass_rate"].mean() if len(dv) else 0.0
+            if i == 0:
+                st.metric(f"Pass mean ({cl[i]})", f"{m:.3f}")
+            else:
+                st.metric(f"Pass mean ({cl[i]})", f"{m:.3f}", f"{m - mean_base:+.3f}")
 
+    baseline_scen_restrict = set(_scen_pool_a)
+    gate_run_specs = []
+    for i, run in enumerate(compare_runs):
+        filtered = _apply_gate_data_filters(
+            df_views[i],
+            run.get("summary"),
+            abs_gate_perception_labels,
+            abs_gate_selected_scenarios,
+            restrict_scenarios_to=baseline_scen_restrict if i > 0 else None,
+        )
+        gate_run_specs.append((run_names[i], filtered))
     _render_absolute_gates_section(
-        [
-            (
-                "Baseline (A)",
-                _apply_gate_data_filters(
-                    df_view_A,
-                    runA.get("summary"),
-                    abs_gate_perception_labels,
-                    abs_gate_selected_scenarios,
-                ),
-            ),
-            (
-                "Candidate (B)",
-                _apply_gate_data_filters(
-                    df_view_B,
-                    runB.get("summary"),
-                    abs_gate_perception_labels,
-                    abs_gate_selected_scenarios,
-                    restrict_scenarios_to=set(_scen_pool_a),
-                ),
-            ),
-        ],
+        gate_run_specs,
         criteria_idx=criteria_idx,
         criteria_count=CRITERIA_COUNT,
     )
@@ -1020,19 +1043,22 @@ if mode == "Compare Mode":
     st.markdown(
         '<p style="margin:0.5rem 0 0.35rem 0;font-size:1.05rem;font-weight:800;color:#0f172a;">Compare workspace</p>'
         '<p style="margin:0 0 0.6rem 0;color:#64748b;font-size:0.9rem;">'
-        "<strong>Overlay</strong> — A and B on the same charts · "
-        "<strong>Delta</strong> — row-wise <strong>B − A</strong> after matching keys.</p>",
+        "<strong>Overlay</strong> — all selected runs · "
+        "<strong>Delta</strong> — row-wise chosen candidate minus baseline after matching keys.</p>",
         unsafe_allow_html=True,
     )
-    tab_ov, tab_dl = st.tabs(["Overlay: A vs B", "Delta: B − A"])
+    tab_ov, tab_dl = st.tabs(["Overlay: all runs", f"Delta: {focus_cand} - A"])
 
     with tab_ov:
-        section_header(f"{metric} distribution", "Semi-transparent overlay — Baseline (indigo) vs Candidate (teal).")
+        section_header(
+            f"{metric} distribution",
+            "Semi-transparent overlay — colors follow the run legend.",
+        )
         fig = px.histogram(
             df_compare,
             x=metric,
             color="Run",
-            color_discrete_map=_PX_COLOR_RUN,
+            color_discrete_map=_px_map,
             nbins=30,
             barmode="overlay",
             opacity=0.55,
@@ -1043,8 +1069,7 @@ if mode == "Compare Mode":
 
         section_header(f"Average {metric} by {group_by}", "Grouped means — compare runs side-by-side.")
         df_avg = (
-            df_compare
-            .groupby([group_by, "Run"], as_index=False)[metric]
+            df_compare.groupby([group_by, "Run"], as_index=False)[metric]
             .mean()
             .sort_values(metric, ascending=False)
         )
@@ -1053,7 +1078,7 @@ if mode == "Compare Mode":
             x=group_by,
             y=metric,
             color="Run",
-            color_discrete_map=_PX_COLOR_RUN,
+            color_discrete_map=_px_map,
             barmode="group",
             text_auto=".2f",
         )
@@ -1066,50 +1091,82 @@ if mode == "Compare Mode":
             x=group_by,
             y="pass_rate",
             color="Run",
-            color_discrete_map=_PX_COLOR_RUN,
+            color_discrete_map=_px_map,
             points="all",
         )
         _plotly_apply_theme(fig, "Pass rate overview")
         st.plotly_chart(fig, width="stretch")
 
-        # ---- Improved Per Scenario Pass Rate Compare Plot ----
-        section_header("Per-scenario pass rate", "Same scenario on both runs — filter to focus on regressions or wins.")
+        section_header(
+            "Per-scenario pass rate",
+            "Scenarios present in every run (inner join) — filter to focus on regressions or wins.",
+        )
+        merges = []
+        for i, lbl in enumerate(cl):
+            g = df_views[i].groupby("Scenario", as_index=False)["pass_rate"].mean()
+            g = g.rename(columns={"pass_rate": f"pr_{lbl}"})
+            merges.append(g)
+        per_scenario = merges[0]
+        for g in merges[1:]:
+            per_scenario = per_scenario.merge(g, on="Scenario", how="inner")
+        pr_base = f"pr_{cl[0]}"
+        delta_col = f"delta_{focus_cand}"
+        for lbl in cand_only:
+            per_scenario[f"delta_{lbl}"] = per_scenario[f"pr_{lbl}"] - per_scenario[pr_base]
 
-        per_scenario_A = df_view_A.groupby("Scenario", as_index=False)["pass_rate"].mean()
-        per_scenario_B = df_view_B.groupby("Scenario", as_index=False)["pass_rate"].mean()
-        per_scenario = per_scenario_A.merge(per_scenario_B, on="Scenario", suffixes=("_A", "_B"))
-        per_scenario["delta"] = per_scenario["pass_rate_B"] - per_scenario["pass_rate_A"]
-
-        # Let user filter/sort the scenario comparison by various methods to make it easier to see
         filter_method = st.radio(
-            "Scenario Filter/Sort", 
-            ["All", "Top N by Delta", "Top N by Baseline (A)", "Custom contains string"],
+            "Scenario Filter/Sort",
+            [
+                "All",
+                "Top N by Delta",
+                "Top N by Baseline",
+                "Custom contains string",
+            ],
             horizontal=True,
         )
 
         if filter_method == "Top N by Delta":
-            N = st.number_input("Show Top N Scenarios by Delta (|delta|):", min_value=5, max_value=100, value=20)
-            per_scenario = per_scenario.reindex(per_scenario["delta"].abs().sort_values(ascending=False).index)
-            per_scenario_vis = per_scenario.head(N)
-        elif filter_method == "Top N by Baseline (A)":
-            N = st.number_input("Show Top N Scenarios by Baseline (A) Pass Rate:", min_value=5, max_value=100, value=20)
-            per_scenario = per_scenario.sort_values("pass_rate_A", ascending=False)
-            per_scenario_vis = per_scenario.head(N)
+            N = st.number_input(
+                f"Show Top N Scenarios by |Δ pass rate| ({focus_cand} − A):",
+                min_value=5,
+                max_value=100,
+                value=20,
+                key="crit_topn_delta",
+            )
+            per_scenario = per_scenario.reindex(
+                per_scenario[delta_col].abs().sort_values(ascending=False).index
+            )
+            per_scenario_vis = per_scenario.head(int(N))
+        elif filter_method == "Top N by Baseline":
+            N = st.number_input(
+                f"Show Top N Scenarios by Baseline ({cl[0]}) Pass Rate:",
+                min_value=5,
+                max_value=100,
+                value=20,
+                key="crit_topn_base",
+            )
+            per_scenario = per_scenario.sort_values(pr_base, ascending=False)
+            per_scenario_vis = per_scenario.head(int(N))
         elif filter_method == "Custom contains string":
             search = st.text_input("Show scenarios with name containing (case-insensitive):", "")
-            per_scenario_vis = per_scenario[per_scenario["Scenario"].str.contains(search, case=False, na=False)] if search else per_scenario
+            per_scenario_vis = (
+                per_scenario[per_scenario["Scenario"].str.contains(search, case=False, na=False)]
+                if search
+                else per_scenario
+            )
         else:
             per_scenario_vis = per_scenario.copy()
 
-        # Use bar plot instead of scatter, for more useful comparison if there are many scenarios
+        pr_cols_melt = [f"pr_{lbl}" for lbl in cl]
+        col_to_run = {f"pr_{lbl}": run_names[i] for i, lbl in enumerate(cl)}
         per_scenario_vis_long = pd.melt(
             per_scenario_vis,
             id_vars=["Scenario"],
-            value_vars=["pass_rate_A", "pass_rate_B"],
-            var_name="Run",
+            value_vars=pr_cols_melt,
+            var_name="_k",
             value_name="pass_rate",
         )
-        per_scenario_vis_long["Run"] = per_scenario_vis_long["Run"].map({"pass_rate_A": "Baseline (A)", "pass_rate_B": "Candidate (B)"})
+        per_scenario_vis_long["Run"] = per_scenario_vis_long["_k"].map(col_to_run)
         per_scenario_vis_long = per_scenario_vis_long.sort_values(["Scenario", "Run"])
 
         fig = px.bar(
@@ -1117,51 +1174,54 @@ if mode == "Compare Mode":
             x="Scenario",
             y="pass_rate",
             color="Run",
-            color_discrete_map=_PX_COLOR_RUN,
+            color_discrete_map=_px_map,
             barmode="group",
             text_auto=".2f",
         )
         _plotly_apply_theme(fig, "Per-scenario pass rate (filtered)")
         st.plotly_chart(fig, width="stretch")
 
-        # Show the delta for each scenario as a separate barplot below, sorted by delta
-        section_header("Per-scenario delta (B − A)", "Green = improvement on B; red = regression vs baseline.")
+        section_header(
+            f"Per-scenario delta ({focus_cand} − A)",
+            f"Green = higher pass rate on {focus_cand}; red = regression vs baseline.",
+        )
         fig2 = px.bar(
-            per_scenario_vis.sort_values("delta", key=abs, ascending=False),
+            per_scenario_vis.reindex(per_scenario_vis[delta_col].abs().sort_values(ascending=False).index),
             x="Scenario",
-            y="delta",
-            color="delta",
+            y=delta_col,
+            color=delta_col,
             color_continuous_scale="RdYlGn",
             text_auto=".2f",
         )
         _plotly_apply_theme(fig2, "Pass rate delta by scenario")
         st.plotly_chart(fig2, width="stretch")
 
-        # Optionally show a table for the user to inspect
-        with st.expander("Show Table: Per Scenario Pass Rates and Delta"):
-            # Show dataframe with delta values, but avoid styling due to colormap compatibility issue
-            st.dataframe(
-                per_scenario_vis[["Scenario", "pass_rate_A", "pass_rate_B", "delta"]],
-                width="stretch"
-            )
+        table_cols = ["Scenario"] + pr_cols_melt + [f"delta_{lbl}" for lbl in cand_only]
+        table_cols = [c for c in table_cols if c in per_scenario_vis.columns]
+        with st.expander("Show Table: Per Scenario Pass Rates and Deltas"):
+            st.dataframe(per_scenario_vis[table_cols], width="stretch")
 
-        # The user can still optionally "restore" the scatter plot if they want
-        if st.checkbox("Show scatter plot (Baseline (A) Pass Rate vs Candidate (B))", value=False):
+        scatter_key = f"crit_scatter_{focus_cand}"
+        if st.checkbox(
+            f"Scatter: baseline ({cl[0]}) vs candidate ({focus_cand}) pass rate",
+            value=False,
+            key=scatter_key,
+        ):
             scatter_fig = px.scatter(
                 per_scenario_vis,
-                x="pass_rate_A",
-                y="pass_rate_B",
+                x=pr_base,
+                y=f"pr_{focus_cand}",
                 text="Scenario",
                 labels={
-                    "pass_rate_A": "Baseline (A) Pass Rate",
-                    "pass_rate_B": "Candidate (B) Pass Rate",
+                    pr_base: f"Baseline ({cl[0]}) Pass Rate",
+                    f"pr_{focus_cand}": f"Candidate ({focus_cand}) Pass Rate",
                 },
-                title="Per Scenario Pass Rate: Baseline (A) vs Candidate (B) (filtered)",
+                title=f"Per scenario: baseline vs {focus_cand} (filtered)",
             )
             lim = float(
                 max(
-                    per_scenario_vis["pass_rate_A"].max(),
-                    per_scenario_vis["pass_rate_B"].max(),
+                    per_scenario_vis[pr_base].max(),
+                    per_scenario_vis[f"pr_{focus_cand}"].max(),
                     100.0,
                 )
             )
@@ -1177,10 +1237,12 @@ if mode == "Compare Mode":
             )
             scatter_fig.update_xaxes(range=[0, lim])
             scatter_fig.update_yaxes(range=[0, lim])
-            scatter_fig.update_traces(textposition="top center", marker=dict(size=10, line=dict(width=0.5, color="white")))
-            _plotly_apply_theme(scatter_fig, "A vs B pass rate (parity line = equal)")
+            scatter_fig.update_traces(
+                textposition="top center",
+                marker=dict(size=10, line=dict(width=0.5, color="white")),
+            )
+            _plotly_apply_theme(scatter_fig, "Baseline vs candidate pass rate (parity line = equal)")
             st.plotly_chart(scatter_fig, width="stretch")
-        # ---- End Improved Per Scenario Pass Rate Compare Plot ----
 
         st.download_button(
             "Download overlay data (CSV)",
@@ -1192,7 +1254,7 @@ if mode == "Compare Mode":
 
     with tab_dl:
         merged = df_view_A.merge(
-            df_view_B,
+            df_view_focus,
             on=BASE_COLS,
             suffixes=("_A", "_B"),
             how="inner",
@@ -1200,7 +1262,10 @@ if mode == "Compare Mode":
         merged[f"{metric}_delta"] = merged[f"{metric}_B"] - merged[f"{metric}_A"]
         merged["pass_rate_delta"] = merged["pass_rate_B"] - merged["pass_rate_A"]
 
-        section_header(f"{metric} delta distribution", "How much B differs from A on the same row (inner join on Scenario/Option/GT_OBJ).")
+        section_header(
+            f"{metric} delta distribution",
+            f"How much {focus_cand} differs from baseline on the same row (inner join on Scenario/Option/GT_OBJ).",
+        )
         fig = px.histogram(
             merged,
             x=f"{metric}_delta",
@@ -1208,13 +1273,12 @@ if mode == "Compare Mode":
             marginal="box",
             color_discrete_sequence=["#0d9488"],
         )
-        _plotly_apply_theme(fig, f"Δ {metric} (B − A)")
+        _plotly_apply_theme(fig, f"Δ {metric} ({focus_cand} − A)")
         st.plotly_chart(fig, width="stretch")
 
         section_header(f"Mean Δ {metric} by {group_by}", "Where the shift concentrates across labels.")
         df_delta = (
-            merged
-            .groupby(group_by, as_index=False)[f"{metric}_delta"]
+            merged.groupby(group_by, as_index=False)[f"{metric}_delta"]
             .mean()
             .sort_values(f"{metric}_delta", ascending=False)
         )
@@ -1245,15 +1309,10 @@ if mode == "Compare Mode":
         top_changes = merged.copy()
         top_changes["abs_delta"] = top_changes[f"{metric}_delta"].abs()
         top_changes = top_changes.sort_values("abs_delta", ascending=False).head(20)
-        cols = BASE_COLS + [f"{metric}_A", f"{metric}_B", f"{metric}_delta"]
+        cols_show = BASE_COLS + [f"{metric}_A", f"{metric}_B", f"{metric}_delta"]
         if metric != "pass_rate":
-            cols.append("pass_rate_delta")
-        st.dataframe(
-            top_changes[
-                cols
-            ],
-            width="stretch",
-        )
+            cols_show.append("pass_rate_delta")
+        st.dataframe(top_changes[cols_show], width="stretch")
 
 else:
     df_view = build_view(df_raw_A, criteria_idx)

@@ -6,6 +6,7 @@ from lib.path_utils import get_data_root, get_data_root_display, list_run_direct
 import plotly.express as px
 import plotly.graph_objects as go
 from lib.user_config import UserConfig
+from lib.summary_compare import build_summary_delta
 from lib.page_chrome import (
     inject_app_page_styles,
     render_loaded_data_section,
@@ -55,22 +56,6 @@ PRODUCT_LABEL_JA = {
 }
 
 # ====== HELPER FUNCTIONS ======
-def build_summary_delta(df_a, df_b):
-    if "perception_label" in df_a.columns and "perception_label" in df_b.columns:
-        key_cols = ["id", "perception_label"]
-    else:
-        key_cols = ["id"]
-
-    df_a, df_b = df_a.set_index(key_cols), df_b.set_index(key_cols)
-    common_idx = df_a.index.intersection(df_b.index)
-    result = pd.DataFrame(index=common_idx)
-    metrics = ["TP", "xstd", "ystd", "xrms", "yrms", "vx", "vy"]
-    for m in metrics:
-        result[m] = df_a.loc[common_idx, m]
-        result[f"{m}_B"] = df_b.loc[common_idx, m]
-        result[f"{m}_delta"] = df_b.loc[common_idx, m] - df_a.loc[common_idx, m]
-    return result.reset_index()
-
 def _safe_default(default_lst, options_lst):
     # Returns only those elements from default_lst that are also in options_lst
     # both expected to be list-like objects of hashables

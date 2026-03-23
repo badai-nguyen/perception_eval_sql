@@ -127,47 +127,23 @@ def render_loaded_data_section(entries: Sequence[Tuple[str, str]]) -> None:
         )
         return
 
-    if n == 2:
-        (la0, pa0), (la1, pa1) = safe[0], safe[1]
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown(
-                f"""
-                <div style="border-radius:14px;border-left:5px solid #312e81;background:linear-gradient(90deg,#f8fafc 0%,#fff 100%);padding:0.95rem 1.1rem;min-height:4.5rem;">
-                  <div style="font-size:0.68rem;text-transform:uppercase;letter-spacing:0.1em;color:#64748b;font-weight:700;">{la0}</div>
-                  <div style="margin-top:0.35rem;font-family:ui-monospace,monospace;font-size:0.82rem;color:#0f172a;word-break:break-all;line-height:1.4;">{pa0}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        with c2:
-            st.markdown(
-                f"""
-                <div style="border-radius:14px;border-left:5px solid #0f766e;background:linear-gradient(90deg,#f0fdfa 0%,#fff 100%);padding:0.95rem 1.1rem;min-height:4.5rem;">
-                  <div style="font-size:0.68rem;text-transform:uppercase;letter-spacing:0.1em;color:#64748b;font-weight:700;">{la1}</div>
-                  <div style="margin-top:0.35rem;font-family:ui-monospace,monospace;font-size:0.82rem;color:#0f172a;word-break:break-all;line-height:1.4;">{pa1}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        return
-
-    parts = []
-    for i, (la, pa) in enumerate(safe):
+    # Two or more runs: one markdown per column. A single st.markdown with multiple
+    # sibling divs is unreliable in Streamlit (markdown pass often leaves only the
+    # first block as HTML; the rest appears as raw markup).
+    cols = st.columns(n)
+    for i, col in enumerate(cols):
+        la, pa = safe[i]
         acc = _MULTI_ACCENTS[i % len(_MULTI_ACCENTS)]
-        parts.append(
-            f"""
-            <div style="flex:1;min-width:240px;border-radius:14px;border-left:5px solid {acc};
-                        background:linear-gradient(90deg,#f8fafc 0%,#fff 100%);padding:0.95rem 1.1rem;">
-              <div style="font-size:0.68rem;text-transform:uppercase;letter-spacing:0.1em;color:#64748b;font-weight:700;">{la}</div>
-              <div style="margin-top:0.35rem;font-family:ui-monospace,monospace;font-size:0.82rem;color:#0f172a;word-break:break-all;line-height:1.4;">{pa}</div>
-            </div>
-            """
-        )
-    st.markdown(
-        f'<div style="display:flex;flex-wrap:wrap;gap:12px;align-items:stretch;">{"".join(parts)}</div>',
-        unsafe_allow_html=True,
-    )
+        with col:
+            st.markdown(
+                f"""
+                <div style="border-radius:14px;border-left:5px solid {acc};background:linear-gradient(90deg,#f8fafc 0%,#fff 100%);padding:0.95rem 1.1rem;min-height:4.5rem;">
+                  <div style="font-size:0.68rem;text-transform:uppercase;letter-spacing:0.1em;color:#64748b;font-weight:700;">{la}</div>
+                  <div style="margin-top:0.35rem;font-family:ui-monospace,monospace;font-size:0.82rem;color:#0f172a;word-break:break-all;line-height:1.4;">{pa}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
 
 def render_page_hero(
@@ -184,7 +160,7 @@ def render_page_hero(
     kicker / title / description: plain text (HTML-escaped).
     secondary_badge_inner_html: optional inner HTML for a second pill (trusted caller only).
     """
-    badge = "Compare A vs B" if mode == "Compare Mode" else "Single run"
+    badge = "Compare runs" if mode == "Compare Mode" else "Single run"
     k, t, d = html.escape(kicker), html.escape(title), html.escape(description)
     second = ""
     has_secondary = bool(secondary_badge_inner_html)
