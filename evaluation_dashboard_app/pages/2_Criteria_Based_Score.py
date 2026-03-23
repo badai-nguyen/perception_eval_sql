@@ -100,6 +100,31 @@ def _filter_df_view_by_perception_labels(
     return df_view.loc[df_view["Scenario"].astype(str).isin(allowed)].copy()
 
 
+def _filter_df_view_by_scenarios(df_view: pd.DataFrame, selected_scenarios: list) -> pd.DataFrame:
+    """Restrict to selected scenario IDs. Empty selection = no extra filter (all rows kept)."""
+    if df_view is None or df_view.empty or "Scenario" not in df_view.columns:
+        return df_view
+    if not selected_scenarios:
+        return df_view
+    allow = {str(x) for x in selected_scenarios}
+    return df_view.loc[df_view["Scenario"].astype(str).isin(allow)].copy()
+
+
+def _apply_gate_data_filters(
+    df_view: pd.DataFrame,
+    summary: pd.DataFrame | None,
+    perception_labels: list,
+    scenario_selection: list,
+    *,
+    restrict_scenarios_to: set[str] | None = None,
+) -> pd.DataFrame:
+    """Perception labels, optional clip to a scenario-id set, then optional scenario multiselect."""
+    d = _filter_df_view_by_perception_labels(df_view, summary, perception_labels)
+    if restrict_scenarios_to is not None:
+        d = d.loc[d["Scenario"].astype(str).isin(restrict_scenarios_to)].copy()
+    return _filter_df_view_by_scenarios(d, scenario_selection)
+
+
 # =========================
 # Safety check
 # =========================
@@ -257,6 +282,49 @@ with st.sidebar.expander("Absolute pass/fail gates", expanded=abs_gates_enabled)
             ),
         )
         st.session_state["selected_perception_labels"] = abs_gate_perception_labels
+
+    _pool_a = _filter_df_view_by_perception_labels(
+        build_view(df_raw_A, criteria_idx),
+        runA.get("summary"),
+        abs_gate_perception_labels,
+    )
+    _scen_pool_a = (
+        sorted(_pool_a["Scenario"].astype(str).unique().tolist()) if not _pool_a.empty else []
+    )
+    if mode == "Compare Mode" and df_raw_B is not None:
+        _pool_b = _filter_df_view_by_perception_labels(
+            build_view(df_raw_B, criteria_idx),
+            runB.get("summary"),
+            abs_gate_perception_labels,
+        )
+        _scen_pool_b = (
+            sorted(_pool_b["Scenario"].astype(str).unique().tolist()) if not _pool_b.empty else []
+        )
+        # Candidate (B) is limited to scenarios in the baseline perception-filtered pool, then
+        # scenario list is the overlap (both runs, each after its own label filter).
+        scenario_gate_options = sorted(set(_scen_pool_a) & set(_scen_pool_b))
+    else:
+        scenario_gate_options = _scen_pool_a
+
+    if not scenario_gate_options:
+        st.caption("No scenarios in the gate pool after perception filter — check labels or data.")
+        abs_gate_selected_scenarios: list = []
+    else:
+        prev_sc = st.session_state.get("criteria_abs_gate_selected_scenarios", scenario_gate_options)
+        safe_sc = _safe_default(prev_sc, scenario_gate_options)
+        st.session_state["criteria_abs_gate_selected_scenarios"] = safe_sc
+        abs_gate_selected_scenarios = st.multiselect(
+            "Scenario filter (gates)",
+            scenario_gate_options,
+            default=safe_sc,
+            key="criteria_abs_gates_scenario_filter_widget",
+            help=(
+                "Narrow gate evaluation to these scenario names (from Score.csv), after the perception label "
+                "filter. In compare mode the pool is **overlap only** (baseline ∩ candidate, each label-filtered). "
+                "**Clear all** to include every scenario still in the pool."
+            ),
+        )
+        st.session_state["criteria_abs_gate_selected_scenarios"] = abs_gate_selected_scenarios
 
     abs_pass_min = st.number_input(
         "Minimum pass rate (%)",
@@ -644,11 +712,13 @@ def _gate_compare_sankey_fig(
     else:
         link_kw["hovertemplate"] = "%{value:,} scenarios<extra></extra>"
 
+    _sans = "system-ui, -apple-system, 'Segoe UI', sans-serif"
     fig = go.Figure(
         data=[
             go.Sankey(
                 arrangement="snap",
                 valueformat=",",
+                textfont=dict(family=_sans, size=13, color="#0f172a"),
                 node=dict(
                     pad=28,
                     thickness=22,
@@ -668,7 +738,7 @@ def _gate_compare_sankey_fig(
     fig.update_layout(
         height=420,
         margin=dict(l=24, r=24, t=48, b=16),
-        font=dict(family="system-ui, -apple-system, 'Segoe UI', sans-serif", size=12, color="#334155"),
+        font=dict(family=_sans, size=12, color="#0f172a"),
         paper_bgcolor="rgba(248, 250, 252, 0.5)",
         title=dict(
             text="<b>Sankey</b> · hover a flow for scenario names",
@@ -925,14 +995,21 @@ if mode == "Compare Mode":
         [
             (
                 "Baseline (A)",
-                _filter_df_view_by_perception_labels(
-                    df_view_A, runA.get("summary"), abs_gate_perception_labels
+                _apply_gate_data_filters(
+                    df_view_A,
+                    runA.get("summary"),
+                    abs_gate_perception_labels,
+                    abs_gate_selected_scenarios,
                 ),
             ),
             (
                 "Candidate (B)",
-                _filter_df_view_by_perception_labels(
-                    df_view_B, runB.get("summary"), abs_gate_perception_labels
+                _apply_gate_data_filters(
+                    df_view_B,
+                    runB.get("summary"),
+                    abs_gate_perception_labels,
+                    abs_gate_selected_scenarios,
+                    restrict_scenarios_to=set(_scen_pool_a),
                 ),
             ),
         ],
@@ -1199,8 +1276,11 @@ else:
         [
             (
                 "Current run",
-                _filter_df_view_by_perception_labels(
-                    df_view, runA.get("summary"), abs_gate_perception_labels
+                _apply_gate_data_filters(
+                    df_view,
+                    runA.get("summary"),
+                    abs_gate_perception_labels,
+                    abs_gate_selected_scenarios,
                 ),
             ),
         ],

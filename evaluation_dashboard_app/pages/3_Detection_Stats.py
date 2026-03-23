@@ -493,6 +493,98 @@ _SECTION_CSS = """
 .section-block { margin-bottom: 1.5rem; }
 .run-chip { display: inline-block; background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 999px; padding: 0.35rem 0.85rem; font-size: 0.875rem; margin: 0.25rem 0.25rem 0.25rem 0; }
 .run-chip strong { color: #334155; }
+@keyframes ds-load-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@keyframes ds-load-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.78; }
+}
+@keyframes ds-banner-glow {
+  0%, 100% {
+    box-shadow:
+      0 0 0 1px rgba(13, 148, 136, 0.35),
+      0 4px 14px rgba(13, 148, 136, 0.18),
+      0 0 28px rgba(45, 212, 191, 0.12);
+  }
+  50% {
+    box-shadow:
+      0 0 0 2px rgba(13, 148, 136, 0.55),
+      0 6px 22px rgba(13, 148, 136, 0.28),
+      0 0 40px rgba(45, 212, 191, 0.22);
+  }
+}
+@keyframes ds-dot-beacon {
+  0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(20, 184, 166, 0.55); }
+  55% { transform: scale(1.12); box-shadow: 0 0 0 14px rgba(20, 184, 166, 0); }
+}
+@keyframes ds-banner-bg-shift {
+  0% { background-position: 0% 40%; }
+  100% { background-position: 100% 60%; }
+}
+.ds-page-loading-banner {
+  display: flex; align-items: flex-start; gap: 1rem;
+  padding: 1rem 1.2rem; margin: 0 0 1.15rem 0;
+  border-radius: 14px;
+  border: 2px solid #2dd4bf;
+  background: linear-gradient(125deg, #99f6e4 0%, #5eead4 22%, #a5f3fc 48%, #e0f2fe 72%, #ecfeff 100%);
+  background-size: 240% 240%;
+  animation: ds-banner-glow 2.2s ease-in-out infinite, ds-banner-bg-shift 6s ease-in-out infinite alternate;
+}
+.ds-page-loading-banner .ds-plb-head {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem 0.65rem;
+}
+.ds-page-loading-banner .ds-plb-badge {
+  flex-shrink: 0;
+  font-size: 0.62rem; font-weight: 800; letter-spacing: 0.14em; text-transform: uppercase;
+  color: #f0fdfa;
+  background: linear-gradient(135deg, #0f766e 0%, #0e7490 100%);
+  padding: 0.28rem 0.55rem; border-radius: 6px;
+  box-shadow: 0 2px 8px rgba(15, 118, 110, 0.35);
+  animation: ds-load-pulse 1.4s ease-in-out infinite;
+}
+.ds-page-loading-banner .ds-plb-text {
+  flex: 1; min-width: 0;
+  font-size: 1.08rem; font-weight: 800; color: #0f172a; letter-spacing: -0.02em;
+  line-height: 1.25;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+.ds-page-loading-banner .ds-plb-sub {
+  display: block; font-size: 0.82rem; font-weight: 600; color: #334155; margin-top: 0.35rem;
+  line-height: 1.4;
+}
+.ds-plb-shimmer-wrap {
+  height: 7px; border-radius: 999px; overflow: hidden;
+  background: rgba(15, 118, 110, 0.15); margin-top: 0.65rem;
+  border: 1px solid rgba(13, 148, 136, 0.2);
+}
+.ds-plb-shimmer {
+  height: 100%; width: 100%;
+  background: linear-gradient(
+    90deg,
+    rgba(13, 148, 136, 0) 0%,
+    rgba(13, 148, 136, 0.2) 38%,
+    rgba(6, 182, 212, 0.95) 50%,
+    rgba(13, 148, 136, 0.2) 62%,
+    rgba(13, 148, 136, 0) 100%
+  );
+  background-size: 200% 100%;
+  animation: ds-load-shimmer 1.35s ease-in-out infinite;
+}
+.ds-plb-dot {
+  width: 14px; height: 14px; border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%, #5eead4, #0d9488);
+  flex-shrink: 0; margin-top: 0.15rem;
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  animation: ds-dot-beacon 1.5s ease-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ds-page-loading-banner { animation: none; background-size: auto; }
+  .ds-plb-shimmer { animation: none; opacity: 0.85; }
+  .ds-plb-dot { animation: none; }
+  .ds-plb-badge { animation: none; }
+}
 </style>
 """
 st.markdown(_SECTION_CSS, unsafe_allow_html=True)
@@ -586,6 +678,25 @@ filters_list = [filters_base] * len(runs)
 
 # Schema flags for optional columns (confidence, velocity, etc.)
 schema = schema_flags(con, target_file)
+
+# Banner while the rest of the page (queries + charts) streams in — cleared at end of script.
+_ds_loading_banner = st.empty()
+_ds_loading_banner.markdown(
+    """
+    <div class="ds-page-loading-banner" role="status" aria-live="polite">
+      <span class="ds-plb-dot" aria-hidden="true"></span>
+      <div style="flex:1;min-width:0;">
+        <div class="ds-plb-head">
+          <span class="ds-plb-badge">In progress</span>
+          <span class="ds-plb-text">Crunching detection stats…</span>
+        </div>
+        <span class="ds-plb-sub">Hang tight — large Parquet files can take a moment. Charts and tables fill in below as they finish.</span>
+        <div class="ds-plb-shimmer-wrap"><div class="ds-plb-shimmer"></div></div>
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 # =============================
 # Main Content
@@ -2946,3 +3057,4 @@ else:
             except Exception as e:
                 st.error(f"Error (Run {lbl} − A): {e}")
 
+_ds_loading_banner.empty()
