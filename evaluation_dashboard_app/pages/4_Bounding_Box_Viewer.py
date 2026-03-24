@@ -11,6 +11,7 @@ from typing import Any, List, Optional, Tuple
 from lib.path_utils import path_display
 from lib.parquet_schema import schema_flags
 from lib.page_chrome import inject_app_page_styles, render_loaded_data_section, render_page_hero
+from lib.ui.bounding_box_viewer_ui import bev_overlay_line_and_status_legend_markup, bev_status_legend_markup
 
 st.set_page_config(
     layout="wide",
@@ -778,18 +779,7 @@ def _build_overlay_bev_figure(
 # ----------------------------
 # Status color legend (all BEV views)
 # ----------------------------
-_legend_html = (
-    '<div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; '
-    "margin-bottom:10px; padding:10px 14px; background:#f0f2f6; border-radius:8px; font-size:0.9em; "
-    "border:1px solid #e0e0e0;\">"
-    "<span style=\"font-weight:700;\">Status:</span> "
-    '<span style="background:#00cc66;color:#000;padding:2px 8px;border-radius:4px;">GT/TP</span> '
-    '<span style="background:#ff9933;color:#000;padding:2px 8px;border-radius:4px;">GT/FN</span> '
-    '<span style="background:#66b3ff;color:#000;padding:2px 8px;border-radius:4px;">EST/TP</span> '
-    '<span style="background:#ff6666;color:#fff;padding:2px 8px;border-radius:4px;">EST/FP</span>'
-    "</div>"
-)
-st.markdown(_legend_html, unsafe_allow_html=True)
+st.markdown(bev_status_legend_markup(), unsafe_allow_html=True)
 
 # ----------------------------
 # Plot (single or side-by-side for multiple runs)
@@ -809,21 +799,7 @@ elif len(files_to_load) > 1 and compare_view_mode == "overlay":
     line_names = ["——— solid", "- - - dashed", "· · · dot", "-·-· dashdot"]
     line_parts = [f"<strong>{run_lbls[i]}</strong> {line_names[i]}" for i in range(min(4, len(run_lbls)))]
     line_hint = " &nbsp;|&nbsp; ".join(line_parts)
-    color_ref = (
-        '<div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; '
-        "margin-bottom:10px; padding:10px 14px; background:#f0f2f6; border-radius:8px; font-size:0.9em; "
-        "border:1px solid #e0e0e0;\">"
-        '<span style="font-weight:700;">Line = Run:</span> '
-        f'<span>{line_hint}</span>'
-        ' &nbsp;&nbsp; '
-        '<span style="font-weight:700;">Color = Status:</span> '
-        '<span style="background:#00cc66;color:#000;padding:2px 8px;border-radius:4px;">GT/TP</span> '
-        '<span style="background:#ff9933;color:#000;padding:2px 8px;border-radius:4px;">GT/FN</span> '
-        '<span style="background:#66b3ff;color:#000;padding:2px 8px;border-radius:4px;">EST/TP</span> '
-        '<span style="background:#ff6666;color:#fff;padding:2px 8px;border-radius:4px;">EST/FP</span>'
-        "</div>"
-    )
-    st.markdown(color_ref, unsafe_allow_html=True)
+    st.markdown(bev_overlay_line_and_status_legend_markup(line_hint), unsafe_allow_html=True)
     title = f"Overlay: {selected_scenario or 'Scene'} — Frame {frame}"
     st.plotly_chart(
         _build_overlay_bev_figure(df_frame, [f[1] for f in files_to_load], title, show_invalid, hover_extra_cols=hover_extra_cols, show_velocity_arrows=show_velocity_arrows),

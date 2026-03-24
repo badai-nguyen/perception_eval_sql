@@ -1,4 +1,5 @@
 import streamlit as st
+import html
 import json
 import os
 import time
@@ -38,7 +39,13 @@ from lib.WebAPI import scenarioAPI
 from lib.user_config import UserConfig
 from lib.path_utils import get_data_root, resolve_under_data_root, to_data_relative
 from lib.eval_summary import find_eval_result_dirs, run_eval_result_for_dir, generate_summary_and_score_csv
-from lib.page_chrome import inject_app_page_styles, render_page_hero
+from lib.page_chrome import inject_app_page_styles
+from lib.ui.download_ui import (
+    ImpressiveProgressHUD,
+    render_download_hero,
+    render_download_task_section_header,
+)
+from lib.ui.styles_download import inject_download_page_styles
 from lib.db import is_task_queue_enabled, create_task, list_recent_tasks, get_task, delete_task
 from lib import download_core
 from lib.auth import get_current_user_id, is_auth_enabled
@@ -288,44 +295,66 @@ class JobResult:
         remain_list = []
         download_rows = []
         suite_output_paths = set()
+        _n_arch = len(log_dicts)
+        _hud_arch = ImpressiveProgressHUD()
         for i, log_info in enumerate(log_dicts):
             if st.session_state.get("stop_downloads"):
                 st.warning("Download stopped by user.")
                 break
-            with st.spinner(f"Downloading {i+1}/{len(log_dicts)}: {log_info['scenario_name']}"):
-                try:
-                    output_dir = self._get_output_path_for_log(log_info)
-                    suite_output_paths.add(output_dir)
-                    ok = self.download_archive_log(
-                        log_info,
-                        "archive_id",
-                        "zip",
-                        output_path=output_dir,
-                        skip_large_file=skip_large_file,
-                        large_file_mb=large_file_mb,
-                        keep_zip_files=keep_zip_files,
-                        scenario_name_counts=scenario_name_counts,
-                    )
-                    status = "downloaded" if ok else "failed"
-                    detail = "ok" if ok else "download failed"
-                except Exception as e:
-                    status = "failed"
-                    detail = str(e)
-                download_rows.append(
-                    {
-                        "suite_name": log_info.get("suite_name", ""),
-                        "suite_id": log_info.get("suite_id", ""),
-                        "archive_id": log_info["archive_id"],
-                        "result_json_id": log_info["result_json_id"],
-                        "scenario_name": log_info["scenario_name"],
-                        "scenario_id": log_info["scenario_id"],
-                        "scenario_ver": log_info["scenario_ver"],
-                        "t4_dataset_id": log_info.get("t4_dataset_id", ""),
-                        "status": status,
-                        "detail": detail,
-                    }
+            _hud_arch.show(
+                fraction=(i / _n_arch) if _n_arch else 1.0,
+                headline=f"Archive {i + 1} of {_n_arch}",
+                detail=log_info["scenario_name"],
+                foot="Pulling evaluator archives and writing ZIPs to disk…",
+            )
+            try:
+                output_dir = self._get_output_path_for_log(log_info)
+                suite_output_paths.add(output_dir)
+                ok = self.download_archive_log(
+                    log_info,
+                    "archive_id",
+                    "zip",
+                    output_path=output_dir,
+                    skip_large_file=skip_large_file,
+                    large_file_mb=large_file_mb,
+                    keep_zip_files=keep_zip_files,
+                    scenario_name_counts=scenario_name_counts,
                 )
-                remain_list.append(log_info)
+                status = "downloaded" if ok else "failed"
+                detail = "ok" if ok else "download failed"
+            except Exception as e:
+                status = "failed"
+                detail = str(e)
+            download_rows.append(
+                {
+                    "suite_name": log_info.get("suite_name", ""),
+                    "suite_id": log_info.get("suite_id", ""),
+                    "archive_id": log_info["archive_id"],
+                    "result_json_id": log_info["result_json_id"],
+                    "scenario_name": log_info["scenario_name"],
+                    "scenario_id": log_info["scenario_id"],
+                    "scenario_ver": log_info["scenario_ver"],
+                    "t4_dataset_id": log_info.get("t4_dataset_id", ""),
+                    "status": status,
+                    "detail": detail,
+                }
+            )
+            remain_list.append(log_info)
+
+        if _n_arch:
+            if st.session_state.get("stop_downloads"):
+                _hud_arch.show(
+                    fraction=len(remain_list) / _n_arch,
+                    headline="Download stopped",
+                    detail=f"{len(remain_list)} of {_n_arch} archives processed before stop.",
+                )
+            else:
+                _hud_arch.show(
+                    fraction=1.0,
+                    headline="Archive download pass complete",
+                    detail="Preparing extraction phase…",
+                )
+        _hud_arch.clear()
 
         if download_rows:
             try:
@@ -346,27 +375,49 @@ class JobResult:
         st.write(f"Found {len(log_dicts)} result JSON files")
         scenario_name_counts = Counter(log_info["scenario_name"] for log_info in log_dicts)
         suite_output_paths = set()
-        
+        _n_json = len(log_dicts)
+        _hud_json = ImpressiveProgressHUD()
+        _json_done = 0
         for i, log_info in enumerate(log_dicts):
             if st.session_state.get("stop_downloads"):
                 st.warning("Download stopped by user.")
                 break
-            with st.spinner(f"Downloading JSON {i+1}/{len(log_dicts)}: {log_info['scenario_name']}"):
-                output_dir = self._get_output_path_for_log(log_info)
-                suite_output_paths.add(output_dir)
-                self.download_archive_log(
-                    log_info, "result_json_id", "json", output_path=output_dir,
-                    scenario_name_counts=scenario_name_counts,
+            _hud_json.show(
+                fraction=(i / _n_json) if _n_json else 1.0,
+                headline=f"Result JSON {i + 1} of {_n_json}",
+                detail=log_info["scenario_name"],
+                foot="Fetching per-scenario result JSON…",
+            )
+            output_dir = self._get_output_path_for_log(log_info)
+            suite_output_paths.add(output_dir)
+            self.download_archive_log(
+                log_info, "result_json_id", "json", output_path=output_dir,
+                scenario_name_counts=scenario_name_counts,
+            )
+            _json_done = i + 1
+        if _n_json:
+            if st.session_state.get("stop_downloads") and _json_done < _n_json:
+                _hud_json.show(
+                    fraction=_json_done / _n_json,
+                    headline="Download stopped",
+                    detail=f"{_json_done} of {_n_json} JSON files retrieved before stop.",
                 )
-        
+            else:
+                _hud_json.show(fraction=1.0, headline="JSON downloads complete", detail="Organizing files…")
+        _hud_json.clear()
+
         with st.spinner("Organizing files..."):
             for output_dir in sorted(suite_output_paths):
                 self.organize_files_into_directories(output_dir)
         return log_dicts
 
     def get_case_simulation_log_info(self) -> list:
-        progress_bar = st.progress(0)
-        st.write("Fetching log info...")
+        _hud = ImpressiveProgressHUD()
+        _hud.show(
+            indeterminate=True,
+            headline="Fetching simulation logs",
+            detail="Resolving suites and scenarios from the Evaluator API…",
+        )
         try:
             result = download_core.get_case_simulation_log_info(
                 self.__session,
@@ -377,7 +428,7 @@ class JobResult:
                 suite_ids=self.__suite_ids or None,
             )
         finally:
-            progress_bar.empty()
+            _hud.clear()
         return result
 
     def download_archive_log(
@@ -410,8 +461,8 @@ class JobResult:
             scenario_name_counts=scenario_name_counts,
             on_warning=on_warning,
         )
-        if ok:
-            st.success(f"Downloaded: {log_info.get('scenario_name', '')}.{format}")
+        # if ok:
+        #     st.success(f"Downloaded: {log_info.get('scenario_name', '')}.{format}")
         return ok
 
     def extract_archives(self, phase, output_path: str, keep_zip_files=False):
@@ -538,17 +589,18 @@ class JobResult:
             return []
         
         # Download each scenario
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+        _n = len(log_dicts)
+        _hud = ImpressiveProgressHUD()
         scenario_api = scenarioAPI(self.__project_id)
         for i, log_info in enumerate(log_dicts):
-            progress = (i + 1) / len(log_dicts)
-            progress_bar.progress(progress)
-            
             scenario_name = log_info["scenario_name"]
             scenario_id = log_info["scenario_id"]
-            
-            status_text.text(f"Downloading scenario {i+1}/{len(log_dicts)}: {scenario_name}")
+            _hud.show(
+                fraction=i / _n,
+                headline=f"Scenario {i + 1} of {_n}",
+                detail=scenario_name,
+                foot="Downloading YAML and assets into your output tree…",
+            )
             
             scenario = scenario_api.get_latest_scenario(scenario_id) # sometimes by scenario_name
             print("scenario", scenario)
@@ -633,8 +685,13 @@ class JobResult:
                     "error": str(e)
                 })
         
-        progress_bar.progress(1.0)
-        status_text.empty()
+        _hud.show(
+            fraction=1.0,
+            headline="Scenario downloads finished",
+            detail=f"Processed {_n} scenario(s).",
+            foot="",
+        )
+        _hud.clear()
         
         # Summary
         st.subheader("📊 Download Summary")
@@ -648,6 +705,7 @@ class JobResult:
         
         return downloaded_scenarios
 
+
 st.set_page_config(
     page_title="Autoware Evaluator Downloader",
     page_icon="🚗",
@@ -656,15 +714,9 @@ st.set_page_config(
 )
 
 inject_app_page_styles()
-render_page_hero(
-    kicker="Data pipeline",
-    title="Autoware Evaluator results downloader",
-    description=(
-        "Pull jobs from the evaluator, fetch scenarios, run local eval hooks, build parquet — "
-        "with optional worker queue integration when configured."
-    ),
-    mode="Single Run",
-)
+inject_download_page_styles()
+render_download_hero(queue_enabled=is_task_queue_enabled())
+
 
 
 def _task_type_label(task_type: str) -> str:
@@ -967,7 +1019,7 @@ def _render_task_list(tasks: List[Dict[str, Any]], current_user: Optional[str]) 
 _current_user = None
 if is_task_queue_enabled():
     _current_user = get_current_user_id() if is_auth_enabled() else None
-    st.subheader("Task status")
+    render_download_task_section_header()
     _use_fragment = getattr(st, "fragment", None) is not None
     if _use_fragment:
         try:
@@ -1196,7 +1248,7 @@ with st.sidebar:
         large_file_mb = 50.0  # Doesn't apply
 
 
-# Main tabs
+st.markdown('<p class="dl-tabs-rail">Pick a workflow</p>', unsafe_allow_html=True)
 tab1, tab2, tab3, tab4 = st.tabs(
     ["📥 Download Results", "🗺️ Download Scenarios", "📊 View Downloads", "🧮 Eval Results"]
 )
@@ -1772,14 +1824,14 @@ with tab4:
                 if pkl_count == 0:
                     st.warning(f"No .pkl or .pkl.z files in `{pkl_dir}` or its subdirectories.")
                 else:
+                    _parquet_hud: Optional[ImpressiveProgressHUD] = None
                     try:
                         skip_log = []
                         def on_skip(path: str, reason: str):
                             skip_log.append((path, reason))
 
                         st.write(f"Processing {pkl_count} pkl files…")
-                        progress = st.progress(0)
-                        status_placeholder = st.empty()
+                        _parquet_hud = ImpressiveProgressHUD()
                         start_time = time.time()
 
                         def _format_eta(sec: float) -> str:
@@ -1794,20 +1846,26 @@ with tab4:
                             return f"{s}s"
 
                         def _update_parquet_progress(done: int, total: int):
-                            progress.progress(done / total if total else 1.0)
                             elapsed = time.time() - start_time
+                            foot = ""
                             if done > 0 and done < total and elapsed > 0:
                                 rate = done / elapsed
                                 remaining_sec = (total - done) / rate
                                 eta_finish = datetime.now() + timedelta(seconds=remaining_sec)
-                                status_placeholder.caption(
-                                    f"**{done}/{total}** files · Elapsed: {_format_eta(elapsed)} · "
-                                    f"Est. remaining: {_format_eta(remaining_sec)} · Est. finish: **{eta_finish.strftime('%H:%M:%S')}**"
+                                foot = (
+                                    f"{done}/{total} files · Elapsed {_format_eta(elapsed)} · "
+                                    f"Remaining ~{_format_eta(remaining_sec)} · Finish ~{eta_finish.strftime('%H:%M:%S')}"
                                 )
                             elif done >= total:
-                                status_placeholder.caption(f"**{total}/{total}** done in {_format_eta(elapsed)}.")
+                                foot = f"{total}/{total} files · {_format_eta(elapsed)} total"
                             else:
-                                status_placeholder.caption(f"**{done}/{total}** files · Elapsed: {_format_eta(elapsed)}")
+                                foot = f"{done}/{total} files · Elapsed {_format_eta(elapsed)}"
+                            _parquet_hud.show(
+                                fraction=(done / total) if total else 1.0,
+                                headline="Building parquet",
+                                detail=f"Converting catalog pickles ({done} of {total})",
+                                foot=foot,
+                            )
 
                         parquet_path = pkl_archive_to_parquet(
                             pkl_dir,
@@ -1816,7 +1874,6 @@ with tab4:
                             project_id=project_id or None,
                             job_id=st.session_state.job_id or None,
                         )
-                        progress.progress(1.0)
                         _update_parquet_progress(pkl_count, pkl_count)
                         st.success(f"Saved: `{parquet_path}`")
                         if skip_log:
@@ -1826,6 +1883,9 @@ with tab4:
                     except Exception as e:
                         st.error(f"Parquet generation failed: {e}")
                         st.exception(e)
+                    finally:
+                        if _parquet_hud is not None:
+                            _parquet_hud.clear()
 
     if run_eval_clicked or generate_both_clicked:
         import pandas as pd
@@ -1863,8 +1923,7 @@ with tab4:
                 st.stop()
 
             st.write(f"Found {len(target_dirs)} directories to process")
-            progress = st.progress(0)
-            status_placeholder = st.empty()
+            _eval_hud = ImpressiveProgressHUD()
             results = []
             total = len(target_dirs)
             start_time = time.time()
@@ -1880,49 +1939,57 @@ with tab4:
                     return f"{m}m {s}s"
                 return f"{s}s"
 
-            def _update_progress_status(done: int, total: int, progress_widget, status_placeholder):
-                progress_widget.progress(done / total)
+            def _update_progress_status(done: int, total_dirs: int):
                 elapsed = time.time() - start_time
-                if done > 0 and done < total and elapsed > 0:
+                foot = ""
+                if done > 0 and done < total_dirs and elapsed > 0:
                     rate = done / elapsed
-                    remaining_sec = (total - done) / rate
+                    remaining_sec = (total_dirs - done) / rate
                     eta_finish = datetime.now() + timedelta(seconds=remaining_sec)
-                    status_placeholder.caption(
-                        f"**{done}/{total}** directories · Elapsed: {_format_eta(elapsed)} · "
-                        f"Est. remaining: {_format_eta(remaining_sec)} · Est. finish: **{eta_finish.strftime('%H:%M:%S')}**"
+                    foot = (
+                        f"{done}/{total_dirs} dirs · Elapsed {_format_eta(elapsed)} · "
+                        f"Remaining ~{_format_eta(remaining_sec)} · Finish ~{eta_finish.strftime('%H:%M:%S')}"
                     )
-                elif done >= total:
-                    status_placeholder.caption(f"**{total}/{total}** done in {_format_eta(elapsed)}.")
+                elif done >= total_dirs:
+                    foot = f"{total_dirs}/{total_dirs} dirs · {_format_eta(elapsed)} total"
                 else:
-                    status_placeholder.caption(f"**{done}/{total}** directories · Elapsed: {_format_eta(elapsed)}")
+                    foot = f"{done}/{total_dirs} dirs · Elapsed {_format_eta(elapsed)}"
+                _eval_hud.show(
+                    fraction=(done / total_dirs) if total_dirs else 1.0,
+                    headline="Running perception eval",
+                    detail=f"Processing result directories ({done} of {total_dirs})",
+                    foot=foot,
+                )
 
-            # sequential evaluation
-            if not eval_parallel:
-                for i, result_dir in enumerate(target_dirs):
-                    _update_progress_status(i, total, progress, status_placeholder)
-                    results.append(run_eval_result_for_dir(result_dir, overwrite=eval_overwrite))
-                    _update_progress_status(i + 1, total, progress, status_placeholder)
-            else:
-                max_workers = max(1, min(int(eval_workers), len(target_dirs)))
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    future_map = {
-                        executor.submit(_run_eval_result_worker, result_dir, eval_overwrite): result_dir
-                        for result_dir in target_dirs
-                    }
-                    completed = 0
-                    for future in as_completed(future_map):
-                        completed += 1
-                        _update_progress_status(completed, total, progress, status_placeholder)
-                        try:
-                            results.append(future.result())
-                        except Exception as e:
-                            result_dir = future_map.get(future, "unknown")
-                            results.append(
-                                {"path": result_dir, "status": "failed", "detail": str(e)}
-                            )
+            try:
+                # sequential evaluation
+                if not eval_parallel:
+                    for i, result_dir in enumerate(target_dirs):
+                        _update_progress_status(i, total)
+                        results.append(run_eval_result_for_dir(result_dir, overwrite=eval_overwrite))
+                        _update_progress_status(i + 1, total)
+                else:
+                    max_workers = max(1, min(int(eval_workers), len(target_dirs)))
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        future_map = {
+                            executor.submit(_run_eval_result_worker, result_dir, eval_overwrite): result_dir
+                            for result_dir in target_dirs
+                        }
+                        completed = 0
+                        for future in as_completed(future_map):
+                            completed += 1
+                            _update_progress_status(completed, total)
+                            try:
+                                results.append(future.result())
+                            except Exception as e:
+                                result_dir = future_map.get(future, "unknown")
+                                results.append(
+                                    {"path": result_dir, "status": "failed", "detail": str(e)}
+                                )
 
-            progress.progress(1.0)
-            _update_progress_status(total, total, progress, status_placeholder)
+                _update_progress_status(total, total)
+            finally:
+                _eval_hud.clear()
 
             success_count = sum(1 for r in results if r["status"] == "success")
             skipped_count = sum(1 for r in results if r["status"] == "skipped")

@@ -14,6 +14,15 @@ from typing import Optional, List, Tuple
 from lib.path_utils import path_display
 from lib.parquet_schema import schema_flags
 from lib.page_chrome import inject_app_page_styles, render_loaded_data_section, render_page_hero
+from lib.ui.detection_stats import (
+    detection_stats_page_loading_banner_markup,
+    ds_spot_loading,
+    ds_spot_loading_markup,
+    inject_detection_stats_kpi_styles,
+    inject_detection_stats_styles,
+    render_kpi_card,
+    section_header_html,
+)
 
 # Perception diff: unified improved/degraded palette (Hierarchical view + Comparison lens)
 IMPROVED_COLOR = "#1a9850"
@@ -487,171 +496,7 @@ for i, (r, pl) in enumerate(zip(runs, parquet_lists)):
         st.error(f"No parquet files found in run ({label}): {path_display(r['path'])}. Add a .parquet file or generate one from the Download page.")
         st.stop()
 
-# =============================
-# Page-level CSS for section headers (inject once)
-# =============================
-_SECTION_CSS = """
-<style>
-.section-header { border-left: 4px solid #0d9488; padding-left: 12px; font-weight: 700; font-size: 1.02rem; color: #0f172a; margin: 1.35rem 0 0.65rem 0; letter-spacing: -0.02em; }
-.section-block { margin-bottom: 1.5rem; }
-.run-chip { display: inline-block; background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 999px; padding: 0.35rem 0.85rem; font-size: 0.875rem; margin: 0.25rem 0.25rem 0.25rem 0; }
-.run-chip strong { color: #334155; }
-@keyframes ds-load-shimmer {
-  0% { background-position: 200% 0; }
-  100% { background-position: -200% 0; }
-}
-@keyframes ds-load-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.78; }
-}
-@keyframes ds-banner-glow {
-  0%, 100% {
-    box-shadow:
-      0 0 0 1px rgba(13, 148, 136, 0.35),
-      0 4px 14px rgba(13, 148, 136, 0.18),
-      0 0 28px rgba(45, 212, 191, 0.12);
-  }
-  50% {
-    box-shadow:
-      0 0 0 2px rgba(13, 148, 136, 0.55),
-      0 6px 22px rgba(13, 148, 136, 0.28),
-      0 0 40px rgba(45, 212, 191, 0.22);
-  }
-}
-@keyframes ds-dot-beacon {
-  0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(20, 184, 166, 0.55); }
-  55% { transform: scale(1.12); box-shadow: 0 0 0 14px rgba(20, 184, 166, 0); }
-}
-@keyframes ds-banner-bg-shift {
-  0% { background-position: 0% 40%; }
-  100% { background-position: 100% 60%; }
-}
-.ds-page-loading-banner {
-  display: flex; align-items: flex-start; gap: 1rem;
-  padding: 1rem 1.2rem; margin: 0 0 1.15rem 0;
-  border-radius: 14px;
-  border: 2px solid #2dd4bf;
-  background: linear-gradient(125deg, #99f6e4 0%, #5eead4 22%, #a5f3fc 48%, #e0f2fe 72%, #ecfeff 100%);
-  background-size: 240% 240%;
-  animation: ds-banner-glow 2.2s ease-in-out infinite, ds-banner-bg-shift 6s ease-in-out infinite alternate;
-}
-.ds-page-loading-banner .ds-plb-head {
-  display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem 0.65rem;
-}
-.ds-page-loading-banner .ds-plb-badge {
-  flex-shrink: 0;
-  font-size: 0.62rem; font-weight: 800; letter-spacing: 0.14em; text-transform: uppercase;
-  color: #f0fdfa;
-  background: linear-gradient(135deg, #0f766e 0%, #0e7490 100%);
-  padding: 0.28rem 0.55rem; border-radius: 6px;
-  box-shadow: 0 2px 8px rgba(15, 118, 110, 0.35);
-  animation: ds-load-pulse 1.4s ease-in-out infinite;
-}
-.ds-page-loading-banner .ds-plb-text {
-  flex: 1; min-width: 0;
-  font-size: 1.08rem; font-weight: 800; color: #0f172a; letter-spacing: -0.02em;
-  line-height: 1.25;
-  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.6);
-}
-.ds-page-loading-banner .ds-plb-sub {
-  display: block; font-size: 0.82rem; font-weight: 600; color: #334155; margin-top: 0.35rem;
-  line-height: 1.4;
-}
-.ds-plb-shimmer-wrap {
-  height: 7px; border-radius: 999px; overflow: hidden;
-  background: rgba(15, 118, 110, 0.15); margin-top: 0.65rem;
-  border: 1px solid rgba(13, 148, 136, 0.2);
-}
-.ds-plb-shimmer {
-  height: 100%; width: 100%;
-  background: linear-gradient(
-    90deg,
-    rgba(13, 148, 136, 0) 0%,
-    rgba(13, 148, 136, 0.2) 38%,
-    rgba(6, 182, 212, 0.95) 50%,
-    rgba(13, 148, 136, 0.2) 62%,
-    rgba(13, 148, 136, 0) 100%
-  );
-  background-size: 200% 100%;
-  animation: ds-load-shimmer 1.35s ease-in-out infinite;
-}
-.ds-plb-dot {
-  width: 14px; height: 14px; border-radius: 50%;
-  background: radial-gradient(circle at 30% 30%, #5eead4, #0d9488);
-  flex-shrink: 0; margin-top: 0.15rem;
-  border: 2px solid rgba(255, 255, 255, 0.85);
-  animation: ds-dot-beacon 1.5s ease-out infinite;
-}
-@keyframes ds-spot-bar-slide {
-  0% { transform: translateX(-130%); }
-  100% { transform: translateX(400%); }
-}
-.ds-spot-loader {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-  margin: 0.2rem 0 0.7rem 0;
-  padding: 0.5rem 0.75rem;
-  border-radius: 10px;
-  border: 1px solid rgba(13, 148, 136, 0.55);
-  background: linear-gradient(100deg, rgba(167, 243, 208, 0.55) 0%, rgba(240, 253, 250, 0.98) 55%, rgba(224, 242, 254, 0.5) 100%);
-  box-shadow: 0 2px 12px rgba(13, 148, 136, 0.14);
-}
-.ds-spot-loader .ds-spot-ping {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: #0d9488;
-  flex-shrink: 0;
-  animation: ds-dot-beacon 1.35s ease-out infinite;
-}
-.ds-spot-loader .ds-spot-working {
-  font-size: 0.58rem;
-  font-weight: 800;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: #fff;
-  background: linear-gradient(135deg, #0f766e, #0e7490);
-  padding: 0.2rem 0.45rem;
-  border-radius: 4px;
-  flex-shrink: 0;
-}
-.ds-spot-loader .ds-spot-label {
-  font-size: 0.8rem;
-  font-weight: 700;
-  color: #134e4a;
-  letter-spacing: -0.015em;
-  flex: 1 1 120px;
-  min-width: 0;
-}
-.ds-spot-loader .ds-spot-bar {
-  flex: 1 1 72px;
-  max-width: 168px;
-  height: 5px;
-  border-radius: 999px;
-  overflow: hidden;
-  background: rgba(13, 148, 136, 0.14);
-}
-.ds-spot-loader .ds-spot-bar-inner {
-  display: block;
-  height: 100%;
-  width: 34%;
-  border-radius: 999px;
-  background: linear-gradient(90deg, #0d9488, #06b6d4);
-  animation: ds-spot-bar-slide 1s ease-in-out infinite;
-}
-@media (prefers-reduced-motion: reduce) {
-  .ds-page-loading-banner { animation: none; background-size: auto; }
-  .ds-plb-shimmer { animation: none; opacity: 0.85; }
-  .ds-plb-dot { animation: none; }
-  .ds-plb-badge { animation: none; }
-  .ds-spot-loader .ds-spot-bar-inner { animation: none; transform: none; width: 100%; opacity: 0.4; }
-  .ds-spot-loader .ds-spot-ping { animation: none; }
-}
-</style>
-"""
-st.markdown(_SECTION_CSS, unsafe_allow_html=True)
+inject_detection_stats_styles()
 
 # =============================
 # Loaded Runs (from Overview) + hero
@@ -745,22 +590,7 @@ schema = schema_flags(con, target_file)
 
 # Banner while the rest of the page (queries + charts) streams in — cleared at end of script.
 _ds_loading_banner = st.empty()
-_ds_loading_banner.markdown(
-    """
-    <div class="ds-page-loading-banner" role="status" aria-live="polite">
-      <span class="ds-plb-dot" aria-hidden="true"></span>
-      <div style="flex:1;min-width:0;">
-        <div class="ds-plb-head">
-          <span class="ds-plb-badge">In progress</span>
-          <span class="ds-plb-text">Crunching detection stats…</span>
-        </div>
-        <span class="ds-plb-sub">Hang tight — large Parquet files can take a moment. A teal <b>Working here</b> chip below jumps to whichever section is loading.</span>
-        <div class="ds-plb-shimmer-wrap"><div class="ds-plb-shimmer"></div></div>
-      </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+_ds_loading_banner.markdown(detection_stats_page_loading_banner_markup(), unsafe_allow_html=True)
 
 # =============================
 # Main Content
@@ -802,142 +632,28 @@ def _kpi_row_for_view(con, view: str, filter_clause: str):
         "tpr": tpr, "fpr": fpr, "precision": precision, "recall": recall, "f1": f1,
     }
 
-def _pct_str(v):
-    if v is None:
-        return "—"
-    p = min(100.0, v * 100)
-    return f"{p:.0f}%" if abs(p - round(p)) < 0.05 else f"{p:.1f}%"
-def _delta_pct(a_val, b_val):
-    if a_val is None or b_val is None:
-        return ""
-    d = (b_val - a_val) * 100
-    if d == 0:
-        return "0%"
-    return f"{d:+.1f}%" if d != int(d) else f"{int(d):+d}%"
-
-def _metric_cell(label: str, value: str, delta_str: str = "", delta_positive: bool | None = None) -> str:
-    delta_span = ""
-    if delta_str:
-        cls = "kpi-delta-inline delta-pos" if delta_positive is True else "kpi-delta-inline delta-neg" if delta_positive is False else "kpi-delta-inline"
-        delta_span = f'<span class="{cls}">{delta_str}</span>'
-    return f'<div class="kpi-cell"><span class="kpi-label">{label}</span><span class="kpi-value">{value}</span>{delta_span}</div>'
-
-def _render_kpi_card(title: str, kpi: dict, css_id: str = "", deltas: dict | None = None) -> str:
-    """deltas: optional dict with keys tp, fp, fn, tpr, fpr, precision, recall, f1 (B - A). Shown inline in card."""
-    if not kpi:
-        return f'<div class="kpi-card" id="{css_id}"><div class="kpi-title">{title}</div><div class="kpi-empty">No data</div></div>'
-    d = deltas or {}
-
-    def _cell(label: str, val: str, delta_key: str, lower_is_better: bool = False):
-        delta_val = d.get(delta_key)
-        if delta_val is None:
-            return _metric_cell(label, val)
-        if delta_key in ("tpr", "fpr", "precision", "recall") and isinstance(delta_val, (int, float)):
-            delta_str = f"{delta_val * 100:+.1f}%" if abs(delta_val) <= 1 else f"{delta_val:+.1f}%"
-        elif delta_key == "f1":
-            delta_str = f"{delta_val:+.3f}"
-        else:
-            delta_str = f"{delta_val:+d}" if isinstance(delta_val, int) else f"{delta_val:+.3f}"
-        good = (delta_val >= 0 and not lower_is_better) or (delta_val <= 0 and lower_is_better)
-        return _metric_cell(label, val, delta_str, good)
-
-    row1 = "".join([
-        _cell("TP", str(kpi["tp"]), "tp"),
-        _cell("FP", str(kpi["fp"]), "fp", lower_is_better=True),
-        _cell("FN", str(kpi["fn"]), "fn", lower_is_better=True),
-    ])
-    f1_val = f"{kpi['f1']:.3f}" if kpi.get("f1") is not None else "—"
-    row2 = "".join([
-        _cell("TPR", _pct_str(kpi.get("tpr")), "tpr"),
-        _cell("FPR", _pct_str(kpi.get("fpr")), "fpr", lower_is_better=True),
-        _cell("Precision", _pct_str(kpi.get("precision")), "precision"),
-        _cell("Recall", _pct_str(kpi.get("recall")), "recall"),
-        _cell("F1", f1_val, "f1"),
-    ])
-    return f'''<div class="kpi-card" id="{css_id}">
-        <div class="kpi-title">{title}</div>
-        <div class="kpi-row">{row1}</div>
-        <div class="kpi-row">{row2}</div>
-    </div>'''
-
-_KPI_CSS = """
-<style>
-.kpi-wrap { display: flex; flex-wrap: wrap; gap: 1.5rem; align-items: stretch; margin-bottom: 1.5rem; }
-.kpi-card {
-    background: linear-gradient(180deg, #f8f9fa 0%, #f0f2f5 100%);
-    border: 1px solid #dee2e6;
-    border-radius: 12px;
-    padding: 1.5rem 2rem;
-    min-width: 360px;
-    min-height: 200px;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.08);
-    display: flex;
-    flex-direction: column;
-}
-.kpi-title { font-size: 0.9rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: #495057; margin-bottom: 1rem; }
-.kpi-row { display: flex; gap: 2rem; margin-bottom: 0.85rem; }
-.kpi-row:last-child { margin-bottom: 0; }
-.kpi-cell { display: flex; flex-direction: column; align-items: flex-start; min-width: 4.5rem; min-height: 2.6rem; }
-.kpi-label { font-size: 0.8rem; color: #6c757d; text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 0.25rem; }
-.kpi-value { font-size: 1.5rem; font-weight: 700; color: #212529; font-variant-numeric: tabular-nums; line-height: 1.2; }
-.kpi-delta-inline { display: block; font-size: 0.8rem; font-weight: 600; margin-top: 0.2rem; font-variant-numeric: tabular-nums; min-height: 1.1rem; }
-.kpi-delta-inline.delta-pos { color: #0d6b0d; }
-.kpi-delta-inline.delta-neg { color: #b02a37; }
-.kpi-empty { font-size: 1rem; color: #6c757d; font-style: italic; }
-</style>
-"""
-
-
-def _section_header(title: str, caption: str = "") -> str:
-    """HTML for a styled section header with optional caption."""
-    if caption:
-        return f'<div class="section-header">{title}</div><p style="margin-top: 0.25rem; margin-bottom: 0.75rem; font-size: 0.9rem; color: #6b7280;">{caption}</p>'
-    return f'<div class="section-header">{title}</div>'
-
-
-def _ds_spot_loading_markup(label: str) -> str:
-    """Compact inline HTML: shows where the app is busy (Streamlit runs top-to-bottom, so this “moves” down the page)."""
-    safe = html.escape(label)
-    return f"""<div class="ds-spot-loader" role="status" aria-live="polite">
-  <span class="ds-spot-ping" aria-hidden="true"></span>
-  <span class="ds-spot-working">Working here</span>
-  <span class="ds-spot-label">{safe}</span>
-  <span class="ds-spot-bar"><span class="ds-spot-bar-inner"></span></span>
-</div>"""
-
-
-@contextmanager
-def _ds_spot_loading(label: str):
-    slot = st.empty()
-    slot.markdown(_ds_spot_loading_markup(label), unsafe_allow_html=True)
-    try:
-        yield
-    finally:
-        slot.empty()
-
-
 # =============================
 # Panel 1: t4dataset Summary
 # =============================
-st.markdown(_section_header("Summary", "Within selected filters and max evaluation range."), unsafe_allow_html=True)
+st.markdown(section_header_html("Summary", "Within selected filters and max evaluation range."), unsafe_allow_html=True)
 if single_mode:
-    with _ds_spot_loading("Summary · KPI metrics"):
+    with ds_spot_loading("Summary · KPI metrics"):
         fc = build_filter_clause(filters_base)
         kpi = _kpi_row_for_view(con, "view_eval_flat", fc)
-    st.markdown(_KPI_CSS, unsafe_allow_html=True)
+    inject_detection_stats_kpi_styles()
     if kpi:
-        html = '<div class="kpi-wrap">' + _render_kpi_card("Metrics (within filters & max range)", kpi) + "</div>"
+        html = '<div class="kpi-wrap">' + render_kpi_card("Metrics (within filters & max range)", kpi) + "</div>"
         st.markdown(html, unsafe_allow_html=True)
     else:
         st.caption("No KPI data.")
 else:
-    with _ds_spot_loading("Summary · KPI metrics"):
+    with ds_spot_loading("Summary · KPI metrics"):
         kpis = []
         for i in range(len(runs)):
             fc = build_filter_clause(filters_list[i])
             kpi = _kpi_row_for_view(con, _flat_view(i), fc)
             kpis.append((run_labels_list[i], kpi))
-    st.markdown(_KPI_CSS, unsafe_allow_html=True)
+    inject_detection_stats_kpi_styles()
     baseline = kpis[0][1] if kpis else None
     cards_html_parts = []
     for lbl, kpi in kpis:
@@ -953,7 +669,7 @@ else:
                 "recall": (kpi["recall"] - baseline["recall"]) if (kpi.get("recall") is not None and baseline.get("recall") is not None) else None,
                 "f1": (kpi["f1"] - baseline["f1"]) if (kpi.get("f1") is not None and baseline.get("f1") is not None) else None,
             }
-        cards_html_parts.append(_render_kpi_card(f"Run {lbl}", kpi or {}, f"kpi-run-{lbl}", deltas=deltas))
+        cards_html_parts.append(render_kpi_card(f"Run {lbl}", kpi or {}, f"kpi-run-{lbl}", deltas=deltas))
     st.markdown('<div class="kpi-wrap">' + "".join(cards_html_parts) + "</div>", unsafe_allow_html=True)
 
 if st.checkbox("Debug: Inspect Parquet (All Runs)" if not single_mode else "Debug: Inspect Parquet"):
@@ -1036,7 +752,7 @@ if st.checkbox("Debug: Inspect Parquet (All Runs)" if not single_mode else "Debu
 
 
 try:
-    with _ds_spot_loading("Dataset summary & status distribution"):
+    with ds_spot_loading("Dataset summary & status distribution"):
         if single_mode:
             query_base = f"""
             SELECT COUNT(DISTINCT t4dataset_id) AS id_num, '{os.path.basename(target_file)}' AS series
@@ -1353,7 +1069,7 @@ _DIST_BIN_CASE = """CASE
 # =============================
 st.divider()
 st.markdown(
-    _section_header(
+    section_header_html(
         "Distance: TP/FP rates & object count",
         "Same distance bins and chart style (line or bar) for rates and object counts; x-axis order matches across charts.",
     ),
@@ -1369,7 +1085,7 @@ rate_by_dist_style = st.radio(
 
 filter_clause_base = build_filter_clause(filters_base, enable_dist_h=False)
 _dist_slot = st.empty()
-_dist_slot.markdown(_ds_spot_loading_markup("Distance · TP/FP rates & object counts"), unsafe_allow_html=True)
+_dist_slot.markdown(ds_spot_loading_markup("Distance · TP/FP rates & object counts"), unsafe_allow_html=True)
 try:
     use_line_chart = rate_by_dist_style == "Line chart (trend)"
     rate_bin_labels_order: Optional[List[str]] = None
@@ -1793,7 +1509,7 @@ finally:
 # Panel 2: TP Rate (single) / TP Rate Comparison (compare)
 # =============================
 st.markdown(
-    _section_header(
+    section_header_html(
         "TP Rate" + (" Comparison" if not single_mode else ""),
         "TP rate per object class (GT TP / (TP+FN)). Pick a chart style below.",
     ),
@@ -1834,7 +1550,7 @@ if single_mode:
         key="tpr_viz_single",
     )
     try:
-        with _ds_spot_loading("TP rate"):
+        with ds_spot_loading("TP rate"):
             filter_clause = build_filter_clause(filters_base)
             query = _tpr_query.format(view="view_eval_flat", filter_clause=filter_clause)
             df_tpr_base = con.execute(query).df()
@@ -1869,7 +1585,7 @@ else:
         key="tpr_viz_compare",
     )
     try:
-        with _ds_spot_loading("TP rate"):
+        with ds_spot_loading("TP rate"):
             dfs_tpr = []
             for i in range(len(runs)):
                 fc = build_filter_clause(filters_list[i])
@@ -2112,7 +1828,7 @@ def _plot_comparison_lens_treemap(
 if not single_mode:
     st.divider()
     st.markdown(
-        _section_header(
+        section_header_html(
             "Perception diff (vs baseline A)",
             "Per-GT-object comparison vs baseline A: degraded = was TP on A and FN on candidate; improved = was FN on A and TP on candidate. Hotspots prioritize regressions.",
         ),
@@ -2121,7 +1837,7 @@ if not single_mode:
     for idx in range(1, len(runs)):
         lbl = run_labels_list[idx]
         _pd_slot = st.empty()
-        _pd_slot.markdown(_ds_spot_loading_markup(f"Perception diff · run {lbl}"), unsafe_allow_html=True)
+        _pd_slot.markdown(ds_spot_loading_markup(f"Perception diff · run {lbl}"), unsafe_allow_html=True)
         try:
             filter_clause_comp_p5 = build_filter_clause(filters_list[idx], enable_dist_h=False)
             comp_flat = _flat_view(idx)
@@ -2874,9 +2590,9 @@ if not single_mode:
 # Single mode: Frame / Object level — Where are the misses?
 # =============================
 if single_mode:
-    st.markdown(_section_header("Frame / Object level: Where are the misses?"), unsafe_allow_html=True)
+    st.markdown(section_header_html("Frame / Object level: Where are the misses?"), unsafe_allow_html=True)
     _fn_slot = st.empty()
-    _fn_slot.markdown(_ds_spot_loading_markup("FN by frame & object"), unsafe_allow_html=True)
+    _fn_slot.markdown(ds_spot_loading_markup("FN by frame & object"), unsafe_allow_html=True)
     try:
         with st.expander("FN by frame and by object", expanded=True):
             query_fn_frame = f"""
@@ -2951,7 +2667,7 @@ if single_mode:
 # =============================
 st.divider()
 st.markdown(
-    _section_header(
+    section_header_html(
         "Mean Error" + (" Comparison" if not single_mode else ""),
         "Mean absolute error on TP matches (X/Y in m, Yaw in rad)."
         + (" Compare mode: choose grouped bars or spider charts." if not single_mode else ""),
@@ -2971,7 +2687,7 @@ if not has_error_cols:
 else:
     if single_mode:
         try:
-            with _ds_spot_loading("Mean error"):
+            with ds_spot_loading("Mean error"):
                 query = f"""
                 SELECT
                     label,
@@ -3024,7 +2740,7 @@ else:
             st.error(f"Error: {e}")
     else:
         try:
-            with _ds_spot_loading("Mean error"):
+            with ds_spot_loading("Mean error"):
                 dfs_err = []
                 for i in range(len(runs)):
                     fc = build_filter_clause(filters_list[i])
@@ -3116,11 +2832,11 @@ else:
         except Exception as e:
             st.error(f"Error: {e}")
 
-        st.markdown(_section_header("Difference of mean absolute error (each run − Baseline A)"), unsafe_allow_html=True)
+        st.markdown(section_header_html("Difference of mean absolute error (each run − Baseline A)"), unsafe_allow_html=True)
         for idx in range(1, len(runs)):
             lbl = run_labels_list[idx]
             _med_slot = st.empty()
-            _med_slot.markdown(_ds_spot_loading_markup(f"Mean error diff · run {lbl}"), unsafe_allow_html=True)
+            _med_slot.markdown(ds_spot_loading_markup(f"Mean error diff · run {lbl}"), unsafe_allow_html=True)
             try:
                 fc_c = build_filter_clause(filters_list[idx])
                 query = f"""

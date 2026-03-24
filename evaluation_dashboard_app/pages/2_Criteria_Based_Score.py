@@ -10,6 +10,14 @@ from lib.page_chrome import (
     render_page_hero,
     section_header,
 )
+from lib.ui.criteria_banners import (
+    criteria_absolute_gate_section_hr_markup,
+    criteria_compare_workspace_intro_markup,
+    criteria_failing_scenarios_heading_markup,
+    gate_compare_overlap_intro_markup,
+    gate_verdict_banner_html,
+    hover_html_for_scenarios,
+)
 from lib.criteria_absolute_gates import (
     MetricGateSpec,
     evaluate_scenario_gates,
@@ -404,43 +412,6 @@ def _df_for_absolute_gates(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[:, use].copy()
 
 
-def _gate_verdict_banner_html(summ: dict, run_label: str) -> str:
-    """Large HTML banner: final gate verdict for one run."""
-    rl = html.escape(str(run_label))
-    n = summ["n_scenarios"]
-    if n == 0:
-        return (
-            '<div style="background: linear-gradient(135deg, #64748b 0%, #94a3b8 100%); color: white; '
-            "padding: 1.1rem 1.25rem; border-radius: 14px; text-align: center; margin-bottom: 0.75rem; "
-            'box-shadow: 0 4px 14px rgba(0,0,0,0.12);">'
-            f'<div style="font-size: 0.7rem; letter-spacing: 0.2em; opacity: 0.9;">{rl} · GATE VERDICT</div>'
-            '<div style="font-size: 1.6rem; font-weight: 800; margin: 0.35rem 0;">NO DATA</div>'
-            '<div style="font-size: 0.85rem; opacity: 0.92;">No scenarios to evaluate</div></div>'
-        )
-    if summ["all_pass"]:
-        return (
-            '<div style="background: linear-gradient(135deg, #047857 0%, #10b981 55%, #34d399 100%); color: white; '
-            "padding: 1.25rem 1.5rem; border-radius: 14px; text-align: center; margin-bottom: 0.75rem; "
-            'box-shadow: 0 6px 20px rgba(16,185,129,0.35); border: 2px solid rgba(255,255,255,0.25);">'
-            f'<div style="font-size: 0.72rem; letter-spacing: 0.18em; opacity: 0.92;">{rl} · FINAL GATE</div>'
-            '<div style="font-size: 2.35rem; font-weight: 900; margin: 0.2rem 0; line-height: 1.1; text-shadow: 0 2px 8px rgba(0,0,0,0.15);">'
-            "PASS</div>"
-            f'<div style="font-size: 1rem; font-weight: 600; opacity: 0.95;">All {n:,} scenario(s) meet your thresholds</div>'
-            '<div style="font-size: 0.8rem; opacity: 0.88; margin-top: 0.35rem;">Ready as a release-style checkpoint</div></div>'
-        )
-    nf = summ["n_fail"]
-    return (
-        '<div style="background: linear-gradient(135deg, #991b1b 0%, #dc2626 50%, #f87171 100%); color: white; '
-        "padding: 1.25rem 1.5rem; border-radius: 14px; text-align: center; margin-bottom: 0.75rem; "
-        'box-shadow: 0 6px 20px rgba(220,38,38,0.35); border: 2px solid rgba(255,255,255,0.2);">'
-        f'<div style="font-size: 0.72rem; letter-spacing: 0.18em; opacity: 0.92;">{rl} · FINAL GATE</div>'
-        '<div style="font-size: 2.35rem; font-weight: 900; margin: 0.2rem 0; line-height: 1.1; text-shadow: 0 2px 8px rgba(0,0,0,0.15);">'
-        "FAIL</div>"
-        f'<div style="font-size: 1rem; font-weight: 600; opacity: 0.95;">{nf:,} of {n:,} scenario(s) below threshold</div>'
-        '<div style="font-size: 0.8rem; opacity: 0.88; margin-top: 0.35rem;">Review failing scenarios below</div></div>'
-    )
-
-
 def _gate_verdict_donut_fig(summ: dict) -> go.Figure:
     """Donut chart Pass vs Fail — strong visual share."""
     n = summ["n_scenarios"]
@@ -540,20 +511,6 @@ def _overlap_scenario_lists(merged: pd.DataFrame) -> dict[str, list[str]]:
     }
 
 
-def _hover_html_for_scenarios(title: str, scenarios: list[str], *, max_lines: int = 45) -> str:
-    """Plotly hover HTML: title + count + newline-separated scenario names."""
-    n = len(scenarios)
-    esc_title = html.escape(title)
-    if n == 0:
-        return f"<b>{esc_title}</b><br><i>No scenarios</i>"
-    head = scenarios[:max_lines]
-    lines = "<br>".join(html.escape(s) for s in head)
-    more = ""
-    if n > max_lines:
-        more = f"<br><i>… +{n - max_lines:,} more (see table below)</i>"
-    return f"<b>{esc_title}</b> · {n:,} scenario{'s' if n != 1 else ''}<br>{lines}{more}"
-
-
 def _gate_compare_venn_style_fig(
     stats: dict,
     label_a: str,
@@ -629,10 +586,10 @@ def _gate_compare_venn_style_fig(
         "Both pass",
     ]
     hover_bodies = [
-        _hover_html_for_scenarios(hover_titles[0], sb["a_fail_b_pass"]),
-        _hover_html_for_scenarios(hover_titles[1], sb["both_fail"]),
-        _hover_html_for_scenarios(hover_titles[2], sb["a_pass_b_fail"]),
-        _hover_html_for_scenarios(hover_titles[3], sb["both_pass"]),
+        hover_html_for_scenarios(hover_titles[0], sb["a_fail_b_pass"]),
+        hover_html_for_scenarios(hover_titles[1], sb["both_fail"]),
+        hover_html_for_scenarios(hover_titles[2], sb["a_pass_b_fail"]),
+        hover_html_for_scenarios(hover_titles[3], sb["both_pass"]),
     ]
     fig.add_trace(
         go.Scatter(
@@ -777,13 +734,7 @@ def _render_gate_compare_overlap(gate_results: list, label_a: str, label_b: str)
     if stats is None:
         return
 
-    st.markdown(
-        '<p style="font-size:1.12rem;font-weight:800;color:#0f172a;margin:1.5rem 0 0.25rem 0;">'
-        "Compare · scenario overlap</p>"
-        '<p style="color:#64748b;font-size:0.9rem;margin:0 0 0.85rem 0;">'
-        "Same scenario IDs in both runs: <strong>who fails where</strong> — recovered, regressed, stable pass, or still failing.</p>",
-        unsafe_allow_html=True,
-    )
+    st.markdown(gate_compare_overlap_intro_markup(), unsafe_allow_html=True)
 
     cap_parts = []
     if stats["n_inner"]:
@@ -811,10 +762,10 @@ def _render_gate_compare_overlap(gate_results: list, label_a: str, label_b: str)
     merged = stats["merged"]
     scenario_buckets = _overlap_scenario_lists(merged)
     sankey_link_hover = [
-        _hover_html_for_scenarios("Pass baseline → Pass candidate", scenario_buckets["both_pass"]),
-        _hover_html_for_scenarios("Pass baseline → Fail candidate (regression)", scenario_buckets["a_pass_b_fail"]),
-        _hover_html_for_scenarios("Fail baseline → Pass candidate (recovered)", scenario_buckets["a_fail_b_pass"]),
-        _hover_html_for_scenarios("Fail baseline → Fail candidate (both fail)", scenario_buckets["both_fail"]),
+        hover_html_for_scenarios("Pass baseline → Pass candidate", scenario_buckets["both_pass"]),
+        hover_html_for_scenarios("Pass baseline → Fail candidate (regression)", scenario_buckets["a_pass_b_fail"]),
+        hover_html_for_scenarios("Fail baseline → Pass candidate (recovered)", scenario_buckets["a_fail_b_pass"]),
+        hover_html_for_scenarios("Fail baseline → Fail candidate (both fail)", scenario_buckets["both_fail"]),
     ]
 
     c_venn, c_sankey = st.columns(2, gap="large")
@@ -878,10 +829,7 @@ def _render_absolute_gates_section(
         op = "<=" if abs_metric2_op == "<=" else ">="
         spec = MetricGateSpec(abs_metric2_col, op, float(abs_metric2_threshold))
 
-    st.markdown(
-        '<hr style="border:none;height:2px;background:linear-gradient(90deg,transparent,#94a3b1,#0d9488,#94a3b1,transparent);margin:2rem 0 1.25rem 0;border-radius:2px;"/>',
-        unsafe_allow_html=True,
-    )
+    st.markdown(criteria_absolute_gate_section_hr_markup(), unsafe_allow_html=True)
     section_header(
         "Final gate verdict",
         "Pass rate **0–100** (Score.csv / lsim). Thresholds from the sidebar — **last checkpoint** before sign-off.",
@@ -901,7 +849,7 @@ def _render_absolute_gates_section(
                 st.error(f"Gate evaluation failed: {e}")
                 continue
             summ = gate_summary(result)
-            st.markdown(_gate_verdict_banner_html(summ, label), unsafe_allow_html=True)
+            st.markdown(gate_verdict_banner_html(summ, label), unsafe_allow_html=True)
 
             if summ["n_scenarios"] > 0:
                 st.markdown("**Scenario pass rate (bar)**")
@@ -933,11 +881,7 @@ def _render_absolute_gates_section(
 
             fails = failing_scenarios_table(result)
             if not fails.empty:
-                st.markdown(
-                    f'<p style="color:#b91c1c;font-weight:700;font-size:1rem;margin:0.75rem 0 0.35rem 0;">'
-                    f"Failing scenarios ({len(fails):,})</p>",
-                    unsafe_allow_html=True,
-                )
+                st.markdown(criteria_failing_scenarios_heading_markup(len(fails)), unsafe_allow_html=True)
                 st.dataframe(fails, width="stretch")
             gate_results.append((label, result, spec))
 
@@ -1040,13 +984,7 @@ if mode == "Compare Mode" and compare_runs and compare_labels:
         criteria_count=CRITERIA_COUNT,
     )
 
-    st.markdown(
-        '<p style="margin:0.5rem 0 0.35rem 0;font-size:1.05rem;font-weight:800;color:#0f172a;">Compare workspace</p>'
-        '<p style="margin:0 0 0.6rem 0;color:#64748b;font-size:0.9rem;">'
-        "<strong>Overlay</strong> — all selected runs · "
-        "<strong>Delta</strong> — row-wise chosen candidate minus baseline after matching keys.</p>",
-        unsafe_allow_html=True,
-    )
+    st.markdown(criteria_compare_workspace_intro_markup(), unsafe_allow_html=True)
     tab_ov, tab_dl = st.tabs(["Overlay: all runs", f"Delta: {focus_cand} - A"])
 
     with tab_ov:
