@@ -459,6 +459,127 @@ def inject_download_page_styles() -> None:
           font-variant-numeric: tabular-nums;
           letter-spacing: 0.02em;
         }
+
+        /* Post-download: status headers, summary metrics (matches xfer light HUD) */
+        @keyframes dl-result-glow {
+          0%, 100% { box-shadow: 0 0 0 1px rgba(14, 165, 233, 0.12), 0 14px 40px -18px rgba(14, 165, 233, 0.14); }
+          50% { box-shadow: 0 0 0 1px rgba(139, 92, 246, 0.14), 0 16px 44px -16px rgba(139, 92, 246, 0.12); }
+        }
+        .dl-result-shell {
+          margin: 0.65rem 0 0.5rem 0;
+        }
+        .dl-result-panel {
+          position: relative;
+          border-radius: 16px;
+          padding: 1rem 1.15rem 1.05rem 1.15rem;
+          border: 1px solid #e2e8f0;
+          background:
+            radial-gradient(ellipse 90% 70% at 0% 0%, rgba(56, 189, 248, 0.1) 0%, transparent 55%),
+            radial-gradient(ellipse 70% 60% at 100% 100%, rgba(167, 139, 250, 0.08) 0%, transparent 50%),
+            linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+          animation: dl-result-glow 5s ease-in-out infinite;
+        }
+        .dl-result-panel--table {
+          margin-bottom: 0.35rem;
+        }
+        .dl-result-kicker {
+          font-size: 0.65rem;
+          font-weight: 800;
+          letter-spacing: 0.16em;
+          text-transform: uppercase;
+          color: #64748b;
+          margin: 0 0 0.35rem 0;
+        }
+        .dl-result-title {
+          font-size: 1.12rem;
+          font-weight: 800;
+          letter-spacing: -0.025em;
+          color: #0f172a;
+          margin: 0;
+          line-height: 1.2;
+        }
+        .dl-result-sub {
+          margin: 0.4rem 0 0 0;
+          font-size: 0.84rem;
+          color: #475569;
+          line-height: 1.45;
+          max-width: 42rem;
+        }
+        .dl-stat-grid {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 0.65rem;
+          margin-top: 0.85rem;
+        }
+        .dl-stat-tile {
+          flex: 1 1 5.5rem;
+          min-width: 5rem;
+          max-width: 10rem;
+          padding: 0.65rem 0.75rem;
+          border-radius: 12px;
+          border: 1px solid #e2e8f0;
+          background: #fff;
+          text-align: center;
+          box-shadow: 0 2px 8px -2px rgba(15, 23, 42, 0.06);
+        }
+        .dl-stat-tile--ok {
+          border-color: rgba(52, 211, 153, 0.45);
+          background: linear-gradient(165deg, #ecfdf5 0%, #fff 100%);
+        }
+        .dl-stat-tile--skip {
+          border-color: rgba(251, 191, 36, 0.5);
+          background: linear-gradient(165deg, #fffbeb 0%, #fff 100%);
+        }
+        .dl-stat-tile--fail {
+          border-color: rgba(251, 113, 133, 0.5);
+          background: linear-gradient(165deg, #fff1f2 0%, #fff 100%);
+        }
+        .dl-stat-tile--neutral {
+          border-color: rgba(14, 165, 233, 0.35);
+          background: linear-gradient(165deg, #f0f9ff 0%, #fff 100%);
+        }
+        .dl-stat-n {
+          display: block;
+          font-family: ui-monospace, "Cascadia Code", monospace;
+          font-size: 1.65rem;
+          font-weight: 800;
+          letter-spacing: -0.03em;
+          line-height: 1.1;
+          color: #0f172a;
+          font-variant-numeric: tabular-nums;
+        }
+        .dl-stat-l {
+          display: block;
+          margin-top: 0.2rem;
+          font-size: 0.68rem;
+          font-weight: 700;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+          color: #64748b;
+        }
+        .dl-path-row {
+          margin-top: 0.85rem;
+          padding: 0.55rem 0.75rem;
+          border-radius: 10px;
+          background: rgba(241, 245, 249, 0.9);
+          border: 1px solid #e2e8f0;
+          font-size: 0.8rem;
+          color: #475569;
+        }
+        .dl-path-row code {
+          font-family: ui-monospace, monospace;
+          font-size: 0.78rem;
+          color: #0f172a;
+          word-break: break-all;
+        }
+        .dl-mini-list {
+          margin: 0.65rem 0 0 0;
+          padding: 0 0 0 1rem;
+          font-size: 0.82rem;
+          color: #334155;
+          line-height: 1.55;
+        }
+        .dl-mini-list li { margin: 0.2rem 0; }
         </style>
         """,
         unsafe_allow_html=True,

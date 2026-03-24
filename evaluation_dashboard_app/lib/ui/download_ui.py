@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import html
-from typing import Optional
+from typing import List, Optional, Sequence, Tuple
 
 import streamlit as st
 
@@ -133,6 +133,163 @@ def render_download_task_section_header() -> None:
           <div>
             <div class="dl-section-kicker">Background jobs</div>
             <div class="dl-section-title">Task status</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_download_status_table_intro(
+    *,
+    kicker: str = "Batch detail",
+    title: str = "Download status",
+    subtitle: str = "Per-row outcomes from this download pass.",
+) -> None:
+    """Call immediately before ``st.dataframe`` for archive/JSON download rows."""
+    st.markdown(
+        f"""
+        <div class="dl-result-shell">
+          <div class="dl-result-panel dl-result-panel--table">
+            <div class="dl-result-kicker">{html.escape(kicker)}</div>
+            <div class="dl-result-title">{html.escape(title)}</div>
+            <p class="dl-result-sub">{html.escape(subtitle)}</p>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_scenario_download_summary_panel(*, success: int, skipped: int, failed: int) -> None:
+    """After scenario YAML downloads: success / skipped / failed tiles."""
+    st.markdown(
+        f"""
+        <div class="dl-result-shell">
+          <div class="dl-result-panel">
+            <div class="dl-result-kicker">Outcome</div>
+            <div class="dl-result-title">Download summary</div>
+            <p class="dl-result-sub">Scenario downloads for this run.</p>
+            <div class="dl-stat-grid">
+              <div class="dl-stat-tile dl-stat-tile--ok">
+                <span class="dl-stat-n">{int(success)}</span>
+                <span class="dl-stat-l">Success</span>
+              </div>
+              <div class="dl-stat-tile dl-stat-tile--skip">
+                <span class="dl-stat-n">{int(skipped)}</span>
+                <span class="dl-stat-l">Skipped</span>
+              </div>
+              <div class="dl-stat-tile dl-stat-tile--fail">
+                <span class="dl-stat-n">{int(failed)}</span>
+                <span class="dl-stat-l">Failed</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _output_path_row(output_rel: str) -> str:
+    safe = html.escape(output_rel, quote=True)
+    return (
+        f'<div class="dl-path-row">Output directory <code>{safe}</code></div>'
+    )
+
+
+def render_job_archives_summary_panel(*, scenarios_processed: int, output_rel: str) -> None:
+    """Tab1 after ZIP path: total processed + path."""
+    st.markdown(
+        f"""
+        <div class="dl-result-shell">
+          <div class="dl-result-panel">
+            <div class="dl-result-kicker">Run complete</div>
+            <div class="dl-result-title">Summary</div>
+            <p class="dl-result-sub">Archives fetched and extracted under your output path.</p>
+            <div class="dl-stat-grid">
+              <div class="dl-stat-tile dl-stat-tile--neutral">
+                <span class="dl-stat-n">{int(scenarios_processed)}</span>
+                <span class="dl-stat-l">Scenarios</span>
+              </div>
+            </div>
+            {_output_path_row(output_rel)}
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_job_json_summary_panel(*, json_files: int, output_rel: str) -> None:
+    """Tab1 after result-JSON path."""
+    st.markdown(
+        f"""
+        <div class="dl-result-shell">
+          <div class="dl-result-panel">
+            <div class="dl-result-kicker">Run complete</div>
+            <div class="dl-result-title">Summary</div>
+            <p class="dl-result-sub">Result JSON files written to disk.</p>
+            <div class="dl-stat-grid">
+              <div class="dl-stat-tile dl-stat-tile--neutral">
+                <span class="dl-stat-n">{int(json_files)}</span>
+                <span class="dl-stat-l">JSON files</span>
+              </div>
+            </div>
+            {_output_path_row(output_rel)}
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_detailed_scenario_download_panel(
+    *,
+    success_rows: Sequence[Tuple[str, str]],
+    json_file_count: int,
+) -> None:
+    """
+    Tab2 expander: success scenarios (name, id) and JSON count.
+    success_rows: (scenario_name, scenario_id) for display only.
+    """
+    parts: List[str] = [
+        """
+        <div class="dl-result-shell">
+          <div class="dl-result-panel">
+            <div class="dl-result-kicker">Breakdown</div>
+            <div class="dl-result-title">Detailed results</div>
+        """
+    ]
+    if success_rows:
+        lis = "".join(
+            f"<li>{html.escape(name)} <span style=\"color:#64748b\">(ID: {html.escape(sid)})</span></li>"
+            for name, sid in success_rows
+        )
+        parts.append(
+            f'<p class="dl-result-sub">Successfully downloaded scenarios:</p><ul class="dl-mini-list">{lis}</ul>'
+        )
+    else:
+        parts.append('<p class="dl-result-sub">No new successful scenario downloads in this pass.</p>')
+    parts.append(
+        f"""
+            <div class="dl-path-row">Result JSON files downloaded: <strong>{int(json_file_count)}</strong></div>
+          </div>
+        </div>
+        """
+    )
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+def render_recent_scenario_downloads_intro() -> None:
+    """Tab3: above session-state scenario dataframe."""
+    st.markdown(
+        """
+        <div class="dl-result-shell">
+          <div class="dl-result-panel dl-result-panel--table">
+            <div class="dl-result-kicker">Session</div>
+            <div class="dl-result-title">Recent scenario downloads</div>
+            <p class="dl-result-sub">Rows from the latest download on this page (this browser session).</p>
           </div>
         </div>
         """,

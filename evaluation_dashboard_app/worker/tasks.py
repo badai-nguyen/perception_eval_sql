@@ -190,7 +190,7 @@ def job_download_results(task_id: str, parameters: Dict[str, Any]) -> None:
         }
         update_task_result_summary(task_id, summary)
         append_task_log(task_id, "Download and extract completed")
-        if failure_count > 0:
+        if success_count == 0 and failure_count > 0:
             err_msg = f"Download completed with {failure_count} failures. See task log for details."
             update_task_status(task_id, "failed", result_path=output_path, error_message=err_msg)
         else:

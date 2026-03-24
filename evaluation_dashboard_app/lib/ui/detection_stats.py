@@ -302,7 +302,7 @@ def detection_stats_page_loading_banner_markup() -> str:
           <span class="ds-plb-badge">In progress</span>
           <span class="ds-plb-text">Crunching detection stats…</span>
         </div>
-        <span class="ds-plb-sub">Hang tight — large Parquet files can take a moment. A teal <b>Working here</b> chip below jumps to whichever section is loading.</span>
+        <span class="ds-plb-sub">Hang tight — large Parquet files can take a moment.</span>
         <div class="ds-plb-shimmer-wrap"><div class="ds-plb-shimmer"></div></div>
       </div>
     </div>

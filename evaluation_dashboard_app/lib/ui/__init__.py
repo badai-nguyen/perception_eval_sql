@@ -24,8 +24,14 @@ from lib.ui.detection_stats import (
 from lib.ui.download_ui import (
     ImpressiveProgressHUD,
     impressive_progress_hud_markup,
+    render_detailed_scenario_download_panel,
     render_download_hero,
+    render_download_status_table_intro,
     render_download_task_section_header,
+    render_job_archives_summary_panel,
+    render_job_json_summary_panel,
+    render_recent_scenario_downloads_intro,
+    render_scenario_download_summary_panel,
 )
 from lib.ui.styles_download import inject_download_page_styles
 from lib.ui.styles_global import inject_app_page_styles
@@ -48,8 +54,14 @@ __all__ = [
     "inject_detection_stats_kpi_styles",
     "inject_detection_stats_styles",
     "inject_download_page_styles",
+    "render_detailed_scenario_download_panel",
     "render_download_hero",
+    "render_download_status_table_intro",
     "render_download_task_section_header",
+    "render_job_archives_summary_panel",
+    "render_job_json_summary_panel",
+    "render_recent_scenario_downloads_intro",
+    "render_scenario_download_summary_panel",
     "render_kpi_card",
     "section_header_html",
 ]

@@ -42,8 +42,14 @@ from lib.eval_summary import find_eval_result_dirs, run_eval_result_for_dir, gen
 from lib.page_chrome import inject_app_page_styles
 from lib.ui.download_ui import (
     ImpressiveProgressHUD,
+    render_detailed_scenario_download_panel,
     render_download_hero,
+    render_download_status_table_intro,
     render_download_task_section_header,
+    render_job_archives_summary_panel,
+    render_job_json_summary_panel,
+    render_recent_scenario_downloads_intro,
+    render_scenario_download_summary_panel,
 )
 from lib.ui.styles_download import inject_download_page_styles
 from lib.db import is_task_queue_enabled, create_task, list_recent_tasks, get_task, delete_task
@@ -360,7 +366,7 @@ class JobResult:
             try:
                 import pandas as pd
 
-                st.subheader("📋 Download Status")
+                render_download_status_table_intro()
                 st.dataframe(pd.DataFrame(download_rows), width="stretch")
             except Exception as e:
                 st.warning(f"Could not render download table: {e}")
@@ -694,14 +700,14 @@ class JobResult:
         _hud.clear()
         
         # Summary
-        st.subheader("📊 Download Summary")
         success_count = sum(1 for s in downloaded_scenarios if s["status"] == "success")
         skipped_count = sum(1 for s in downloaded_scenarios if s["status"] == "skipped")
         failed_count = sum(1 for s in downloaded_scenarios if s["status"] == "failed")
-        
-        st.write(f"- ✅ Successfully downloaded: {success_count}")
-        st.write(f"- ⏭️ Skipped (already exists): {skipped_count}")
-        st.write(f"- ❌ Failed: {failed_count}")
+        render_scenario_download_summary_panel(
+            success=success_count,
+            skipped=skipped_count,
+            failed=failed_count,
+        )
         
         return downloaded_scenarios
 
@@ -1403,17 +1409,19 @@ with tab1:
                     )
                     st.success(f"✅ Downloaded and extracted {len(remain_list)} archives")
                     download_successful = len(remain_list) > 0
-                    st.subheader("📊 Summary")
-                    st.write(f"- Total scenarios processed: {len(remain_list)}")
-                    st.write(f"- Output directory: `{to_data_relative(resolved_path_str)}`")
+                    render_job_archives_summary_panel(
+                        scenarios_processed=len(remain_list),
+                        output_rel=to_data_relative(resolved_path_str),
+                    )
             else:  # Result JSON only
                 with st.expander("Downloading Result JSON", expanded=True):
                     log_dicts = job_result.download_result_json()
                     st.success(f"✅ Downloaded {len(log_dicts)} JSON files")
                     download_successful = len(log_dicts) > 0
-                    # Show summary
-                    st.subheader("📊 Summary")
-                    st.write(f"- Output directory: `{to_data_relative(resolved_path_str)}`")
+                    render_job_json_summary_panel(
+                        json_files=len(log_dicts),
+                        output_rel=to_data_relative(resolved_path_str),
+                    )
             
             # Show file tree
             with st.expander("📁 File Structure"):
@@ -1539,16 +1547,11 @@ with tab2:
                 # Store in session state
                 st.session_state.downloaded_scenarios = downloaded
                 
-                # Show detailed results
-                st.subheader("📋 Detailed Results")
-                
                 success_scenarios = [s for s in downloaded if s["status"] == "success"]
-                if success_scenarios:
-                    st.write("Successfully downloaded scenarios:")
-                    for scenario in success_scenarios:
-                        st.write(f"• {scenario['name']} (ID: {scenario['id']})")
-                
-                st.write(f"Result JSON files: {len(log_dicts)} downloaded.")
+                render_detailed_scenario_download_panel(
+                    success_rows=[(s["name"], str(s["id"])) for s in success_scenarios],
+                    json_file_count=len(log_dicts),
+                )
                 
         except Exception as e:
             st.error(f"❌ Error downloading scenarios: {str(e)}")
@@ -1596,7 +1599,7 @@ with tab3:
         
         # Show session state downloads
         if st.session_state.downloaded_scenarios:
-            st.subheader("📋 Recent Scenario Downloads")
+            render_recent_scenario_downloads_intro()
             df_data = []
             for scenario in st.session_state.downloaded_scenarios:
                 df_data.append({
