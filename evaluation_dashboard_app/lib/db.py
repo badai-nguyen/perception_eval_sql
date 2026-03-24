@@ -381,8 +381,17 @@ def get_task(task_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def list_recent_tasks(limit: int = 50, session_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Return recent tasks (newest first). If session_id is set, only that user's tasks."""
+def list_recent_tasks(
+    limit: int = 50,
+    session_id: Optional[str] = None,
+    since_days: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Return recent tasks (newest first).
+
+    If ``session_id`` is set, only that user's tasks.
+    If ``since_days`` is set, only tasks with ``created_at`` within that many calendar days
+    (from DB ``NOW()``). ``limit`` still caps row count.
+    """
     url = get_database_url()
     if not url:
         return []
@@ -396,22 +405,27 @@ def list_recent_tasks(limit: int = 50, session_id: Optional[str] = None) -> List
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cols = "id, type, status, parameters, result_path, error_message, progress_message, progress_pct, log_output, result_summary, created_at, updated_at"
-                if session_id:
-                    cur.execute(
-                        f"""
-                        SELECT {cols}
-                        FROM tasks WHERE session_id = %s ORDER BY created_at DESC LIMIT %s
-                        """,
-                        (session_id, limit),
+                conditions: List[str] = []
+                params: List[Any] = []
+                if session_id is not None:
+                    conditions.append("session_id = %s")
+                    params.append(session_id)
+                if since_days is not None:
+                    conditions.append(
+                        "created_at >= NOW() - (%s::integer * INTERVAL '1 day')"
                     )
-                else:
-                    cur.execute(
-                        f"""
-                        SELECT {cols}
-                        FROM tasks ORDER BY created_at DESC LIMIT %s
-                        """,
-                        (limit,),
-                    )
+                    params.append(int(since_days))
+                where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+                params.append(limit)
+                cur.execute(
+                    f"""
+                    SELECT {cols}
+                    FROM tasks{where}
+                    ORDER BY created_at DESC
+                    LIMIT %s
+                    """,
+                    params,
+                )
                 return [dict(row) for row in cur.fetchall()]
         finally:
             conn.close()

@@ -125,14 +125,21 @@ def render_download_hero(*, queue_enabled: bool) -> None:
     )
 
 
-def render_download_task_section_header() -> None:
+def render_download_task_section_header(*, since_days: int = 7, max_rows: int = 200) -> None:
+    """Section title for the worker task list; keep in sync with ``list_recent_tasks`` args."""
+    days = int(since_days)
+    cap = int(max_rows)
     st.markdown(
-        """
+        f"""
         <div class="dl-section-card">
           <div class="dl-section-icon" aria-hidden="true">⚡</div>
           <div>
             <div class="dl-section-kicker">Background jobs</div>
-            <div class="dl-section-title">Task status</div>
+            <div class="dl-section-title">Recent tasks</div>
+            <div style="font-size:0.82rem;color:#64748b;margin-top:0.35rem;max-width:36rem;line-height:1.45;">
+              Jobs from the last <strong>{days}</strong> days (newest first), up to <strong>{cap}</strong> rows.
+              Older work is not listed here.
+            </div>
           </div>
         </div>
         """,

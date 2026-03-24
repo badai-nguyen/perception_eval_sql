@@ -85,6 +85,7 @@ services:
       # Mount app source so code changes apply without rebuild (restart worker to pick up: docker compose restart worker)
       - ../Overview.py:/app/Overview.py
       - ../pages:/app/pages
+      - ../Readme.md:/app/Readme.md
       - ../lib:/app/lib
       - ../worker:/app/worker
       - ../configs:/app/configs

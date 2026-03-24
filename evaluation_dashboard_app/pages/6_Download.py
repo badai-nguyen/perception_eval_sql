@@ -62,6 +62,10 @@ try:
 except ImportError:
     CATALOG_IO_AVAILABLE = False
 
+# Task queue panel: time window + row cap (must match header + list_recent_tasks)
+_TASK_LIST_SINCE_DAYS = 7
+_TASK_LIST_MAX_ROWS = 200
+
 
 def _enqueue_task(
     task_type: str,
@@ -910,9 +914,9 @@ def _open_task_detail(task_id: str) -> None:
 def _render_task_list(tasks: List[Dict[str, Any]], current_user: Optional[str]) -> bool:
     """Render task list as a table; returns True if any task is pending or running."""
     if current_user:
-        st.caption(f"Logged in as **{current_user}** (showing your tasks only)")
+        st.caption(f"Logged in as **{current_user}** · your recent tasks only")
     if not tasks:
-        st.caption("No tasks yet.")
+        st.caption("No recent tasks yet.")
         return False
     has_active = False
 
@@ -1025,19 +1029,30 @@ def _render_task_list(tasks: List[Dict[str, Any]], current_user: Optional[str]) 
 _current_user = None
 if is_task_queue_enabled():
     _current_user = get_current_user_id() if is_auth_enabled() else None
-    render_download_task_section_header()
+    render_download_task_section_header(
+        since_days=_TASK_LIST_SINCE_DAYS,
+        max_rows=_TASK_LIST_MAX_ROWS,
+    )
     _use_fragment = getattr(st, "fragment", None) is not None
     if _use_fragment:
         try:
             @st.fragment(run_every=timedelta(seconds=3))
             def _task_list_poll():
-                _t = list_recent_tasks(limit=20, session_id=_current_user)
+                _t = list_recent_tasks(
+                    limit=_TASK_LIST_MAX_ROWS,
+                    session_id=_current_user,
+                    since_days=_TASK_LIST_SINCE_DAYS,
+                )
                 _render_task_list(_t, _current_user)
             _task_list_poll()
         except (TypeError, AttributeError):
             _use_fragment = False
     if not _use_fragment:
-        tasks = list_recent_tasks(limit=20, session_id=_current_user)
+        tasks = list_recent_tasks(
+            limit=_TASK_LIST_MAX_ROWS,
+            session_id=_current_user,
+            since_days=_TASK_LIST_SINCE_DAYS,
+        )
         has_active = _render_task_list(tasks, _current_user)
         if st.button("Refresh task list", key="refresh_tasks"):
             st.rerun()

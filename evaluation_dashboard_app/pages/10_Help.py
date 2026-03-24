@@ -17,7 +17,16 @@ render_page_hero(
     description="In-app copy of the project README — setup, pages, and workflows for the evaluation dashboard.",
     mode="Single Run",
 )
+import os
 
+st.markdown("#### Current Working Directory")
+cwd = os.path.abspath(os.getcwd())
+st.code(cwd, language="bash")
+
+st.markdown("#### Files in Current Directory")
+files = os.listdir(cwd)
+st.code("\n".join(files), language="bash")
+st.stop()
 readme_path = Path("Readme.md")
 content = readme_path.read_text(encoding="utf-8")
 
