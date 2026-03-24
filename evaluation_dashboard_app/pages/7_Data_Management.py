@@ -110,30 +110,52 @@ else:
         st.info("This run has no Summary.csv, Score.csv, or `.parquet` files at the top level.")
     else:
         st.caption(f"**{len(to_zip)}** file(s) will be included: {', '.join(arc for _, arc in to_zip)}")
-        buf = io.BytesIO()
-        zip_errors: list[str] = []
-        included: list[str] = []
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for fpath, arcname in to_zip:
-                try:
-                    zf.write(fpath, arcname=arcname)
-                    included.append(arcname)
-                except OSError as e:
-                    zip_errors.append(f"{arcname}: {e}")
-        for msg in zip_errors:
-            st.warning(msg)
-        if included:
-            safe_stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", dl_run_name).strip() or "run"
-            zip_name = f"{safe_stem}_artifacts.zip"
+        # Invalidate prepared zip when user switches runs (avoid stale download + free memory).
+        prepared = st.session_state.get("dm_zip_prepared")
+        if prepared and prepared.get("run") != dl_run_name:
+            st.session_state.pop("dm_zip_prepared", None)
+            prepared = None
+
+        if st.button(
+            "Prepare download (build ZIP)",
+            key="dm_prepare_zip",
+            help="Reads and compresses files on demand so the page stays fast until you need the archive.",
+        ):
+            buf = io.BytesIO()
+            zip_errors: list[str] = []
+            included: list[str] = []
+            with st.spinner("Building ZIP…"):
+                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for fpath, arcname in to_zip:
+                        try:
+                            zf.write(fpath, arcname=arcname)
+                            included.append(arcname)
+                        except OSError as e:
+                            zip_errors.append(f"{arcname}: {e}")
+            for msg in zip_errors:
+                st.warning(msg)
+            if included:
+                safe_stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", dl_run_name).strip() or "run"
+                zip_name = f"{safe_stem}_artifacts.zip"
+                st.session_state["dm_zip_prepared"] = {
+                    "run": dl_run_name,
+                    "data": buf.getvalue(),
+                    "file_name": zip_name,
+                }
+            else:
+                st.session_state.pop("dm_zip_prepared", None)
+                st.error("Could not add any files to the zip.")
+
+        prepared = st.session_state.get("dm_zip_prepared")
+        if prepared and prepared.get("run") == dl_run_name and prepared.get("data"):
             st.download_button(
-                label=f"Download {zip_name}",
-                data=buf.getvalue(),
-                file_name=zip_name,
+                label=f"Download {prepared['file_name']}",
+                data=prepared["data"],
+                file_name=prepared["file_name"],
                 mime="application/zip",
                 key=f"dm_dl_zip_{dl_run_name}",
             )
-        else:
-            st.error("Could not add any files to the zip.")
+            st.caption("ZIP is ready in this session. Change run or refresh the page to discard it.")
 
 # Delete section
 section_header("Delete", "Permanent — frees disk space. Use with care on shared servers.")

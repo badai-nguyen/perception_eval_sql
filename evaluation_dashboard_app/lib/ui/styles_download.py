@@ -210,34 +210,6 @@ def inject_download_page_styles() -> None:
           .dl-step-line { display: none; }
           .dl-pipeline-inner { flex-direction: column; align-items: stretch; }
         }
-        .dl-section-card {
-          display: flex;
-          align-items: center;
-          gap: 0.85rem;
-          margin: 0.25rem 0 0.75rem 0;
-          padding: 0.85rem 1.05rem;
-          border-radius: 14px;
-          background: linear-gradient(120deg, #fffbeb 0%, #fff 55%, #ecfeff 100%);
-          border: 1px solid #fde68a;
-          box-shadow: 0 6px 20px -8px rgba(180, 83, 9, 0.2);
-        }
-        .dl-section-icon {
-          font-size: 1.35rem;
-          line-height: 1;
-        }
-        .dl-section-kicker {
-          font-size: 0.65rem;
-          font-weight: 700;
-          letter-spacing: 0.12em;
-          text-transform: uppercase;
-          color: #b45309;
-        }
-        .dl-section-title {
-          font-size: 1.15rem;
-          font-weight: 800;
-          letter-spacing: -0.02em;
-          color: #0f172a;
-        }
         .dl-tabs-rail {
           margin: 0.15rem 0 0.35rem 0;
           font-size: 0.68rem;
@@ -580,6 +552,374 @@ def inject_download_page_styles() -> None:
           line-height: 1.55;
         }
         .dl-mini-list li { margin: 0.2rem 0; }
+
+        /* —— Task queue list (cards + compact progress) —— */
+        @keyframes dl-task-card-glow {
+          0%, 100% {
+            box-shadow: 0 4px 22px -12px rgba(14, 165, 233, 0.18);
+            border-color: rgba(14, 165, 233, 0.22);
+          }
+          50% {
+            box-shadow: 0 8px 28px -10px rgba(139, 92, 246, 0.16);
+            border-color: rgba(139, 92, 246, 0.2);
+          }
+        }
+        @keyframes dl-task-shimmer {
+          0% { background-position: 0% 50%; }
+          100% { background-position: 200% 50%; }
+        }
+        @keyframes dl-task-stripe {
+          0% { transform: translateX(-100%); }
+          100% { transform: translateX(100%); }
+        }
+        .dl-task-stack {
+          margin: 0.05rem 0 0.35rem 0;
+        }
+        .dl-task-sep {
+          height: 1px;
+          margin: 0.3rem 0 0.1rem 0;
+          background: linear-gradient(
+            90deg,
+            transparent 0%,
+            #e2e8f0 12%,
+            #e2e8f0 88%,
+            transparent 100%
+          );
+        }
+        .dl-task-row1--compact {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          gap: 0.28rem 0.45rem;
+          margin-bottom: 0;
+        }
+        .dl-task-card--compact .dl-task-type {
+          font-size: 0.8rem;
+          font-weight: 800;
+        }
+        .dl-task-card--compact .dl-task-pill {
+          padding: 0.12rem 0.42rem;
+          font-size: 0.6rem;
+          letter-spacing: 0.05em;
+        }
+        .dl-task-card--compact .dl-task-id {
+          font-size: 0.65rem;
+        }
+        .dl-task-meta-inline {
+          margin-left: auto;
+          font-size: 0.7rem;
+          font-weight: 600;
+          color: #64748b;
+          font-variant-numeric: tabular-nums;
+          white-space: nowrap;
+        }
+        @media (max-width: 520px) {
+          .dl-task-meta-inline {
+            width: 100%;
+            margin-left: 0;
+          }
+        }
+        .dl-task-prog--compact {
+          margin-top: 0.32rem;
+          padding-top: 0;
+          border-top: none;
+        }
+        .dl-task-prog-compact-lane {
+          display: flex;
+          align-items: center;
+          gap: 0.4rem;
+          min-width: 0;
+        }
+        .dl-task-track--compact {
+          flex: 1;
+          min-width: 0;
+          height: 6px;
+        }
+        .dl-task-prog-inline-pct {
+          font-family: ui-monospace, "Cascadia Code", monospace;
+          font-size: 0.82rem;
+          font-weight: 800;
+          color: #0369a1;
+          min-width: 2.35rem;
+          text-align: right;
+          flex-shrink: 0;
+          font-variant-numeric: tabular-nums;
+        }
+        .dl-task-prog-inline-pct--muted {
+          color: #94a3b8;
+        }
+        .dl-task-prog-inline-label {
+          font-size: 0.58rem;
+          font-weight: 800;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+          color: #b45309;
+          flex-shrink: 0;
+        }
+        .dl-task-prog-msg--one {
+          display: -webkit-box;
+          -webkit-box-orient: vertical;
+          margin-top: 0.18rem;
+          font-size: 0.7rem;
+          -webkit-line-clamp: 1;
+          line-clamp: 1;
+          overflow: hidden;
+        }
+        .dl-task-sum--one {
+          margin: 0.22rem 0 0 0;
+          font-size: 0.72rem;
+          line-height: 1.35;
+          -webkit-line-clamp: 1;
+          line-clamp: 1;
+          display: -webkit-box;
+          -webkit-box-orient: vertical;
+          overflow: hidden;
+        }
+        .dl-task-card {
+          position: relative;
+          border-radius: 16px;
+          padding: 0.85rem 1.05rem 0.95rem 1.05rem;
+          margin-bottom: 0.35rem;
+          border: 1px solid #e2e8f0;
+          background:
+            radial-gradient(ellipse 85% 70% at 0% 0%, rgba(56, 189, 248, 0.08) 0%, transparent 55%),
+            radial-gradient(ellipse 70% 55% at 100% 100%, rgba(167, 139, 250, 0.06) 0%, transparent 50%),
+            linear-gradient(165deg, #ffffff 0%, #f8fafc 55%, #f1f5f9 100%);
+          box-shadow: 0 4px 18px -10px rgba(15, 23, 42, 0.14);
+          overflow: hidden;
+        }
+        .dl-task-card--active {
+          animation: dl-task-card-glow 3.5s ease-in-out infinite;
+        }
+        .dl-task-card::before {
+          content: "";
+          position: absolute;
+          left: 0;
+          top: 0;
+          bottom: 0;
+          width: 4px;
+          border-radius: 16px 0 0 16px;
+          background: linear-gradient(180deg, #38bdf8 0%, #a78bfa 50%, #34d399 100%);
+          opacity: 0.55;
+        }
+        .dl-task-card--pending::before {
+          background: linear-gradient(180deg, #fbbf24 0%, #f97316 100%);
+          opacity: 0.75;
+        }
+        .dl-task-card--running::before {
+          background: linear-gradient(180deg, #0ea5e9 0%, #6366f1 100%);
+          opacity: 0.85;
+        }
+        .dl-task-card--completed::before {
+          background: linear-gradient(180deg, #22c55e 0%, #14b8a6 100%);
+          opacity: 0.65;
+        }
+        .dl-task-card--failed::before {
+          background: linear-gradient(180deg, #fb7185 0%, #f43f5e 100%);
+          opacity: 0.8;
+        }
+        .dl-task-card.dl-task-card--compact {
+          border-radius: 11px;
+          padding: 0.45rem 0.65rem 0.5rem 0.65rem;
+          margin-bottom: 0.2rem;
+          box-shadow: 0 2px 12px -8px rgba(15, 23, 42, 0.12);
+        }
+        .dl-task-card.dl-task-card--compact::before {
+          width: 3px;
+          border-radius: 11px 0 0 11px;
+        }
+        .dl-task-card.dl-task-card--history {
+          padding-bottom: 0.42rem;
+        }
+        .dl-task-inner {
+          position: relative;
+          z-index: 1;
+          padding-left: 0.35rem;
+        }
+        .dl-task-row1 {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: center;
+          gap: 0.45rem 0.65rem;
+          margin-bottom: 0.35rem;
+        }
+        .dl-task-type {
+          font-size: 0.95rem;
+          font-weight: 800;
+          letter-spacing: -0.02em;
+          color: #0f172a;
+        }
+        .dl-task-id {
+          font-family: ui-monospace, "Cascadia Code", monospace;
+          font-size: 0.72rem;
+          font-weight: 600;
+          color: #94a3b8;
+          letter-spacing: 0.04em;
+        }
+        .dl-task-pill {
+          display: inline-flex;
+          align-items: center;
+          padding: 0.22rem 0.55rem;
+          border-radius: 999px;
+          font-size: 0.68rem;
+          font-weight: 800;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+          border: 1px solid #e2e8f0;
+          background: #fff;
+          color: #475569;
+        }
+        .dl-task-pill--pending {
+          border-color: rgba(251, 191, 36, 0.55);
+          background: linear-gradient(135deg, #fffbeb 0%, #fff 100%);
+          color: #b45309;
+        }
+        .dl-task-pill--running {
+          border-color: rgba(14, 165, 233, 0.45);
+          background: linear-gradient(135deg, #e0f2fe 0%, #fff 100%);
+          color: #0369a1;
+        }
+        .dl-task-pill--done {
+          border-color: rgba(52, 211, 153, 0.5);
+          background: linear-gradient(135deg, #ecfdf5 0%, #fff 100%);
+          color: #047857;
+        }
+        .dl-task-pill--fail {
+          border-color: rgba(251, 113, 133, 0.55);
+          background: linear-gradient(135deg, #fff1f2 0%, #fff 100%);
+          color: #be123c;
+        }
+        .dl-task-meta {
+          font-size: 0.78rem;
+          font-weight: 600;
+          color: #64748b;
+          font-variant-numeric: tabular-nums;
+        }
+        .dl-task-sum {
+          font-size: 0.84rem;
+          line-height: 1.45;
+          color: #334155;
+          margin: 0.15rem 0 0.5rem 0;
+          max-width: 100%;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+        }
+        .dl-task-prog {
+          margin-top: 0.45rem;
+          padding-top: 0.55rem;
+          border-top: 1px solid rgba(226, 232, 240, 0.95);
+        }
+        .dl-task-prog-head {
+          display: flex;
+          align-items: baseline;
+          justify-content: space-between;
+          gap: 0.5rem;
+          margin-bottom: 0.35rem;
+        }
+        .dl-task-prog-label {
+          font-size: 0.62rem;
+          font-weight: 800;
+          letter-spacing: 0.18em;
+          text-transform: uppercase;
+          color: #64748b;
+        }
+        .dl-task-prog-pct {
+          font-family: ui-monospace, "Cascadia Code", monospace;
+          font-size: 1.35rem;
+          font-weight: 800;
+          letter-spacing: -0.03em;
+          line-height: 1;
+          background: linear-gradient(120deg, #0369a1 0%, #0d9488 40%, #4f46e5 100%);
+          background-size: 200% auto;
+          -webkit-background-clip: text;
+          background-clip: text;
+          color: transparent;
+          animation: dl-task-shimmer 3.5s ease-in-out infinite;
+        }
+        .dl-task-prog-pct--muted {
+          background: none;
+          -webkit-background-clip: unset;
+          background-clip: unset;
+          color: #94a3b8;
+          animation: none;
+        }
+        .dl-task-prog-suf {
+          font-size: 0.85rem;
+          font-weight: 700;
+          color: #94a3b8;
+          margin-left: 0.05rem;
+        }
+        .dl-task-track {
+          position: relative;
+          height: 9px;
+          border-radius: 999px;
+          background: #e2e8f0;
+          border: 1px solid #cbd5e1;
+          overflow: hidden;
+        }
+        .dl-task-fill {
+          height: 100%;
+          border-radius: 999px;
+          background: linear-gradient(90deg, #0e7490 0%, #0ea5e9 35%, #6366f1 70%, #8b5cf6 100%);
+          background-size: 200% 100%;
+          animation: dl-task-shimmer 2.6s ease-in-out infinite;
+          box-shadow:
+            0 1px 0 rgba(255, 255, 255, 0.35) inset,
+            0 0 0 1px rgba(255, 255, 255, 0.1) inset;
+          transition: width 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+          min-width: 0;
+        }
+        .dl-task-fill--indeterminate {
+          width: 100% !important;
+          position: relative;
+          overflow: hidden;
+        }
+        .dl-task-fill--indeterminate::after {
+          content: "";
+          position: absolute;
+          inset: 0;
+          background: linear-gradient(
+            90deg,
+            transparent 0%,
+            rgba(255, 255, 255, 0.5) 50%,
+            transparent 100%
+          );
+          width: 40%;
+          animation: dl-task-stripe 1.35s ease-in-out infinite;
+        }
+        .dl-task-prog-msg {
+          margin-top: 0.35rem;
+          font-size: 0.78rem;
+          font-weight: 600;
+          color: #475569;
+          line-height: 1.4;
+          max-width: 100%;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+        }
+        .dl-task-empty {
+          margin: 0.35rem 0 0.75rem 0;
+          padding: 1.35rem 1.25rem;
+          border-radius: 16px;
+          text-align: center;
+          border: 2px dashed #cbd5e1;
+          background: linear-gradient(180deg, #f8fafc 0%, #fff 100%);
+          color: #64748b;
+          font-size: 0.9rem;
+          font-weight: 600;
+        }
+        .dl-task-empty-icon {
+          font-size: 1.75rem;
+          line-height: 1;
+          margin-bottom: 0.35rem;
+          opacity: 0.85;
+        }
         </style>
         """,
         unsafe_allow_html=True,

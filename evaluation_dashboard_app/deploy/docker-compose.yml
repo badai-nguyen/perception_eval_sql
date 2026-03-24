@@ -10,6 +10,12 @@
 #
 # App source is mounted so you can edit Python code without rebuilding the image.
 # Streamlit will reload on file changes. Restart the worker to pick up changes: docker compose restart worker
+#
+# Deployment debug (pages/11_Deployment_Debug.py — Docker tab): Streamlit mounts the host
+# Docker socket and sets EVAL_DEPLOYMENT_DEBUG_DOCKER=1. Anyone who can use the dashboard
+# can read logs for containers the UI filter exposes; restrict with auth/VPN on untrusted
+# networks. Set EVAL_DEPLOYMENT_DEBUG_COMPOSE_PROJECT in .env (see .env.example).
+# EVAL_DEPLOYMENT_DEBUG_EXEC=1 in .env enables one-shot shell (docker exec) from the UI.
 
 services:
   nginx:
@@ -38,6 +44,10 @@ services:
       - DATABASE_URL=${DATABASE_URL}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - RQ_QUEUE=${RQ_QUEUE:-default}
+      - EVAL_DEPLOYMENT_DEBUG_DOCKER=1
+      - EVAL_DEPLOYMENT_DEBUG_COMPOSE_PROJECT=${EVAL_DEPLOYMENT_DEBUG_COMPOSE_PROJECT:-}
+      # One-shot shell in selected container (docker exec). Default off; set to 1 in .env only when needed.
+      - EVAL_DEPLOYMENT_DEBUG_EXEC=${EVAL_DEPLOYMENT_DEBUG_EXEC:-0}
     volumes:
       - ../data:/app/data
       - ${HOME}/.webauto:/root/.webauto
@@ -46,9 +56,11 @@ services:
       # Mount app source so code changes apply without rebuild (Streamlit auto-reloads)
       - ../Overview.py:/app/Overview.py
       - ../pages:/app/pages
+      - ../Readme.md:/app/Readme.md
       - ../lib:/app/lib
       - ../worker:/app/worker
       - ../configs:/app/configs
+      - /var/run/docker.sock:/var/run/docker.sock
     env_file:
       - .env
     depends_on:

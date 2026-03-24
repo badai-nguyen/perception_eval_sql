@@ -286,4 +286,7 @@ def run_job(task_id: str, task_type: str, parameters: Dict[str, Any]) -> None:
     if not fn:
         update_task_status(task_id, "failed", error_message=f"Unknown task type: {task_type}")
         return
+    # Mark running as soon as the worker claims the job (before heavy job_* setup).
+    # Otherwise the UI stays "pending" until the first line of each job_* runs.
+    update_task_status(task_id, "running")
     fn(task_id, parameters)

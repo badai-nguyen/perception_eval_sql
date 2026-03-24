@@ -42,6 +42,7 @@ from lib.eval_summary import find_eval_result_dirs, run_eval_result_for_dir, gen
 from lib.page_chrome import inject_app_page_styles
 from lib.ui.download_ui import (
     ImpressiveProgressHUD,
+    TaskCardMode,
     render_detailed_scenario_download_panel,
     render_download_hero,
     render_download_status_table_intro,
@@ -50,9 +51,18 @@ from lib.ui.download_ui import (
     render_job_json_summary_panel,
     render_recent_scenario_downloads_intro,
     render_scenario_download_summary_panel,
+    render_task_list_empty_state,
+    task_list_card_markup,
 )
 from lib.ui.styles_download import inject_download_page_styles
-from lib.db import is_task_queue_enabled, create_task, list_recent_tasks, get_task, delete_task
+from lib.db import (
+    create_task,
+    delete_task,
+    get_task,
+    is_task_queue_enabled,
+    list_recent_tasks,
+    update_task_rq_job_id,
+)
 from lib import download_core
 from lib.auth import get_current_user_id, is_auth_enabled
 
@@ -66,6 +76,33 @@ except ImportError:
 _TASK_LIST_SINCE_DAYS = 7
 _TASK_LIST_MAX_ROWS = 200
 
+def _parse_rq_timeout_sec(raw: Optional[str], *, default: int, minimum: int) -> int:
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return max(minimum, int(str(raw).strip(), 10))
+    except ValueError:
+        return default
+
+
+# RQ kills the work horse when job_timeout is exceeded. The library default (~180s) is too
+# short for downloads, run_eval_dirs, and parquet. All enqueued jobs use a long default.
+_RQ_JOB_TIMEOUT_DEFAULT_SEC = 7 * 24 * 3600
+_RQ_DEFAULT_JOB_TIMEOUT_SEC = _parse_rq_timeout_sec(
+    os.environ.get("RQ_JOB_TIMEOUT_SEC"),
+    default=_RQ_JOB_TIMEOUT_DEFAULT_SEC,
+    minimum=60,
+)
+_bp_raw = os.environ.get("RQ_BUILD_PARQUET_TIMEOUT_SEC")
+if _bp_raw is not None and str(_bp_raw).strip():
+    _BUILD_PARQUET_JOB_TIMEOUT_SEC = _parse_rq_timeout_sec(
+        _bp_raw,
+        default=_RQ_DEFAULT_JOB_TIMEOUT_SEC,
+        minimum=300,
+    )
+else:
+    _BUILD_PARQUET_JOB_TIMEOUT_SEC = _RQ_DEFAULT_JOB_TIMEOUT_SEC
+
 
 def _enqueue_task(
     task_type: str,
@@ -73,7 +110,7 @@ def _enqueue_task(
     job_timeout: Optional[int] = None,
 ) -> Optional[str]:
     """Create task in Postgres and enqueue to RQ. Returns task_id or None on failure.
-    job_timeout: optional timeout in seconds (e.g. 3600 for 1h). Used for long-running tasks like downloads.
+    job_timeout: RQ max runtime in seconds; when omitted, uses RQ_JOB_TIMEOUT_SEC (default 7 days).
     """
     session_id = get_current_user_id() if is_auth_enabled() else None
     task_id = create_task(task_type, parameters, session_id=session_id)
@@ -86,10 +123,19 @@ def _enqueue_task(
         redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
         conn = Redis.from_url(redis_url)
         queue = Queue(os.environ.get("RQ_QUEUE", "default"), connection=conn)
-        enqueue_kw = {}
-        if job_timeout is not None:
-            enqueue_kw["job_timeout"] = job_timeout
-        queue.enqueue(run_job, task_id, task_type, parameters, **enqueue_kw)
+        effective_timeout = (
+            job_timeout if job_timeout is not None else _RQ_DEFAULT_JOB_TIMEOUT_SEC
+        )
+        job = queue.enqueue(
+            run_job,
+            task_id,
+            task_type,
+            parameters,
+            job_timeout=effective_timeout,
+        )
+        rid = getattr(job, "id", None)
+        if rid:
+            update_task_rq_job_id(task_id, str(rid))
         return task_id
     except Exception:
         return None
@@ -911,93 +957,107 @@ def _open_task_detail(task_id: str) -> None:
     st.session_state["_task_detail_id"] = str(task_id)
 
 
+def _render_one_task_row(
+    t: Dict[str, Any],
+    current_user: Optional[str],
+    use_dialog: bool,
+    *,
+    mode: TaskCardMode,
+) -> None:
+    """One task: compact card + View/Delete (and inline More when no dialog)."""
+    task_id = t.get("id", "")
+    task_type = t.get("type", "")
+    status = t.get("status", "")
+    status_labels = {"pending": "Pending", "running": "Running", "completed": "Completed", "failed": "Failed"}
+    status_label = status_labels.get(status, status)
+    type_label = _task_type_label(task_type)
+    summary = _task_summary(t)
+    duration = _task_duration(t) or "—"
+    time_str = _task_time_str(t)
+    sid = str(task_id)
+    if mode == "history":
+        summary_short = (summary[:72] + "…") if summary and len(summary) > 72 else (summary or "—")
+    else:
+        summary_short = "—"
+    progress_msg = (t.get("progress_message") or "").strip()
+    _card = task_list_card_markup(
+        task_id=sid,
+        type_label=type_label,
+        status=status,
+        status_label=status_label,
+        time_str=time_str,
+        duration=duration,
+        summary_short=summary_short,
+        progress_pct=t.get("progress_pct"),
+        progress_message=progress_msg,
+        mode=mode,
+    )
+    st.markdown(f'<div class="dl-task-stack">{_card}</div>', unsafe_allow_html=True)
+
+    if use_dialog:
+        bv, bd, _sp = st.columns([1.15, 1.15, 4])
+        with bv:
+            st.button("View", key=f"view_{sid}", on_click=_open_task_detail, args=(sid,))
+        with bd:
+            _stop_lbl = "Stop" if status in ("pending", "running") else "Remove"
+            _stop_help = (
+                "Cancels the Redis/RQ job when possible, then removes this row from the list."
+                if status in ("pending", "running")
+                else "Remove this row from the task list."
+            )
+            if st.button(
+                _stop_lbl,
+                key=f"del_{sid}",
+                type="secondary",
+                help=_stop_help,
+            ):
+                delete_task(sid, session_id=current_user)
+                st.rerun()
+    else:
+        bd, _sp = st.columns([1.15, 4])
+        with bd:
+            _stop_lbl = "Stop" if status in ("pending", "running") else "Remove"
+            _stop_help = (
+                "Cancels the Redis/RQ job when possible, then removes this row from the list."
+                if status in ("pending", "running")
+                else "Remove this row from the task list."
+            )
+            if st.button(
+                _stop_lbl,
+                key=f"del_{sid}",
+                type="secondary",
+                help=_stop_help,
+            ):
+                delete_task(sid, session_id=current_user)
+                st.rerun()
+
+    if not use_dialog:
+        with st.expander("More", expanded=False):
+            _render_task_detail_content(t)
+
+
 def _render_task_list(tasks: List[Dict[str, Any]], current_user: Optional[str]) -> bool:
-    """Render task list as a table; returns True if any task is pending or running."""
+    """Active tasks visible; completed/failed in a collapsed expander. True if any active."""
     if current_user:
         st.caption(f"Logged in as **{current_user}** · your recent tasks only")
     if not tasks:
-        st.caption("No recent tasks yet.")
+        render_task_list_empty_state()
         return False
-    has_active = False
 
-    # Table header (compact: use caption and thin separators)
-    h1, h2, h3, h4, h5, h6 = st.columns([2, 0.9, 1.2, 0.8, 2.2, 1.2])
-    with h1:
-        st.caption("**Type**")
-    with h2:
-        st.caption("**Status**")
-    with h3:
-        st.caption("**Time**")
-    with h4:
-        st.caption("**Duration**")
-    with h5:
-        st.caption("**Summary**")
-    with h6:
-        st.caption("**Actions**")
-    st.markdown("<div style='height:1px; background:#ddd; margin:2px 0 4px 0;'></div>", unsafe_allow_html=True)
-
+    active = [t for t in tasks if t.get("status") in ("pending", "running")]
+    history = [t for t in tasks if t.get("status") not in ("pending", "running")]
     use_dialog = callable(getattr(st, "dialog", None))
 
-    for t in tasks:
-        if t.get("status") in ("pending", "running"):
-            has_active = True
-        task_id = t.get("id", "")
-        task_type = t.get("type", "")
-        status = t.get("status", "")
-        status_labels = {"pending": "Pending", "running": "Running", "completed": "Completed", "failed": "Failed"}
-        status_label = status_labels.get(status, status)
-        type_label = _task_type_label(task_type)
-        summary = _task_summary(t)
-        duration = _task_duration(t) or "—"
-        time_str = _task_time_str(t)
-        sid = str(task_id)
+    for t in active:
+        _render_one_task_row(t, current_user, use_dialog, mode="active_compact")
 
-        c1, c2, c3, c4, c5, c6 = st.columns([2, 0.9, 1.2, 0.8, 2.2, 1.2])
-        with c1:
-            st.caption(type_label)
-        with c2:
-            if status == "pending":
-                st.caption(f":orange[{status_label}]")
-            elif status == "running":
-                st.caption(f":blue[{status_label}]")
-            elif status == "completed":
-                st.caption(f":green[{status_label}]")
-            else:
-                st.caption(f":red[{status_label}]")
-        with c3:
-            st.caption(time_str)
-        with c4:
-            st.caption(duration)
-        with c5:
-            summary_short = (summary[:60] + "…") if summary and len(summary) > 60 else (summary or "—")
-            st.caption(summary_short)
-        with c6:
-            a6, b6 = st.columns(2)
-            with a6:
-                if use_dialog:
-                    st.button("View", key=f"view_{sid}", on_click=_open_task_detail, args=(sid,))
-            with b6:
-                if st.button("Delete", key=f"del_{sid}", type="secondary"):
-                    delete_task(sid, session_id=current_user)
-                    st.rerun()
+    if not active:
+        st.caption("No queued or running jobs.")
 
-        if status == "running":
-            progress_msg = t.get("progress_message") or "Running..."
-            pct = t.get("progress_pct")
-            px, pc = st.columns([4, 1])
-            with px:
-                if pct is not None:
-                    st.progress(float(pct) / 100.0)
-                else:
-                    st.progress(0)
-            with pc:
-                st.caption(progress_msg[:40] + "…" if len(progress_msg) > 40 else progress_msg)
-
-        if not use_dialog:
-            with st.expander("More", expanded=False):
-                _render_task_detail_content(t)
-        # Thin separator between rows (no heavy divider)
-        st.markdown("<div style='height:1px; background:#eee; margin:2px 0;'></div>", unsafe_allow_html=True)
+    if history:
+        with st.expander(f"Task history ({len(history)})", expanded=False):
+            for t in history:
+                _render_one_task_row(t, current_user, use_dialog, mode="history")
 
     # Modal for task detail when dialog is available
     if use_dialog and st.session_state.get("_task_detail_id"):
@@ -1022,7 +1082,7 @@ def _render_task_list(tasks: List[Dict[str, Any]], current_user: Optional[str]) 
             # Clear so X/outside click or error doesn't leave page stuck; next run shows main content
             st.session_state.pop("_task_detail_id", None)
 
-    return has_active
+    return len(active) > 0
 
 
 # Task queue status (production deployment); per-user when auth is enabled
@@ -1239,8 +1299,10 @@ with st.sidebar:
     if download_type == "Archives (ZIP)":
         phase = st.text_input(
             "Phase to extract",
-            value=get_config_value("phase", "phase_name"),
-            help="Enter the phase name to extract from archives"
+            value=get_config_value(
+                "phase", "perception.object_recognition.tracking.objects"
+            ),
+            help="Enter the phase name to extract from archives",
         )
         set_config_value("phase", phase)
 
@@ -1395,7 +1457,7 @@ with tab1:
                 "large_file_mb": large_file_mb,
                 "keep_zip_files": keep_zip_files,
             }
-            task_id = _enqueue_task("download_results", params, job_timeout=3600)
+            task_id = _enqueue_task("download_results", params)
             if task_id:
                 st.success("Task queued. It will appear in the **Task status** section below; the list updates automatically.")
             else:
@@ -1802,11 +1864,15 @@ with tab4:
             enqueued = []
             if generate_parquet_clicked or generate_both_clicked:
                 if CATALOG_IO_AVAILABLE:
-                    tid = _enqueue_task("build_parquet", {
-                        "pkl_dir": eval_path,
-                        "project_id": project_id or "",
-                        "job_id": st.session_state.job_id or "",
-                    })
+                    tid = _enqueue_task(
+                        "build_parquet",
+                        {
+                            "pkl_dir": eval_path,
+                            "project_id": project_id or "",
+                            "job_id": st.session_state.job_id or "",
+                        },
+                        job_timeout=_BUILD_PARQUET_JOB_TIMEOUT_SEC,
+                    )
                     if tid:
                         enqueued.append(f"build_parquet ({tid[:8]}...)")
                 else:

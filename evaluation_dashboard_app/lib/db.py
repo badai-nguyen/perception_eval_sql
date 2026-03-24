@@ -7,8 +7,20 @@ When DATABASE_URL is not set or USE_TASK_QUEUE is false, task queue is disabled.
 import os
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+
+try:
+    from zoneinfo import ZoneInfo
+
+    _TASK_LOG_TZ = ZoneInfo("Asia/Tokyo")
+except Exception:  # pragma: no cover — minimal env without tzdata
+    _TASK_LOG_TZ = timezone(timedelta(hours=9))
+
+
+def _task_log_timestamp_prefix() -> str:
+    """Human-readable JST stamp for worker/UI task log lines."""
+    return datetime.now(_TASK_LOG_TZ).strftime("%Y-%m-%d %H:%M:%S JST")
 
 # Task types and statuses
 TASK_TYPES = (
@@ -164,12 +176,43 @@ def create_task(
         return None
 
 
+def update_task_rq_job_id(task_id: str, rq_job_id: str) -> bool:
+    """Persist Redis RQ job id after enqueue (for cancel + reconciliation)."""
+    url = get_database_url()
+    if not url:
+        return False
+    try:
+        import psycopg2
+    except ImportError:
+        return False
+    conn = None
+    try:
+        conn = psycopg2.connect(url)
+        conn.autocommit = False
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE tasks SET rq_job_id = %s, updated_at = %s WHERE id = %s",
+                    (rq_job_id, datetime.utcnow(), task_id),
+                )
+                n = cur.rowcount
+                conn.commit()
+                return n > 0
+        finally:
+            conn.close()
+    except Exception:
+        if conn:
+            conn.rollback()
+        return False
+
+
 def update_task_status(
     task_id: str,
     status: str,
     *,
     result_path: Optional[str] = None,
     error_message: Optional[str] = None,
+    clear_error_message: bool = False,
 ) -> bool:
     """Update task status (and optional result_path, error_message). Returns True if updated."""
     if status not in TASK_STATUSES:
@@ -188,7 +231,12 @@ def update_task_status(
         conn.autocommit = False
         try:
             with conn.cursor() as cur:
-                if result_path is not None and error_message is not None:
+                if clear_error_message:
+                    cur.execute(
+                        "UPDATE tasks SET status = %s, error_message = NULL, updated_at = %s WHERE id = %s",
+                        (status, now, task_id),
+                    )
+                elif result_path is not None and error_message is not None:
                     cur.execute(
                         "UPDATE tasks SET status = %s, result_path = %s, error_message = %s, updated_at = %s WHERE id = %s",
                         (status, result_path, error_message, now, task_id),
@@ -275,7 +323,10 @@ def update_task_progress(
 
 
 def append_task_log(task_id: str, line: str) -> bool:
-    """Append a line to task log_output (with newline). Trims from start if over LOG_OUTPUT_MAX_BYTES. Returns True if updated."""
+    """Append a line to task log_output (with newline), prefixed with JST wall time.
+
+    Docker / platform log lines are often still UTC (``…Z``); this store is for the in-app log.
+    """
     url = get_database_url()
     if not url:
         return False
@@ -297,7 +348,8 @@ def append_task_log(task_id: str, line: str) -> bool:
                 row = cur.fetchone()
                 if row is None:
                     return False
-                existing = (row["log_output"] or "") + line + "\n"
+                prefixed = f"[{_task_log_timestamp_prefix()}] {line}"
+                existing = (row["log_output"] or "") + prefixed + "\n"
                 enc = existing.encode("utf-8")
                 if len(enc) > LOG_OUTPUT_MAX_BYTES:
                     # Keep last LOG_OUTPUT_MAX_BYTES; decode may drop partial char at start
@@ -352,7 +404,7 @@ def update_task_result_summary(task_id: str, summary: Dict[str, Any]) -> bool:
 
 
 def get_task(task_id: str) -> Optional[Dict[str, Any]]:
-    """Return task row as dict (id, type, status, parameters, result_path, error_message, progress_message, progress_pct, log_output, result_summary, created_at, updated_at)."""
+    """Return task row as dict (includes ``rq_job_id`` for RQ cancel / reconcile)."""
     url = get_database_url()
     if not url:
         return None
@@ -367,7 +419,8 @@ def get_task(task_id: str) -> Optional[Dict[str, Any]]:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
                     """SELECT id, type, status, parameters, result_path, error_message,
-                       progress_message, progress_pct, log_output, result_summary, created_at, updated_at
+                       progress_message, progress_pct, log_output, result_summary, rq_job_id,
+                       created_at, updated_at
                        FROM tasks WHERE id = %s""",
                     (task_id,),
                 )
@@ -404,7 +457,7 @@ def list_recent_tasks(
         conn = psycopg2.connect(url)
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cols = "id, type, status, parameters, result_path, error_message, progress_message, progress_pct, log_output, result_summary, created_at, updated_at"
+                cols = "id, type, status, parameters, result_path, error_message, progress_message, progress_pct, log_output, result_summary, rq_job_id, created_at, updated_at"
                 conditions: List[str] = []
                 params: List[Any] = []
                 if session_id is not None:
@@ -426,15 +479,23 @@ def list_recent_tasks(
                     """,
                     params,
                 )
-                return [dict(row) for row in cur.fetchall()]
+                rows = [dict(row) for row in cur.fetchall()]
         finally:
             conn.close()
     except Exception:
         return []
+    try:
+        from lib import task_queue
+
+        for row in rows:
+            task_queue.reconcile_task_row_in_place(row)
+    except Exception:
+        pass
+    return rows
 
 
 def delete_task(task_id: str, session_id: Optional[str] = None) -> bool:
-    """Delete a task by id. When session_id is set, only delete if the task belongs to that user. Returns True if deleted."""
+    """Delete a task row. For pending/running, cancels the RQ job first when ``rq_job_id`` is set."""
     url = get_database_url()
     if not url:
         return False
@@ -448,6 +509,25 @@ def delete_task(task_id: str, session_id: Optional[str] = None) -> bool:
         conn.autocommit = False
         try:
             with conn.cursor() as cur:
+                if session_id is not None:
+                    cur.execute(
+                        "SELECT status, rq_job_id FROM tasks WHERE id = %s AND session_id = %s",
+                        (task_id, session_id),
+                    )
+                else:
+                    cur.execute(
+                        "SELECT status, rq_job_id FROM tasks WHERE id = %s",
+                        (task_id,),
+                    )
+                meta = cur.fetchone()
+                if meta is None:
+                    conn.rollback()
+                    return False
+                st, rqjid = meta[0], meta[1]
+                if st in ("pending", "running"):
+                    from lib.task_queue import try_cancel_rq_job
+
+                    try_cancel_rq_job(rqjid)
                 if session_id is not None:
                     cur.execute(
                         "DELETE FROM tasks WHERE id = %s AND session_id = %s",

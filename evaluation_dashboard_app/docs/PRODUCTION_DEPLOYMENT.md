@@ -62,11 +62,16 @@ Heavy operations (download results, download scenarios, run eval_result, generat
 | `DATABASE_URL` | Postgres connection string | Required when `USE_TASK_QUEUE=true` |
 | `REDIS_URL` | Redis connection string | `redis://redis:6379/0` in compose |
 | `RQ_QUEUE` | RQ queue name | `default` |
+| `RQ_JOB_TIMEOUT_SEC` | Max runtime (seconds) for **every** RQ job before the worker terminates it. RQ’s built-in default (~180s) is too short for eval and downloads; the app defaults to **7 days** when unset. | `604800` (7d) |
+| `RQ_BUILD_PARQUET_TIMEOUT_SEC` | Optional override for **build_parquet** only; if unset, uses `RQ_JOB_TIMEOUT_SEC` / the same 7-day default. | (same as `RQ_JOB_TIMEOUT_SEC`) |
 | `POSTGRES_USER` | Postgres user (for postgres service) | `eval_user` |
 | `POSTGRES_PASSWORD` | Postgres password | `eval_pass` |
 | `POSTGRES_DB` | Postgres database name | `eval_dashboard` |
 | `AUTH_USER_HEADER` | HTTP header name for current user (e.g. `X-Forwarded-User`). When set, users see only their own tasks. | (none) |
 | `AUTH_DEFAULT_USER` | Fallback user id when header is not set (e.g. for dev). | (none) |
+| `EVAL_DEPLOYMENT_DEBUG_DOCKER` | Set to `1` in [`deploy/docker-compose.yml`](deploy/docker-compose.yml) for Streamlit; enables the **Docker** tab when the host socket is mounted. Override in `.env` only if you change compose. | `1` in compose |
+| `EVAL_DEPLOYMENT_DEBUG_COMPOSE_PROJECT` | Compose project name (`docker compose ls`) to filter containers by `com.docker.compose.project`. Strongly recommended when the host runs other stacks. | (empty) |
+| `EVAL_DEPLOYMENT_DEBUG_EXEC` | When `1`/`true`, the Deployment debug **Docker** tab shows **Run command** (`sh -c` via `docker exec`). Default `0` in compose — enable in `.env` only briefly on trusted networks. | `0` |
 
 ## Build
 
@@ -148,6 +153,17 @@ To serve over HTTPS, configure Nginx with SSL certificates (e.g. Let's Encrypt) 
 | Postgres connection refused | Postgres is healthy (`docker-compose ps`); `DATABASE_URL` uses hostname `postgres` and correct port (5432). |
 | Nginx 502 Bad Gateway | Streamlit container is up and listening on 8501; Nginx `upstream` points to `streamlit:8501`. |
 
+## Deployment debug page (Docker socket)
+
+The Streamlit page **Deployment debug** (`pages/11_Deployment_Debug.py`) shows redacted environment variables, Postgres/Redis/RQ checks, task counts, and Docker container status and log tails.
+
+- [`deploy/docker-compose.yml`](deploy/docker-compose.yml) mounts `/var/run/docker.sock` into the `streamlit` service and sets `EVAL_DEPLOYMENT_DEBUG_DOCKER=1`. After `docker compose up -d`, restart or recreate Streamlit if you change compose or env.
+- Set `EVAL_DEPLOYMENT_DEBUG_COMPOSE_PROJECT` in `.env` to your Compose project name (from `docker compose ls`) so the UI lists only this stack’s containers. If it is unset, the page lists every container visible to the daemon and shows a warning.
+- Rebuild the image after adding the `docker` PyPI package to `requirements-docker.txt` (or `docker compose build streamlit`).
+- **Exec**: set `EVAL_DEPLOYMENT_DEBUG_EXEC=1` in `.env` and recreate Streamlit to enable one-shot `sh -c` commands in the selected container (same power as `docker exec`). Leave at `0` when you only need logs.
+
+**Risk**: any user who can open the app with socket access can read logs for containers matched by the filter. With `EVAL_DEPLOYMENT_DEBUG_EXEC=1`, they can also run shell commands inside those containers. Restrict access with VPN, SSO/auth proxy, or remove the socket mount and debug env from the `streamlit` service in compose if that risk is unacceptable.
+
 ## Data on the host (bind mounts)
 
 When you run from `deploy/`, data is stored on your host so you can access it directly:
@@ -182,7 +198,7 @@ Rebuild the image only when you change dependencies (e.g. `requirements-docker.t
 
 ```
 deploy/
-  docker-compose.yml   # nginx, streamlit, redis, worker, postgres, init_db
+  docker-compose.yml                  # full stack; streamlit includes Docker socket for Deployment debug
   .env.example
   nginx/
     nginx.conf
