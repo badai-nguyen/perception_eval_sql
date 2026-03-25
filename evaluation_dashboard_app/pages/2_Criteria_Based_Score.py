@@ -724,8 +724,26 @@ def _gate_compare_sankey_fig(
     return fig
 
 
-def _render_gate_compare_overlap(gate_results: list, label_a: str, label_b: str) -> None:
-    """Venn-style + Sankey when exactly two gate result frames exist."""
+def _short_overlap_legend_label(full: str) -> str:
+    """e.g. 'Candidate (B)' -> 'B' for compact metric titles."""
+    s = str(full).strip()
+    if "(" in s and s.endswith(")"):
+        inner = s[s.rindex("(") + 1 : -1].strip()
+        if inner:
+            return inner
+    return s
+
+
+def _render_gate_compare_overlap(
+    gate_results: list,
+    label_a: str,
+    label_b: str,
+    *,
+    key_suffix: str = "",
+    show_section_intro: bool = True,
+    pair_heading: str | None = None,
+) -> None:
+    """Venn-style + Sankey for baseline vs one candidate (two gate result rows)."""
     if len(gate_results) != 2:
         return
     _, res_a, _ = gate_results[0]
@@ -734,7 +752,15 @@ def _render_gate_compare_overlap(gate_results: list, label_a: str, label_b: str)
     if stats is None:
         return
 
-    st.markdown(gate_compare_overlap_intro_markup(), unsafe_allow_html=True)
+    cand_short = _short_overlap_legend_label(label_b)
+    if pair_heading:
+        st.markdown(
+            f'<p style="font-size:1.02rem;font-weight:700;color:#0f172a;margin:0.85rem 0 0.35rem 0;">'
+            f"{html.escape(pair_heading)}</p>",
+            unsafe_allow_html=True,
+        )
+    if show_section_intro:
+        st.markdown(gate_compare_overlap_intro_markup(), unsafe_allow_html=True)
 
     cap_parts = []
     if stats["n_inner"]:
@@ -752,11 +778,12 @@ def _render_gate_compare_overlap(gate_results: list, label_a: str, label_b: str)
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Both pass", f"{stats['both_pass']:,}")
-    m2.metric("Recovered (B)", f"{stats['a_fail_b_pass']:,}")
-    m3.metric("Regression (B)", f"{stats['a_pass_b_fail']:,}")
+    m2.metric(f"Recovered ({cand_short})", f"{stats['a_fail_b_pass']:,}")
+    m3.metric(f"Regression ({cand_short})", f"{stats['a_pass_b_fail']:,}")
     m4.metric("Both fail", f"{stats['both_fail']:,}")
     st.caption(
-        "Recovered = failed baseline gate but passed candidate · Regression = passed baseline but failed candidate."
+        f"Recovered = failed baseline gate but passed {cand_short} · "
+        f"Regression = passed baseline but failed {cand_short}."
     )
 
     merged = stats["merged"]
@@ -778,7 +805,7 @@ def _render_gate_compare_overlap(gate_results: list, label_a: str, label_b: str)
                 scenario_buckets=scenario_buckets,
             ),
             width='stretch',
-            key="gate_compare_venn",
+            key=f"gate_compare_venn{key_suffix}",
             config={"displayModeBar": False},
         )
     with c_sankey:
@@ -790,7 +817,7 @@ def _render_gate_compare_overlap(gate_results: list, label_a: str, label_b: str)
                 link_hover_html=sankey_link_hover,
             ),
             width='stretch',
-            key="gate_compare_sankey",
+            key=f"gate_compare_sankey{key_suffix}",
             config={"displayModeBar": True},
         )
     st.caption("Hover the **overlap disks** or **Sankey** flows to list scenarios in that bucket (truncated if very long; full list stays in the table below).")
@@ -810,8 +837,13 @@ def _render_gate_compare_overlap(gate_results: list, label_a: str, label_b: str)
                 b = "regression_on_candidate"
             bucket_rows.append({"Scenario": row["Scenario"], "overlap_bucket": b})
         buck_df = pd.DataFrame(bucket_rows).sort_values(["overlap_bucket", "Scenario"])
-        with st.expander("Scenario list by overlap bucket", expanded=False):
-            st.dataframe(buck_df, width="stretch", hide_index=True)
+        with st.expander(f"Scenario list by overlap bucket ({cand_short})", expanded=False):
+            st.dataframe(
+                buck_df,
+                width="stretch",
+                hide_index=True,
+                key=f"gate_ov_bucket_df{key_suffix}",
+            )
 
 
 def _render_absolute_gates_section(
@@ -885,12 +917,26 @@ def _render_absolute_gates_section(
                 st.dataframe(fails, width="stretch")
             gate_results.append((label, result, spec))
 
-    if len(gate_results) == 2:
-        _render_gate_compare_overlap(
-            gate_results,
-            gate_results[0][0],
-            gate_results[1][0],
-        )
+    if len(gate_results) >= 2:
+        if len(gate_results) > 2:
+            st.markdown(gate_compare_overlap_intro_markup(), unsafe_allow_html=True)
+        base_lbl = gate_results[0][0]
+        base_short = _short_overlap_legend_label(base_lbl)
+        for i in range(1, len(gate_results)):
+            if len(gate_results) > 2 and i > 1:
+                st.divider()
+            cand_lbl = gate_results[i][0]
+            cand_short_h = _short_overlap_legend_label(cand_lbl)
+            _render_gate_compare_overlap(
+                [gate_results[0], gate_results[i]],
+                base_lbl,
+                cand_lbl,
+                key_suffix=f"_{i}",
+                show_section_intro=len(gate_results) == 2,
+                pair_heading=(
+                    f"{base_short} vs {cand_short_h}" if len(gate_results) > 2 else None
+                ),
+            )
 
     if len(gate_results) == 1:
         label, result, sp = gate_results[0]

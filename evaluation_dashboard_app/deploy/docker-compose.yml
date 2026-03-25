@@ -1,5 +1,7 @@
 # Production-style stack: Nginx -> Streamlit, Redis, Worker, Postgres.
-# Run from deploy/: docker-compose --env-file .env up -d
+# Helper scripts (run from deploy/): 01_SETUP_ENV.sh 02_BUILD.sh 03_INIT_DB.sh 04_START.sh 05_STOP.sh
+#   06_STATUS.sh 07_LOGS.sh 08_REBUILD_AND_START.sh 09_RESTART_WORKER.sh
+# Run from deploy/: docker compose --env-file .env up -d
 # Scale workers: docker-compose up -d --scale worker=3  (default 1 worker)
 # Build image from repo root: docker build -t evaluation-dashboard . (see Readme)
 #
@@ -11,7 +13,7 @@
 # App source is mounted so you can edit Python code without rebuilding the image.
 # Streamlit will reload on file changes. Restart the worker to pick up changes: docker compose restart worker
 #
-# Deployment debug (pages/11_Deployment_Debug.py — Docker tab): Streamlit mounts the host
+# Deployment debug (pages/99_Deployment_Debug.py; nav hidden outside Docker via CSS; sidebar link on Overview in Docker): Streamlit mounts the host
 # Docker socket and sets EVAL_DEPLOYMENT_DEBUG_DOCKER=1. Anyone who can use the dashboard
 # can read logs for containers the UI filter exposes; restrict with auth/VPN on untrusted
 # networks. Set EVAL_DEPLOYMENT_DEBUG_COMPOSE_PROJECT in .env (see .env.example).

@@ -155,7 +155,7 @@ To serve over HTTPS, configure Nginx with SSL certificates (e.g. Let's Encrypt) 
 
 ## Deployment debug page (Docker socket)
 
-The Streamlit page **Deployment debug** (`pages/11_Deployment_Debug.py`) shows redacted environment variables, Postgres/Redis/RQ checks, task counts, and Docker container status and log tails.
+The Streamlit page **Deployment debug** (`pages/99_Deployment_Debug.py` — required at top level so `st.page_link` works; default sidebar entry is hidden outside Docker via CSS; **Overview** adds a sidebar link when running in Docker) shows redacted environment variables, Postgres/Redis/RQ checks, task counts, and Docker container status and log tails.
 
 - [`deploy/docker-compose.yml`](deploy/docker-compose.yml) mounts `/var/run/docker.sock` into the `streamlit` service and sets `EVAL_DEPLOYMENT_DEBUG_DOCKER=1`. After `docker compose up -d`, restart or recreate Streamlit if you change compose or env.
 - Set `EVAL_DEPLOYMENT_DEBUG_COMPOSE_PROJECT` in `.env` to your Compose project name (from `docker compose ls`) so the UI lists only this stack’s containers. If it is unset, the page lists every container visible to the daemon and shows a warning.
@@ -205,14 +205,5 @@ deploy/
   postgres_data/       # created at runtime; bind-mounted into postgres container
 ```
 
-## Authentication (company auth / WebAutoAuth)
-
-To let each user see **only their own tasks**, use your company auth (e.g. [WebAutoAuth](https://github.com/tier4/WebAutoAuth)) in front of the app so that the authenticated user id is passed to Streamlit.
-
-1. **Auth proxy**: Put an auth proxy (or WebAutoAuth gateway) in front of Nginx/Streamlit. After login, the proxy sets an HTTP header with the user identity (e.g. `X-Forwarded-User: user@company.com`).
-2. **App config**: Set `AUTH_USER_HEADER` to that header name (e.g. `X-Forwarded-User`). Streamlit (1.37+) reads it via `st.context.headers` and stores it as `session_id` when creating tasks; **Recent tasks** is then filtered by that id.
-3. **Optional**: For local/dev without a proxy, set `AUTH_DEFAULT_USER=dev@example.com` so tasks are still attributed to a user.
-
-Note: Download/Scenario API credentials (`webauto-auth-py`, `~/.webauto`) remain **server-side** for calling the Evaluator API. The above is for **app-level** user identity so each person sees their own task list.
 
 See also [MULTI_USER_DEPLOYMENT.md](MULTI_USER_DEPLOYMENT.md) for multi-user usage (shared data root, path safety, sharing links).

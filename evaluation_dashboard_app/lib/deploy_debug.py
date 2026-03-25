@@ -8,6 +8,7 @@ from __future__ import annotations
 import concurrent.futures
 import os
 import stat
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, urlunparse
 
@@ -15,6 +16,14 @@ from lib.db import get_connection, get_database_url, is_task_queue_enabled
 
 DOCKER_SOCKET_DEFAULT = "/var/run/docker.sock"
 MAX_LOG_TAIL_LINES = 2000
+
+
+def running_in_docker() -> bool:
+    """True when /.dockerenv exists (typical Linux Docker container)."""
+    try:
+        return Path("/.dockerenv").is_file()
+    except OSError:
+        return False
 EXEC_OUTPUT_MAX_BYTES = 256 * 1024
 EXEC_TIMEOUT_SEC = 120.0
 

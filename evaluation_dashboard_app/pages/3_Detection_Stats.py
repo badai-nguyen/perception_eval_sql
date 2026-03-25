@@ -2559,24 +2559,6 @@ if not single_mode:
                     with st.expander("Full frame table (sort: degraded desc)"):
                         if not df_frame_sorted.empty:
                             st.dataframe(df_frame_sorted, width='stretch', hide_index=True)
-                            row0 = df_frame_sorted.iloc[0]
-                            suite_val = str(row0.get("suite_name", "") or "")
-                            scenario_val = str(row0.get("scenario_name", "") or "")
-                            t4_val = str(row0.get("t4dataset_name", "") or "")
-                            frame_val = row0.get("frame_index")
-                            if st.button(f"View in Bounding Box Viewer (top degraded frame for {lbl})", key=f"det_stats_bev_compare_{lbl}_{idx}", help="Open BEV with suite/scenario/frame of the top degraded frame."):
-                                if suite_val:
-                                    st.session_state["bbox_viewer_link_suite"] = suite_val
-                                if scenario_val:
-                                    st.session_state["bbox_viewer_link_scenario"] = scenario_val
-                                if t4_val:
-                                    st.session_state["bbox_viewer_link_t4dataset"] = t4_val
-                                if frame_val is not None:
-                                    try:
-                                        st.session_state["bbox_viewer_frame_index"] = int(frame_val)
-                                    except (TypeError, ValueError):
-                                        pass
-                                st.switch_page("pages/4_Bounding_Box_Viewer.py")
                         else:
                             st.caption("No frame breakdown.")
             else:
@@ -2627,25 +2609,6 @@ if single_mode:
                 st.markdown("**FN count by frame**")
                 st.download_button("Download FN by frame (CSV)", data=df_fn_frame.to_csv(index=False).encode("utf-8"), file_name="fn_by_frame.csv", mime="text/csv", key="dl_fn_frame")
                 st.dataframe(df_fn_frame, width='stretch', hide_index=True)
-                # View in BEV for top FN frame
-                row0 = df_fn_frame.iloc[0]
-                suite_val = str(row0.get("suite_name", "") or "")
-                scenario_val = str(row0.get("scenario_name", "") or "")
-                t4_val = str(row0.get("t4dataset_name", "") or "")
-                frame_val = row0.get("frame_index")
-                if st.button("View in Bounding Box Viewer (top FN frame)", key="det_stats_bev_fn_frame", help="Open BEV with suite/scenario/frame of the top FN frame."):
-                    if suite_val:
-                        st.session_state["bbox_viewer_link_suite"] = suite_val
-                    if scenario_val:
-                        st.session_state["bbox_viewer_link_scenario"] = scenario_val
-                    if t4_val:
-                        st.session_state["bbox_viewer_link_t4dataset"] = t4_val
-                    if frame_val is not None:
-                        try:
-                            st.session_state["bbox_viewer_frame_index"] = int(frame_val)
-                        except (TypeError, ValueError):
-                            pass
-                    st.switch_page("pages/4_Bounding_Box_Viewer.py")
             else:
                 st.caption("No FN by frame.")
             if not df_fn_object.empty:

@@ -14,6 +14,7 @@ from lib.page_chrome import (
     render_share_link_callout,
     section_header,
 )
+from lib.deploy_debug import running_in_docker
 
 # ====== URL QUERY PARAMS (OPTIONAL OVERRIDE) ======
 params = st.query_params
@@ -29,6 +30,12 @@ url_compare_runs = [
 # ====== CONFIG AND CONSTANTS ======
 st.set_page_config(page_title="Overview", layout="wide", initial_sidebar_state="expanded")
 inject_app_page_styles()
+if running_in_docker():
+    st.sidebar.page_link(
+        "pages/99_Deployment_Debug.py",
+        label="Deployment debug",
+        icon="🐳",
+    )
 RUN_ROOT = get_data_root()
 PRODUCT_LABEL_JA = {
     "Occlusion-Case": "遮蔽ケース",

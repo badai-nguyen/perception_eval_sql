@@ -1,5 +1,8 @@
 """
 Deployment debug: environment (redacted), Postgres/Redis/RQ health, task counts, optional Docker list/logs.
+
+Must live as a top-level pages/*.py file so st.page_link can resolve it. Outside Docker, the default
+sidebar entry is hidden via CSS in lib/ui/styles_global.py; Overview shows a page_link only in Docker.
 """
 import os
 from datetime import timedelta
@@ -21,6 +24,7 @@ from lib.deploy_debug import (
     redacted_deployment_env_rows,
     redis_ping_check,
     rq_overview,
+    running_in_docker,
     task_counts_by_status,
 )
 from lib.page_chrome import inject_app_page_styles, render_page_hero, section_header
@@ -31,6 +35,10 @@ st.set_page_config(
     page_icon="🐳",
     initial_sidebar_state="expanded",
 )
+if not running_in_docker():
+    st.info("**Deployment debug** is only available when the app runs inside a container (e.g. Docker).")
+    st.stop()
+
 inject_app_page_styles()
 render_page_hero(
     kicker="Operations",
@@ -157,8 +165,8 @@ with tab_docker:
     if client is None:
         if not _env_flag("EVAL_DEPLOYMENT_DEBUG_DOCKER"):
             _render_docker_disabled(
-                "Docker debug is off: set `EVAL_DEPLOYMENT_DEBUG_DOCKER=1` and apply the optional compose override "
-                "that mounts the host Docker socket (see below)."
+                "Docker debug is off: set `EVAL_DEPLOYMENT_DEBUG_DOCKER=1` and mount the host Docker socket "
+                "into the Streamlit container (see compose comments)."
             )
         elif not is_docker_debug_enabled():
             _render_docker_disabled(
@@ -229,8 +237,6 @@ with tab_docker:
                     key="deploy_debug_tail",
                 )
                 logs = container_logs_tail(client, full_id, tail)
-                # Use st.code (not st.text_area with a fixed key): keyed text_area keeps stale
-                # session_state and ignores new value= when the container selection changes.
                 st.markdown("**Logs**")
                 st.code(logs or "(empty)", language=None)
                 _render_docker_exec_ui(client, full_id)
