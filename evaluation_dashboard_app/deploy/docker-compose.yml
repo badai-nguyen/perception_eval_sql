@@ -1,0 +1,147 @@
+# Production-style stack: Nginx -> Streamlit, Redis, Worker, Postgres.
+# Helper scripts (run from deploy/): 01_SETUP_ENV.sh 02_BUILD.sh 03_INIT_DB.sh 04_START.sh 05_STOP.sh
+#   06_STATUS.sh 07_LOGS.sh 08_REBUILD_AND_START.sh 09_RESTART_WORKER.sh
+# Run from deploy/: docker compose --env-file .env up -d
+# Scale workers: docker-compose up -d --scale worker=3  (default 1 worker)
+# Build image from repo root: docker build -t evaluation-dashboard . (see Readme)
+#
+# Data is bind-mounted to the host so you can access it directly:
+#   - ../data -> evaluation runs (Summary.csv, parquet, downloads); same as app default
+#   - ./postgres_data -> Postgres database files (tasks table, etc.)
+#   - ${HOME}/.webauto -> Download/Scenario API credentials (streamlit + worker)
+#
+# App source is mounted so you can edit Python code without rebuilding the image.
+# Streamlit will reload on file changes. Restart the worker to pick up changes: docker compose restart worker
+#
+# Deployment debug (pages/99_Deployment_Debug.py; nav hidden outside Docker via CSS; sidebar link on Overview in Docker): Streamlit mounts the host
+# Docker socket and sets EVAL_DEPLOYMENT_DEBUG_DOCKER=1. Anyone who can use the dashboard
+# can read logs for containers the UI filter exposes; restrict with auth/VPN on untrusted
+# networks. Set EVAL_DEPLOYMENT_DEBUG_COMPOSE_PROJECT in .env (see .env.example).
+# EVAL_DEPLOYMENT_DEBUG_EXEC=1 in .env enables one-shot shell (docker exec) from the UI.
+
+services:
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - streamlit
+    restart: unless-stopped
+
+  streamlit:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      secrets:
+        - ssh
+    image: evaluation-dashboard
+    command: ["/app/docker-entrypoint.sh"]
+    environment:
+      - TZ=Asia/Tokyo
+      - EVAL_DASHBOARD_DATA_ROOT=${EVAL_DASHBOARD_DATA_ROOT:-/app/data}
+      - EVAL_DASHBOARD_CONFIG=/app/docker_config/autoware_evaluator_dl_config.json
+      - USE_TASK_QUEUE=${USE_TASK_QUEUE:-true}
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - RQ_QUEUE=${RQ_QUEUE:-default}
+      - EVAL_DEPLOYMENT_DEBUG_DOCKER=1
+      - EVAL_DEPLOYMENT_DEBUG_COMPOSE_PROJECT=${EVAL_DEPLOYMENT_DEBUG_COMPOSE_PROJECT:-}
+      # One-shot shell in selected container (docker exec). Default off; set to 1 in .env only when needed.
+      - EVAL_DEPLOYMENT_DEBUG_EXEC=${EVAL_DEPLOYMENT_DEBUG_EXEC:-0}
+    volumes:
+      - ../data:/app/data
+      - ${HOME}/.webauto:/root/.webauto
+      # Docker-only config (separate from your local configs)
+      - ./configs:/app/docker_config
+      # Mount app source so code changes apply without rebuild (Streamlit auto-reloads)
+      - ../Overview.py:/app/Overview.py
+      - ../pages:/app/pages
+      - ../Readme.md:/app/Readme.md
+      - ../lib:/app/lib
+      - ../worker:/app/worker
+      - ../configs:/app/configs
+      - /var/run/docker.sock:/var/run/docker.sock
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: evaluation-dashboard
+    entrypoint: []
+    command: ["python3", "-m", "worker.run_worker"]
+    environment:
+      - TZ=Asia/Tokyo
+      - EVAL_DASHBOARD_DATA_ROOT=${EVAL_DASHBOARD_DATA_ROOT:-/app/data}
+      - EVAL_DASHBOARD_CONFIG=/app/docker_config/autoware_evaluator_dl_config.json
+      - USE_TASK_QUEUE=true
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - RQ_QUEUE=${RQ_QUEUE:-default}
+    volumes:
+      - ../data:/app/data
+      - ${HOME}/.webauto:/root/.webauto
+      # Docker-only config (separate from your local configs)
+      - ./configs:/app/docker_config
+      # Mount app source so code changes apply without rebuild (restart worker to pick up: docker compose restart worker)
+      - ../Overview.py:/app/Overview.py
+      - ../pages:/app/pages
+      - ../Readme.md:/app/Readme.md
+      - ../lib:/app/lib
+      - ../worker:/app/worker
+      - ../configs:/app/configs
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      TZ: Asia/Tokyo
+      POSTGRES_USER: ${POSTGRES_USER:-eval_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-eval_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-eval_dashboard}
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-eval_user} -d ${POSTGRES_DB:-eval_dashboard}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  init_db:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: evaluation-dashboard
+    entrypoint: []
+    command: ["python3", "-m", "worker.init_db"]
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+secrets:
+  ssh:
+    file: ${HOME}/.ssh/id_rsa

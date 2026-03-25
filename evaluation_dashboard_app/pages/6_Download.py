@@ -1,4 +1,5 @@
 import streamlit as st
+import html
 import json
 import os
 import time
@@ -11,45 +12,146 @@ import tempfile
 import traceback
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
+from collections import Counter
+from typing import Text, Optional, List, Dict, Any
+
+# JST for task time display (UTC+9)
+_JST = timezone(timedelta(hours=9))
+
+
+def _to_jst(dt: Any) -> Optional[datetime]:
+    """Convert datetime to JST for display. Naive datetimes are assumed UTC."""
+    if dt is None:
+        return None
+    if not hasattr(dt, "astimezone"):
+        return None
+    try:
+        if getattr(dt, "tzinfo", None) is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(_JST)
+    except Exception:
+        return None
 from pathlib import Path
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
-from typing import Text, Optional, List, Dict, Any
 from lib.WebAPI import scenarioAPI
-from lib.perception_eval_result_summarizer import run_eval_result, generate_score_json
+from lib.user_config import UserConfig
+from lib.path_utils import get_data_root, resolve_under_data_root, to_data_relative
+from lib.eval_summary import find_eval_result_dirs, run_eval_result_for_dir, generate_summary_and_score_csv
+from lib.page_chrome import inject_app_page_styles
+from lib.ui.download_ui import (
+    ImpressiveProgressHUD,
+    TaskCardMode,
+    render_detailed_scenario_download_panel,
+    render_download_hero,
+    render_download_status_table_intro,
+    render_download_task_section_header,
+    render_job_archives_summary_panel,
+    render_job_json_summary_panel,
+    render_recent_scenario_downloads_intro,
+    render_scenario_download_summary_panel,
+    render_task_list_empty_state,
+    task_list_card_markup,
+)
+from lib.ui.styles_download import inject_download_page_styles
+from lib.db import (
+    create_task,
+    delete_task,
+    get_task,
+    is_task_queue_enabled,
+    list_recent_tasks,
+    update_task_rq_job_id,
+)
+from lib import download_core
+from lib.auth import get_current_user_id, is_auth_enabled
 
-# --- Persistent user config helpers ---
-CONFIG_FILE = os.path.expanduser("./configs/autoware_evaluator_dl_config.json")
-# Constants
-SCENARIO_API_BASE = "https://scenario.ci.web.auto/v1"
-EVALUATION_API_BASE = "https://evaluation.ci.web.auto/v3"
+try:
+    from lib.perception_catalog_io import pkl_archive_to_parquet
+    CATALOG_IO_AVAILABLE = True
+except ImportError:
+    CATALOG_IO_AVAILABLE = False
 
-def load_user_config():
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
+# Task queue panel: time window + row cap (must match header + list_recent_tasks)
+_TASK_LIST_SINCE_DAYS = 7
+_TASK_LIST_MAX_ROWS = 200
 
-def save_user_config(config):
+def _parse_rq_timeout_sec(raw: Optional[str], *, default: int, minimum: int) -> int:
+    if raw is None or not str(raw).strip():
+        return default
     try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2)
-    except Exception as e:
-        st.warning(f"Could not save config: {e}")
+        return max(minimum, int(str(raw).strip(), 10))
+    except ValueError:
+        return default
+
+
+# RQ kills the work horse when job_timeout is exceeded. The library default (~180s) is too
+# short for downloads, run_eval_dirs, and parquet. All enqueued jobs use a long default.
+_RQ_JOB_TIMEOUT_DEFAULT_SEC = 7 * 24 * 3600
+_RQ_DEFAULT_JOB_TIMEOUT_SEC = _parse_rq_timeout_sec(
+    os.environ.get("RQ_JOB_TIMEOUT_SEC"),
+    default=_RQ_JOB_TIMEOUT_DEFAULT_SEC,
+    minimum=60,
+)
+_bp_raw = os.environ.get("RQ_BUILD_PARQUET_TIMEOUT_SEC")
+if _bp_raw is not None and str(_bp_raw).strip():
+    _BUILD_PARQUET_JOB_TIMEOUT_SEC = _parse_rq_timeout_sec(
+        _bp_raw,
+        default=_RQ_DEFAULT_JOB_TIMEOUT_SEC,
+        minimum=300,
+    )
+else:
+    _BUILD_PARQUET_JOB_TIMEOUT_SEC = _RQ_DEFAULT_JOB_TIMEOUT_SEC
+
+
+def _enqueue_task(
+    task_type: str,
+    parameters: Dict[str, Any],
+    job_timeout: Optional[int] = None,
+) -> Optional[str]:
+    """Create task in Postgres and enqueue to RQ. Returns task_id or None on failure.
+    job_timeout: RQ max runtime in seconds; when omitted, uses RQ_JOB_TIMEOUT_SEC (default 7 days).
+    """
+    session_id = get_current_user_id() if is_auth_enabled() else None
+    task_id = create_task(task_type, parameters, session_id=session_id)
+    if not task_id:
+        return None
+    try:
+        from redis import Redis
+        from rq import Queue
+        from worker.tasks import run_job
+        redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+        conn = Redis.from_url(redis_url)
+        queue = Queue(os.environ.get("RQ_QUEUE", "default"), connection=conn)
+        effective_timeout = (
+            job_timeout if job_timeout is not None else _RQ_DEFAULT_JOB_TIMEOUT_SEC
+        )
+        job = queue.enqueue(
+            run_job,
+            task_id,
+            task_type,
+            parameters,
+            job_timeout=effective_timeout,
+        )
+        rid = getattr(job, "id", None)
+        if rid:
+            update_task_rq_job_id(task_id, str(rid))
+        return task_id
+    except Exception:
+        return None
 
 # Initialize or load user config
-_user_config = load_user_config()
+_user_config = UserConfig(warning_fn=st.warning)
 
 def get_config_value(key, default=None):
     return _user_config.get(key, default)
 
 def set_config_value(key, value):
-    if _user_config.get(key) != value:
-        _user_config[key] = value
-        save_user_config(_user_config)
+    _user_config.set(key, value)
+
+# Environment for Evaluator API: only "default" is used in practice.
+# Change here to "dev" or "stg" if needed; no UI is exposed for this.
+ENVIRONMENT = "default"
 
 # Try to import the authentication module, with fallback handling
 # https://github.com/tier4/webauto-auth-py.git
@@ -150,7 +252,7 @@ def download_file(
     *,
     chunk_size: int = 1024 * 1024,
     timeout: int = 10,
-    min_progress_mb: float = 5.0,
+    min_progress_mb: float = 20.0,
     skip_large_file: bool = False,
     large_file_mb: float = 50.0,
 ) -> int:
@@ -219,253 +321,243 @@ class JobResult:
         project_id: Text,
         job_id: Text,
         suite_id: Text,
+        suite_ids: Optional[List[str]],
         output_path: Text,
     ):
         self.__environment = environment
         self.__project_id = project_id
         self.__job_id = job_id
         self.__suite_id = suite_id
+        self.__suite_ids = [sid for sid in (suite_ids or []) if sid]
         self.__output_path = output_path
         self.__api_base_url = "https://evaluation.ci.web.auto/v3"
         if self.__environment in ["dev", "stg"]:
             self.__api_base_url = "https://scenario.ci." + self.__environment + ".web.auto/v3"
+        self.__session, self.__presigned = download_core.get_evaluator_session(environment)
 
-        # web resource
-        self.__auth_session = AuthcliHelper(self.__environment)
+    def _safe_path_component(self, value: str) -> str:
+        return download_core._safe_path_component(value)
 
-    def download_archive_and_unzip(self, phase):
-        log_dicts = self.get_case_simlation_log_info()
+    def _get_output_path_for_log(self, log_info: Dict[str, Any]) -> str:
+        return download_core._get_output_path_for_log(
+            self.__output_path, log_info, self.__suite_id or "", self.__suite_ids
+        )
 
+    def download_archive_and_unzip(self, phase, skip_large_file=False, large_file_mb=50.0, keep_zip_files=False):
+        log_dicts = self.get_case_simulation_log_info()
+        log_dicts = [log for log in log_dicts if "second" not in log.get("scenario_name", "")]
         st.write(f"Found {len(log_dicts)} logs")
+        scenario_name_counts = Counter(log_info["scenario_name"] for log_info in log_dicts)
         remain_list = []
         download_rows = []
+        suite_output_paths = set()
+        _n_arch = len(log_dicts)
+        _hud_arch = ImpressiveProgressHUD()
         for i, log_info in enumerate(log_dicts):
             if st.session_state.get("stop_downloads"):
                 st.warning("Download stopped by user.")
                 break
-            # Show progress in Streamlit
-            with st.spinner(f"Downloading {i+1}/{len(log_dicts)}: {log_info['scenario_name']}"):
-                # Add a condition to skip if necessary
-                if "second" in log_info["scenario_name"]:
-                    status = "skipped"
-                    detail = "matched skip rule"
-                else:
-                    try:
-                        ok = self.download_archive_log(log_info, "archive_id", "zip")
-                        status = "downloaded" if ok else "failed"
-                        detail = "ok" if ok else "download failed"
-                    except Exception as e:
-                        status = "failed"
-                        detail = str(e)
-                download_rows.append(
-                    {
-                        "archive_id": log_info["archive_id"],
-                        "result_json_id": log_info["result_json_id"],
-                        "scenario_name": log_info["scenario_name"],
-                        "scenario_id": log_info["scenario_id"],
-                        "scenario_ver": log_info["scenario_ver"],
-                        "status": status,
-                        "detail": detail,
-                    }
+            _hud_arch.show(
+                fraction=(i / _n_arch) if _n_arch else 1.0,
+                headline=f"Archive {i + 1} of {_n_arch}",
+                detail=log_info["scenario_name"],
+                foot="Pulling evaluator archives and writing ZIPs to disk…",
+            )
+            try:
+                output_dir = self._get_output_path_for_log(log_info)
+                suite_output_paths.add(output_dir)
+                ok = self.download_archive_log(
+                    log_info,
+                    "archive_id",
+                    "zip",
+                    output_path=output_dir,
+                    skip_large_file=skip_large_file,
+                    large_file_mb=large_file_mb,
+                    keep_zip_files=keep_zip_files,
+                    scenario_name_counts=scenario_name_counts,
                 )
-                remain_list.append(log_info)
+                status = "downloaded" if ok else "failed"
+                detail = "ok" if ok else "download failed"
+            except Exception as e:
+                status = "failed"
+                detail = str(e)
+            download_rows.append(
+                {
+                    "suite_name": log_info.get("suite_name", ""),
+                    "suite_id": log_info.get("suite_id", ""),
+                    "archive_id": log_info["archive_id"],
+                    "result_json_id": log_info["result_json_id"],
+                    "scenario_name": log_info["scenario_name"],
+                    "scenario_id": log_info["scenario_id"],
+                    "scenario_ver": log_info["scenario_ver"],
+                    "t4_dataset_id": log_info.get("t4_dataset_id", ""),
+                    "status": status,
+                    "detail": detail,
+                }
+            )
+            remain_list.append(log_info)
+
+        if _n_arch:
+            if st.session_state.get("stop_downloads"):
+                _hud_arch.show(
+                    fraction=len(remain_list) / _n_arch,
+                    headline="Download stopped",
+                    detail=f"{len(remain_list)} of {_n_arch} archives processed before stop.",
+                )
+            else:
+                _hud_arch.show(
+                    fraction=1.0,
+                    headline="Archive download pass complete",
+                    detail="Preparing extraction phase…",
+                )
+        _hud_arch.clear()
 
         if download_rows:
             try:
                 import pandas as pd
 
-                st.subheader("📋 Download Status")
-                st.dataframe(pd.DataFrame(download_rows), use_container_width=True)
+                render_download_status_table_intro()
+                st.dataframe(pd.DataFrame(download_rows), width="stretch")
             except Exception as e:
                 st.warning(f"Could not render download table: {e}")
         
         with st.spinner("Extracting archives..."):
-            self.extract_archives(phase)
+            for output_dir in sorted(suite_output_paths):
+                self.extract_archives(phase, output_dir, keep_zip_files)
         return remain_list
 
     def download_result_json(self):
-        log_dicts = self.get_case_simlation_log_info()
+        log_dicts = self.get_case_simulation_log_info()
         st.write(f"Found {len(log_dicts)} result JSON files")
-        
+        scenario_name_counts = Counter(log_info["scenario_name"] for log_info in log_dicts)
+        suite_output_paths = set()
+        _n_json = len(log_dicts)
+        _hud_json = ImpressiveProgressHUD()
+        _json_done = 0
         for i, log_info in enumerate(log_dicts):
             if st.session_state.get("stop_downloads"):
                 st.warning("Download stopped by user.")
                 break
-            with st.spinner(f"Downloading JSON {i+1}/{len(log_dicts)}: {log_info['scenario_name']}"):
-                self.download_archive_log(log_info, "result_json_id", "json")
-        
+            _hud_json.show(
+                fraction=(i / _n_json) if _n_json else 1.0,
+                headline=f"Result JSON {i + 1} of {_n_json}",
+                detail=log_info["scenario_name"],
+                foot="Fetching per-scenario result JSON…",
+            )
+            output_dir = self._get_output_path_for_log(log_info)
+            suite_output_paths.add(output_dir)
+            self.download_archive_log(
+                log_info, "result_json_id", "json", output_path=output_dir,
+                scenario_name_counts=scenario_name_counts,
+            )
+            _json_done = i + 1
+        if _n_json:
+            if st.session_state.get("stop_downloads") and _json_done < _n_json:
+                _hud_json.show(
+                    fraction=_json_done / _n_json,
+                    headline="Download stopped",
+                    detail=f"{_json_done} of {_n_json} JSON files retrieved before stop.",
+                )
+            else:
+                _hud_json.show(fraction=1.0, headline="JSON downloads complete", detail="Organizing files…")
+        _hud_json.clear()
+
         with st.spinner("Organizing files..."):
-            self.organize_files_into_directories(self.__output_path)
+            for output_dir in sorted(suite_output_paths):
+                self.organize_files_into_directories(output_dir)
         return log_dicts
 
-    def get_case_simlation_log_info(self) -> list:
-        simlation_archive_log_info = []
-        next_token = ""
-        url = (
-            self.__api_base_url
-            + "/projects/"
-            + self.__project_id
-            + "/jobs/"
-            + self.__job_id
-            + "/test/case/reports"
+    def get_case_simulation_log_info(self) -> list:
+        _hud = ImpressiveProgressHUD()
+        _hud.show(
+            indeterminate=True,
+            headline="Fetching simulation logs",
+            detail="Resolving suites and scenarios from the Evaluator API…",
         )
-        
-        progress_bar = st.progress(0)
-        page_count = 0
-        
-        while True:
-            page_count += 1
-            st.write(f"Fetching page {page_count}...")
-            
-            params = {
-                "next_token": next_token,
-                "size": 100,
-            }
-            
-            if next_token != "":
-                data = self.__auth_session.get(f"{url}?{urllib.parse.urlencode(params)}")
-            else:
-                data = self.__auth_session.get(url)
-            
-            next_token = data.get("next_token", "")
-            
-            for report in data["reports"]:
-                if report["suite"]["id"] == self.__suite_id:
-                    if "simulation_archive" in report["logs"]:
-                        simlation_archive_log_info.append(
-                            {
-                                "archive_id": report["logs"]["simulation_archive"]["id"],
-                                "result_json_id": report["logs"]["simulation_result_json"]["id"],
-                                "scenario_name": report["scenario"]["display_name"],
-                                "scenario_id": report["scenario"]["id"],
-                                "scenario_ver": report["scenario"]["version_id"],
-                            }
-                        )
-            
-            # Update progress
-            if next_token:
-                progress_bar.progress(0.5)
-            else:
-                progress_bar.progress(1.0)
-                break
-        
-        progress_bar.empty()
-        return simlation_archive_log_info
+        try:
+            result = download_core.get_case_simulation_log_info(
+                self.__session,
+                self.__api_base_url,
+                self.__project_id,
+                self.__job_id,
+                suite_id=self.__suite_id or "",
+                suite_ids=self.__suite_ids or None,
+            )
+        finally:
+            _hud.clear()
+        return result
 
-    def download_archive_log(self, log_info, type, format) -> bool:
-        url = (
-            self.__api_base_url
-            + "/projects/"
-            + self.__project_id
-            + "/logs/"
-            + log_info[type]
-            + "/download"
+    def download_archive_log(
+        self,
+        log_info,
+        type,
+        format,
+        output_path: Optional[str] = None,
+        skip_large_file=False,
+        large_file_mb=50.0,
+        keep_zip_files=False,
+        scenario_name_counts: Optional[Dict[str, int]] = None,
+    ) -> bool:
+        output_dir = output_path or self.__output_path
+
+        def on_warning(msg: str) -> None:
+            st.warning(msg)
+
+        ok = download_core.download_archive_log(
+            self.__session,
+            self.__presigned,
+            self.__api_base_url,
+            self.__project_id,
+            log_info,
+            type,
+            format,
+            output_dir,
+            skip_large_file=skip_large_file,
+            large_file_mb=large_file_mb,
+            scenario_name_counts=scenario_name_counts,
+            on_warning=on_warning,
         )
-        
-        dl_filename = log_info["scenario_name"] + "." + format
-        post_obj = {
-            "expiration_time": 600,
-            "filename": "suite_log.zip",
-        }
+        # if ok:
+        #     st.success(f"Downloaded: {log_info.get('scenario_name', '')}.{format}")
+        return ok
 
-        try:
-            content = self.__auth_session.post(url, data=post_obj)
-        except Exception as e:
-            st.error(f"Can not get log_id {log_info[type]}: {str(e)}")
-            return False
-
-        # Create output directory if it doesn't exist
-        os.makedirs(self.__output_path, exist_ok=True)
-        
-        output_file = os.path.join(self.__output_path, dl_filename)
-        try:
-            download_file(content["url"], output_file, skip_large_file=True)
-        except Exception as e:
-            st.error(f"Failed to download {dl_filename}: {e}")
-            return False
-        st.success(f"Downloaded: {dl_filename}")
-        return True
-
-    def extract_archives(self, phase):
-        archive_paths = glob.glob(os.path.join(self.__output_path, "*.zip"))
+    def extract_archives(self, phase, output_path: str, keep_zip_files=False):
+        archive_paths = glob.glob(os.path.join(output_path, "*.zip"))
         st.write(f"Found {len(archive_paths)} archives to extract")
-        
-        progress_bar = st.progress(0)
-        for i, archive_path in enumerate(archive_paths):
-            progress_bar.progress(i / len(archive_paths))
-            
-            dir_path = archive_path.replace(".zip", "")
-            shutil.unpack_archive(archive_path, dir_path)
-            os.remove(archive_path)
-
-            for sub_dir_path in os.listdir(dir_path):
-                if Path(sub_dir_path).name == "scenario.yaml":
-                    continue
-                full_path = dir_path + "/" + sub_dir_path
-                if not Path(sub_dir_path).name == phase:
-                    if os.path.isdir(full_path):
-                        shutil.rmtree(full_path)
-                else:
-                    result_file = os.path.join(full_path, "scene_result.pkl")
-                    if os.path.exists(result_file):
-                        shutil.move(
-                            result_file,
-                            dir_path + "/scene_result.pkl",
-                        )
-                    shutil.rmtree(full_path)
-        
-        progress_bar.progress(1.0)
+        with st.spinner("Extracting archives..."):
+            download_core.extract_archives(phase, output_path, keep_zip_files=keep_zip_files)
         st.success("Extraction complete!")
 
     def organize_files_into_directories(self, folder_path):
-        """
-        Scan all files in the given folder, create a directory for each file,
-        and move the file into its corresponding directory.
-        """
+        """Scan all files in the given folder, create a directory per file, move file into it as result.json."""
         files = [f for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))]
         st.write(f"Organizing {len(files)} files into directories...")
-        
-        progress_bar = st.progress(0)
-        for i, filename in enumerate(files):
-            progress_bar.progress(i / len(files))
-            
-            file_path = os.path.join(folder_path, filename)
-            if os.path.isfile(file_path):
-                # Create a new directory with the same name as the file (without extension)
-                new_dir_name = os.path.splitext(filename)[0]
-                new_dir_path = os.path.join(folder_path, new_dir_name)
-                os.makedirs(new_dir_path, exist_ok=True)
-
-                # Move the file into the new directory
-                new_file_path = os.path.join(new_dir_path, "result.json")
-                shutil.move(file_path, new_file_path)
-        
-        progress_bar.progress(1.0)
+        with st.spinner("Organizing files..."):
+            download_core.organize_files_into_directories(folder_path)
         st.success("File organization complete!")
 
     def _download_scenario_file(self, url: str, output_path: str) -> bool:
-        """Download a single scenario file"""
+        """Download a single scenario file (internal API or direct URL)."""
         try:
-            # Handle both direct URLs and API endpoints
-            if url.startswith(("http://", "https://")):
-                if self.__auth_session._AuthcliHelper__is_internal_url(url):
-                    # This is an API endpoint that needs authentication
-                    try:
-                        content = self.__auth_session.post(url, data={"expiration_time": 600})
-                        if "url" in content:
-                            return download_file(content["url"], output_path)
-                        else:
-                            st.error(f"Unexpected response format for URL: {url}")
-                            return False
-                    except Exception as e:
-                        st.error(f"API error for {url}: {str(e)}")
-                        return False
-                else:
-                    # Direct URL
-                    return download_file(url, output_path)
-            else:
+            if not url.startswith(("http://", "https://")):
                 st.error(f"Invalid URL format: {url}")
                 return False
+            if download_core._is_internal_url(url):
+                headers = {"Content-Type": "application/json", "accept": "application/json"}
+                resp = self.__session.post(
+                    url,
+                    headers=headers,
+                    data=json.dumps({"expiration_time": 600}).encode("utf-8"),
+                )
+                if getattr(resp, "status_code", None) != 200:
+                    st.error(f"API error for {url}: {getattr(resp, 'status_code', 'unknown')}")
+                    return False
+                content = json.loads(resp.content)
+                if "url" in content:
+                    return download_file(content["url"], output_path)
+                st.error(f"Unexpected response format for URL: {url}")
+                return False
+            return download_file(url, output_path)
         except Exception as e:
             st.error(f"Download error for {url}: {str(e)}")
             return False
@@ -522,7 +614,7 @@ class JobResult:
         Returns:
             List of downloaded scenario information
         """
-        log_dicts = self.get_case_simlation_log_info()
+        log_dicts = self.get_case_simulation_log_info()
         downloaded_scenarios = []
         
         # Create output directory
@@ -553,26 +645,27 @@ class JobResult:
             return []
         
         # Download each scenario
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+        _n = len(log_dicts)
+        _hud = ImpressiveProgressHUD()
         scenario_api = scenarioAPI(self.__project_id)
         for i, log_info in enumerate(log_dicts):
-            progress = (i + 1) / len(log_dicts)
-            progress_bar.progress(progress)
-            
             scenario_name = log_info["scenario_name"]
             scenario_id = log_info["scenario_id"]
-            
-            status_text.text(f"Downloading scenario {i+1}/{len(log_dicts)}: {scenario_name}")
+            _hud.show(
+                fraction=i / _n,
+                headline=f"Scenario {i + 1} of {_n}",
+                detail=scenario_name,
+                foot="Downloading YAML and assets into your output tree…",
+            )
             
             scenario = scenario_api.get_latest_scenario(scenario_id) # sometimes by scenario_name
             print("scenario", scenario)
             try:
                 # First get scenario metadata
                 
-                
+                output_dir = self._get_output_path_for_log(log_info)
                 # Check if already exists
-                scenario_dir = os.path.join(output_dir, f"{scenario_name}_{scenario_id}")
+                scenario_dir = os.path.join(output_dir, f"{scenario_name}")
                 yaml_file_path = os.path.join(scenario_dir, "scenario.yaml")
                 scenario_dir_exists = os.path.exists(scenario_dir)
                 yaml_exists = os.path.exists(yaml_file_path)
@@ -648,29 +741,384 @@ class JobResult:
                     "error": str(e)
                 })
         
-        progress_bar.progress(1.0)
-        status_text.empty()
+        _hud.show(
+            fraction=1.0,
+            headline="Scenario downloads finished",
+            detail=f"Processed {_n} scenario(s).",
+            foot="",
+        )
+        _hud.clear()
         
         # Summary
-        st.subheader("📊 Download Summary")
         success_count = sum(1 for s in downloaded_scenarios if s["status"] == "success")
         skipped_count = sum(1 for s in downloaded_scenarios if s["status"] == "skipped")
         failed_count = sum(1 for s in downloaded_scenarios if s["status"] == "failed")
-        
-        st.write(f"- ✅ Successfully downloaded: {success_count}")
-        st.write(f"- ⏭️ Skipped (already exists): {skipped_count}")
-        st.write(f"- ❌ Failed: {failed_count}")
+        render_scenario_download_summary_panel(
+            success=success_count,
+            skipped=skipped_count,
+            failed=failed_count,
+        )
         
         return downloaded_scenarios
+
 
 st.set_page_config(
     page_title="Autoware Evaluator Downloader",
     page_icon="🚗",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-st.title("🚗 Autoware Evaluator Results Downloader")
-st.markdown("---")
+inject_app_page_styles()
+inject_download_page_styles()
+render_download_hero(queue_enabled=is_task_queue_enabled())
+
+
+
+def _task_type_label(task_type: str) -> str:
+    """Human-readable label for task type."""
+    labels = {
+        "download_results": "Download results",
+        "download_scenarios": "Download scenarios",
+        "run_eval_dirs": "Run eval dirs",
+        "generate_summary_csv": "Generate summary CSV",
+        "build_parquet": "Build parquet",
+    }
+    return labels.get(task_type, task_type or "Task")
+
+
+def _task_summary(t: Dict[str, Any]) -> str:
+    """One-line summary from task parameters (job_id, output_path, etc.)."""
+    params = t.get("parameters") or {}
+    task_type = t.get("type", "")
+    if task_type == "download_results":
+        out = params.get("output_path") or params.get("job_id") or ""
+        return f"job_id={params.get('job_id', '')} → {out}"
+    if task_type == "download_scenarios":
+        out = params.get("output_dir") or params.get("output_path") or ""
+        return f"job_id={params.get('job_id', '')} → {out}"
+    if task_type in ("run_eval_dirs", "generate_summary_csv"):
+        return params.get("eval_root", "")
+    if task_type == "build_parquet":
+        return params.get("pkl_dir", "")
+    return ""
+
+
+def _task_time_str(t: Dict[str, Any]) -> str:
+    """Format task created_at for display in JST (e.g. 'Feb 24, 16:45')."""
+    created = t.get("created_at")
+    dt = _to_jst(created) if created else None
+    if not dt:
+        return "—"
+    try:
+        return dt.strftime("%b %d, %H:%M")
+    except Exception:
+        return str(created)[:16] if created else "—"
+
+
+def _task_duration(t: Dict[str, Any]) -> Optional[str]:
+    """Format duration from created_at to updated_at if both exist."""
+    created = t.get("created_at")
+    updated = t.get("updated_at")
+    if not created or not updated:
+        return None
+    try:
+        start = created.timestamp() if hasattr(created, "timestamp") else None
+        end = updated.timestamp() if hasattr(updated, "timestamp") else None
+        if start is None or end is None:
+            return None
+        secs = int(end - start)
+        if secs < 60:
+            return f"{secs}s"
+        if secs < 3600:
+            return f"{secs // 60}m {secs % 60}s"
+        return f"{secs // 3600}h {(secs % 3600) // 60}m"
+    except Exception:
+        return None
+
+
+def _render_summary_table(rows: Optional[List[Dict[str, Any]]]) -> None:
+    """Render a summary table from rows (e.g. Scenario Name, Scenario ID, Status) when present."""
+    if not rows:
+        return
+    try:
+        df = pd.DataFrame(rows)
+        st.subheader("Download Status")
+        st.dataframe(df, width="stretch")
+    except Exception:
+        pass
+
+
+def _render_result_summary(summary: Dict[str, Any]) -> None:
+    """Render a result summary block (like local mode) from task result_summary JSON."""
+    job = summary.get("job", "")
+    if job == "download_results":
+        total = summary.get("total", 0)
+        success = summary.get("success", 0)
+        failed = summary.get("failed", 0)
+        out = summary.get("output_path", "")
+        st.subheader("Summary")
+        st.write(f"- Total scenarios processed: **{total}**")
+        st.write(f"- Successfully downloaded: **{success}**")
+        if failed:
+            st.write(f"- Failed: **{failed}**")
+        st.write(f"- Output directory: `{out}`")
+        if success > 0:
+            st.info("To generate the final summary CSV files, go to the **Eval Results** tab and run the evaluation.")
+        _render_summary_table(summary.get("rows"))
+    elif job == "download_scenarios":
+        total = summary.get("total", 0)
+        success = summary.get("success", 0)
+        failed = summary.get("failed", 0)
+        out = summary.get("output_path", "")
+        st.subheader("Summary")
+        st.write(f"- Total scenarios: **{total}**")
+        st.write(f"- Successfully downloaded: **{success}**")
+        if failed:
+            st.write(f"- Failed: **{failed}**")
+        st.write(f"- Result JSON files: **{total}** downloaded.")
+        st.write(f"- Output directory: `{out}`")
+        if success > 0:
+            st.info("To generate summary CSV files, go to the **Eval Results** tab and run the evaluation.")
+        _render_summary_table(summary.get("rows"))
+    elif job == "run_eval_dirs":
+        dirs = summary.get("directories_processed", 0)
+        path = summary.get("summary_path", "")
+        srows = summary.get("summary_rows", 0)
+        scrows = summary.get("score_rows", 0)
+        st.subheader("Eval Summary")
+        st.write(f"- Directories processed: **{dirs}**")
+        st.write(f"- Generated Summary.csv (**{srows}** rows) and Score.csv (**{scrows}** rows) in `{path}`")
+    elif job == "generate_summary_csv":
+        path = summary.get("summary_path", "")
+        srows = summary.get("summary_rows", 0)
+        scrows = summary.get("score_rows", 0)
+        st.subheader("Summary")
+        st.write(f"- Generated Summary.csv (**{srows}** rows) and Score.csv (**{scrows}** rows) in `{path}`")
+    elif job == "build_parquet":
+        path = summary.get("output_path", "")
+        st.subheader("Summary")
+        st.write(f"- Output: `{path}`")
+    else:
+        st.json(summary)
+
+
+def _render_task_detail_content(t: Dict[str, Any]) -> None:
+    """Render full task detail (summary, path, error, log, params) into current container."""
+    try:
+        _render_task_detail_content_impl(t)
+    except Exception as e:
+        st.error(f"Could not load task details: {e}")
+        import traceback
+        st.code(traceback.format_exc(), language=None)
+
+
+def _render_task_detail_content_impl(t: Dict[str, Any]) -> None:
+    """Implementation of task detail rendering (called inside try/except)."""
+    status = t.get("status", "")
+    created_jst = _to_jst(t.get("created_at"))
+    updated_jst = _to_jst(t.get("updated_at"))
+    time_parts = []
+    if created_jst:
+        try:
+            time_parts.append(f"Created: {created_jst.strftime('%Y-%m-%d %H:%M:%S')} JST")
+        except Exception:
+            time_parts.append(f"Created: {t.get('created_at')}")
+    if updated_jst and updated_jst != created_jst:
+        try:
+            time_parts.append(f"Updated: {updated_jst.strftime('%Y-%m-%d %H:%M:%S')} JST")
+        except Exception:
+            time_parts.append(f"Updated: {t.get('updated_at')}")
+    if time_parts:
+        st.caption(" · ".join(time_parts))
+    result_summary_raw = t.get("result_summary")
+    if result_summary_raw:
+        try:
+            result_summary = json.loads(result_summary_raw) if isinstance(result_summary_raw, str) else result_summary_raw
+            _render_result_summary(result_summary)
+            st.markdown("---")
+        except (TypeError, ValueError):
+            pass
+    if t.get("result_path"):
+        st.text_input("Result path", value=t["result_path"], key=f"rp_modal_{str(t.get('id'))}", disabled=True, label_visibility="collapsed")
+    if status == "failed" and t.get("error_message"):
+        st.error(t.get("error_message"))
+    log_output = (t.get("log_output") or "").strip()
+    if log_output:
+        st.caption("Log output")
+        st.code(log_output, language=None)
+    params = t.get("parameters") or {}
+    if params:
+        st.caption("Parameters")
+        st.json(params)
+
+
+def _open_task_detail(task_id: str) -> None:
+    st.session_state["_task_detail_id"] = str(task_id)
+
+
+def _render_one_task_row(
+    t: Dict[str, Any],
+    current_user: Optional[str],
+    use_dialog: bool,
+    *,
+    mode: TaskCardMode,
+) -> None:
+    """One task: compact card + View/Delete (and inline More when no dialog)."""
+    task_id = t.get("id", "")
+    task_type = t.get("type", "")
+    status = t.get("status", "")
+    status_labels = {"pending": "Pending", "running": "Running", "completed": "Completed", "failed": "Failed"}
+    status_label = status_labels.get(status, status)
+    type_label = _task_type_label(task_type)
+    summary = _task_summary(t)
+    duration = _task_duration(t) or "—"
+    time_str = _task_time_str(t)
+    sid = str(task_id)
+    if mode == "history":
+        summary_short = (summary[:72] + "…") if summary and len(summary) > 72 else (summary or "—")
+    else:
+        summary_short = "—"
+    progress_msg = (t.get("progress_message") or "").strip()
+    _card = task_list_card_markup(
+        task_id=sid,
+        type_label=type_label,
+        status=status,
+        status_label=status_label,
+        time_str=time_str,
+        duration=duration,
+        summary_short=summary_short,
+        progress_pct=t.get("progress_pct"),
+        progress_message=progress_msg,
+        mode=mode,
+    )
+    st.markdown(f'<div class="dl-task-stack">{_card}</div>', unsafe_allow_html=True)
+
+    if use_dialog:
+        bv, bd, _sp = st.columns([1.15, 1.15, 4])
+        with bv:
+            st.button("View", key=f"view_{sid}", on_click=_open_task_detail, args=(sid,))
+        with bd:
+            _stop_lbl = "Stop" if status in ("pending", "running") else "Remove"
+            _stop_help = (
+                "Cancels the Redis/RQ job when possible, then removes this row from the list."
+                if status in ("pending", "running")
+                else "Remove this row from the task list."
+            )
+            if st.button(
+                _stop_lbl,
+                key=f"del_{sid}",
+                type="secondary",
+                help=_stop_help,
+            ):
+                delete_task(sid, session_id=current_user)
+                st.rerun()
+    else:
+        bd, _sp = st.columns([1.15, 4])
+        with bd:
+            _stop_lbl = "Stop" if status in ("pending", "running") else "Remove"
+            _stop_help = (
+                "Cancels the Redis/RQ job when possible, then removes this row from the list."
+                if status in ("pending", "running")
+                else "Remove this row from the task list."
+            )
+            if st.button(
+                _stop_lbl,
+                key=f"del_{sid}",
+                type="secondary",
+                help=_stop_help,
+            ):
+                delete_task(sid, session_id=current_user)
+                st.rerun()
+
+    if not use_dialog:
+        with st.expander("More", expanded=False):
+            _render_task_detail_content(t)
+
+
+def _render_task_list(tasks: List[Dict[str, Any]], current_user: Optional[str]) -> bool:
+    """Active tasks visible; completed/failed in a collapsed expander. True if any active."""
+    if current_user:
+        st.caption(f"Logged in as **{current_user}** · your recent tasks only")
+    if not tasks:
+        render_task_list_empty_state()
+        return False
+
+    active = [t for t in tasks if t.get("status") in ("pending", "running")]
+    history = [t for t in tasks if t.get("status") not in ("pending", "running")]
+    use_dialog = callable(getattr(st, "dialog", None))
+
+    for t in active:
+        _render_one_task_row(t, current_user, use_dialog, mode="active_compact")
+
+    if not active:
+        st.caption("No queued or running jobs.")
+
+    if history:
+        with st.expander(f"Task history ({len(history)})", expanded=False):
+            for t in history:
+                _render_one_task_row(t, current_user, use_dialog, mode="history")
+
+    # Modal for task detail when dialog is available
+    if use_dialog and st.session_state.get("_task_detail_id"):
+        _task_id = st.session_state["_task_detail_id"]
+        try:
+            detail_task = next((x for x in tasks if str(x.get("id")) == _task_id), None)
+            if detail_task is None:
+                detail_task = get_task(_task_id)
+            if detail_task:
+
+                @st.dialog("Task details", width="large")
+                def _task_detail_modal():
+                    _render_task_detail_content(detail_task)
+                    if st.button("Close"):
+                        st.session_state.pop("_task_detail_id", None)
+                        st.rerun()
+
+                _task_detail_modal()
+        except Exception as e:
+            st.error(f"Could not open task details: {e}")
+        finally:
+            # Clear so X/outside click or error doesn't leave page stuck; next run shows main content
+            st.session_state.pop("_task_detail_id", None)
+
+    return len(active) > 0
+
+
+# Task queue status (production deployment); per-user when auth is enabled
+_current_user = None
+if is_task_queue_enabled():
+    _current_user = get_current_user_id() if is_auth_enabled() else None
+    render_download_task_section_header(
+        since_days=_TASK_LIST_SINCE_DAYS,
+        max_rows=_TASK_LIST_MAX_ROWS,
+    )
+    _use_fragment = getattr(st, "fragment", None) is not None
+    if _use_fragment:
+        try:
+            @st.fragment(run_every=timedelta(seconds=3))
+            def _task_list_poll():
+                _t = list_recent_tasks(
+                    limit=_TASK_LIST_MAX_ROWS,
+                    session_id=_current_user,
+                    since_days=_TASK_LIST_SINCE_DAYS,
+                )
+                _render_task_list(_t, _current_user)
+            _task_list_poll()
+        except (TypeError, AttributeError):
+            _use_fragment = False
+    if not _use_fragment:
+        tasks = list_recent_tasks(
+            limit=_TASK_LIST_MAX_ROWS,
+            session_id=_current_user,
+            since_days=_TASK_LIST_SINCE_DAYS,
+        )
+        has_active = _render_task_list(tasks, _current_user)
+        if st.button("Refresh task list", key="refresh_tasks"):
+            st.rerun()
+        if has_active:
+            st.info("You have running tasks. Refresh the page to see latest status and logs.")
+
 
 # Initialize session state
 if 'downloaded_scenarios' not in st.session_state:
@@ -679,48 +1127,8 @@ if 'current_tab' not in st.session_state:
     st.session_state.current_tab = "Download Results"
 if "stop_downloads" not in st.session_state:
     st.session_state.stop_downloads = False
-
-
-def find_eval_result_dirs(root_dir: str, recursive: bool = True) -> List[str]:
-    if not os.path.isdir(root_dir):
-        return []
-    if recursive:
-        walker = os.walk(root_dir)
-    else:
-        walker = [(root_dir, [d for d in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, d))], [])]
-    result_dirs = []
-    for current_dir, subdirs, files in walker:
-        if "scenario.yaml" in files and "scene_result.pkl" in files:
-            result_dirs.append(current_dir)
-    return sorted(result_dirs)
-
-
-def run_eval_result_for_dir(result_dir: str, overwrite: bool = False) -> Dict[str, Any]:
-    result_file = os.path.join(result_dir, "result.txt")
-    score_file = os.path.join(result_dir, "score.json")
-    if os.path.exists(result_file) and not overwrite:
-        if os.path.exists(score_file):
-            return {"path": result_dir, "status": "skipped", "detail": "result.txt exists"}
-        try:
-            generate_score_json(result_dir)
-            return {"path": result_dir, "status": "success", "detail": "score.json generated"}
-        except Exception as e:
-            error_output = f"Error: {e}\n{traceback.format_exc()}"
-            with open(result_file, "a", encoding="utf-8") as f:
-                f.write(f"\n{error_output}")
-            return {"path": result_dir, "status": "failed", "detail": str(e)}
-
-    try:
-        report_text = run_eval_result(result_dir)
-        with open(result_file, "w", encoding="utf-8") as f:
-            f.write(report_text)
-        generate_score_json(result_dir)
-        return {"path": result_dir, "status": "success", "detail": "completed"}
-    except Exception as e:
-        error_output = f"Error: {e}\n{traceback.format_exc()}"
-        with open(result_file, "w", encoding="utf-8") as f:
-            f.write(error_output)
-        return {"path": result_dir, "status": "failed", "detail": str(e)}
+if "suite_options" not in st.session_state:
+    st.session_state.suite_options = []
 
 
 def _run_eval_result_worker(result_dir: str, overwrite: bool) -> Dict[str, Any]:
@@ -728,152 +1136,12 @@ def _run_eval_result_worker(result_dir: str, overwrite: bool) -> Dict[str, Any]:
     return run_eval_result_for_dir(result_dir, overwrite=overwrite)
 
 
-def generate_summary_and_score_csv(input_path: str) -> Dict[str, Any]:
-    """
-    Generate Summary.csv and Score.csv in the input_path directory
-    based on each subdirectory's result.txt and score.json.
-    """
-    result_folders = glob.glob(os.path.join(input_path, "*/"))
-    result_folders.sort()
-
-    summary_lines: List[str] = []
-    score_lines: List[str] = []
-
-    # Summary.csv
-    summary_header = "Scenario,TP,TP_xave,TP_xstd,TP_xrms,TP_yave,TP_ystd,TP_yrms,TP_vx,TP_vy\n"
-    # in streamlit, Summary.csv does not need header line
-    #summary_lines.append(summary_header)
-    for folder in result_folders:
-        result_txt = os.path.join(folder, "result.txt")
-        if not os.path.exists(result_txt):
-            continue
-
-        data: List[float] = []
-        with open(result_txt, "r", encoding="utf-8") as txt:
-            found = False
-            for input_line in txt:
-                if not found:
-                    if "TP xave xstd xrms yave ystd yrms vx vy" in input_line:
-                        found = True
-                else:
-                    parts = [p for p in input_line.split(" ") if p.strip() != ""]
-                    try:
-                        data = [float(s) for s in parts]
-                    except ValueError:
-                        data = []
-                    break
-
-        if not data:
-            continue
-
-        scenario_name = Path(folder).name
-        # Keep the same derived fields as the reference script.
-        tp_percent = data[0] * 100
-        x_ave = data[1]
-        x_std = data[2]
-        x_rms = abs(data[1]) + data[2] * 3
-        y_ave = data[4]
-        y_std = data[5]
-        y_rms = abs(data[4]) + data[5] * 3
-        vx = data[7]
-        vy = data[8]
-
-        summary_lines.append(
-            f"{scenario_name},{tp_percent:.3f},{x_ave:.3f},{x_std:.3f},"
-            f"{x_rms:.3f},{y_ave:.3f},{y_std:.3f},{y_rms:.3f},"
-            f"{vx:.3f},{vy:.3f}\n"
-        )
-
-    # Score.csv
-    score_header = "Scenario,Option,GT_OBJ,"
-    for _ in range(4):
-        score_header += (
-            "Distance,NM,TP/TN,ADD,AIL,UIL,PFN/PFP,UUID Num,"
-            "Practical Pass Rate,MAX_DIST_THRESH,OBJ_CNTS,"
-        )
-    score_header += "\n"
-    # in streamlit, Score.csv does not need header line
-    #score_lines.append(score_header)
-
-    for folder in result_folders:
-        score_json = os.path.join(folder, "score.json")
-        if not os.path.exists(score_json):
-            continue
-
-        with open(score_json, "r", encoding="utf-8") as f:
-            dic = json.load(f)
-
-        line = f"{Path(folder).name},"
-        line += f"{dic.get('Option', '')},"
-        line += f"{dic.get('criteria0', {}).get('GT_OBJ', '')},"
-
-        dic_items = [(k, v) for k, v in dic.items() if k != "Option" and isinstance(v, dict)]
-        num_items = len(dic_items)
-        for idx, (k, v) in enumerate(dic_items):
-            is_last = idx == (num_items - 1)
-            line += f"{k},"
-            line += f"{v.get('NM', '')},"
-            line += f"{v.get('TP/TN', '')},"
-            line += f"{v.get('ADD', '')},"
-            line += f"{v.get('AIL', '')},"
-            line += f"{v.get('UIL', '')},"
-            line += f"{v.get('PFN/PFP', '')},"
-            line += f"{v.get('UUID_NUM', '')},"
-
-            nm = v.get("NM", 0)
-            try:
-                nm_value = float(nm)
-            except (TypeError, ValueError):
-                nm_value = 0.0
-            if nm_value == 0:
-                line += "100.0,"
-            else:
-                try:
-                    pass_rate = 100.0 * (
-                        float(v.get("TP/TN", 0))
-                        + float(v.get("AIL", 0))
-                        + float(v.get("ADD", 0))
-                    ) / nm_value
-                except (TypeError, ValueError, ZeroDivisionError):
-                    pass_rate = 0.0
-                line += f"{pass_rate:.3f},"
-
-            line += f"{v.get('MAX_DIST_THRESH', '')},"
-
-            obj_cnts = v.get("OBJ_CNTS", {})
-            if isinstance(obj_cnts, dict):
-                obj_parts = [f"{obj}:{cnt}" for obj, cnt in obj_cnts.items()]
-                line += ";".join(obj_parts) 
-            # Only add trailing comma if not last
-                if not is_last:
-                    line += ","
-
-        score_lines.append(line + "\n")
-
-    with open(os.path.join(input_path, "Summary.csv"), mode="w", encoding="utf-8") as f:
-        f.writelines(summary_lines)
-    with open(os.path.join(input_path, "Score.csv"), mode="w", encoding="utf-8") as f:
-        f.writelines(score_lines)
-
-    return {
-        "summary_path": os.path.join(input_path, "Summary.csv"),
-        "score_path": os.path.join(input_path, "Score.csv"),
-        "summary_rows": max(len(summary_lines) - 1, 0),
-        "score_rows": max(len(score_lines) - 1, 0),
-    }
-
 # Sidebar for configuration
 with st.sidebar:
     st.header("Configuration")
     
-    environment = st.selectbox(
-        "Environment",
-        ["default", "dev", "stg"],
-        help="Select the environment",
-        index=["default", "dev", "stg"].index(get_config_value("environment", "default"))
-    )
-    set_config_value("environment", environment)
-    
+    environment = ENVIRONMENT  # Not exposed in UI; change ENVIRONMENT constant above if needed
+
     project_id = st.text_input(
         "Project ID",
         value=get_config_value("project_id", "x2_dev"),
@@ -881,26 +1149,145 @@ with st.sidebar:
     )
     set_config_value("project_id", project_id)
 
-    job_id = st.text_input(
-        "Job ID",
-        value=get_config_value("job_id", ""),
-        help="Enter the job ID"
+    def extract_job_id_from_url(input_str):
+        import re
+        import urllib.parse
+
+        # Try to extract job id from known URL patterns
+        try:
+            parsed_url = urllib.parse.urlparse(input_str)
+            # Only if it's http(s) and /reports/xxxx pattern
+            if parsed_url.scheme in ("http", "https"):
+                match = re.search(r'/reports/([a-f0-9\-]{16,})', parsed_url.path)
+                if match:
+                    return match.group(1)
+            # If not, return as is
+            return input_str
+        except Exception:
+            return input_str
+
+    def extract_suite_id_from_url(input_str):
+        import re
+        import urllib.parse
+
+        # Try to extract suite id from known URL patterns (e.g. evaluation.tier4.jp/evaluation/suites/<uuid>?project_id=...)
+        try:
+            parsed_url = urllib.parse.urlparse(input_str)
+            if parsed_url.scheme in ("http", "https"):
+                # Match /suites/<uuid> in path (UUID is 8-4-4-4-12 hex)
+                match = re.search(r'/suites/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})', parsed_url.path, re.IGNORECASE)
+                if match:
+                    return match.group(1)
+            return input_str
+        except Exception:
+            return input_str
+
+    # Initialize session state
+    if "job_id" not in st.session_state:
+        st.session_state.job_id = get_config_value("job_id", "")
+
+    # Callback when input changes
+    def on_job_id_change():
+        raw = st.session_state.job_id
+        parsed = extract_job_id_from_url(raw)
+
+        # Update text input with extracted ID
+        st.session_state.job_id = parsed
+
+        # Save config
+        set_config_value("job_id", parsed)
+
+
+    # Text input bound to session state
+    st.text_input(
+        "Job ID/Report URL",
+        key="job_id",
+        help="Enter the job ID or paste a full Evaluator report URL",
+        on_change=on_job_id_change,
     )
-    set_config_value("job_id", job_id)
-    
-    suite_id = st.text_input(
-        "Suite ID",
-        value=get_config_value("suite_id", ""),
-        help="Enter the suite ID"
+    set_config_value("job_id", st.session_state.job_id)
+
+    # Suite ID: same URL-based extraction as Job ID
+    if "suite_id" not in st.session_state:
+        st.session_state.suite_id = get_config_value("suite_id", "")
+
+    def on_suite_id_change():
+        raw = st.session_state.suite_id
+        parsed = extract_suite_id_from_url(raw)
+        st.session_state.suite_id = parsed
+        set_config_value("suite_id", parsed)
+
+    st.text_input(
+        "Suite ID/Suite URL (leave empty to download all suites)",
+        key="suite_id",
+        help="Enter the suite ID or paste a full Evaluator suite URL (e.g. https://evaluation.tier4.jp/evaluation/suites/<suite_id>?project_id=...)",
+        on_change=on_suite_id_change,
     )
+    suite_id = st.session_state.suite_id
     set_config_value("suite_id", suite_id)
-    
+
+    _default_output = "download"
+    _stored = get_config_value("output_path", _default_output)
+    _display_output = to_data_relative(_stored) if _stored else _default_output
     output_path = st.text_input(
         "Output Path",
-        value=get_config_value("output_path", "./data/download"),
-        help="Path where files will be saved"
+        value=_display_output,
+        help="Folder under the data directory (e.g. download or v4.3.1_test4). Path is limited to the server data root."
     )
     set_config_value("output_path", output_path)
+
+    fetch_suites = st.button("Fetch suites from job", help="Retrieve suites for the current Project ID and Job ID")
+    if fetch_suites:
+        if not all([project_id, st.session_state.job_id]):
+            st.error("Please fill in Project ID and Job ID before fetching suites.")
+        else:
+            _resolved, _err = resolve_under_data_root(output_path, allow_create=True)
+            if _err:
+                st.error(f"Output path is invalid: {_err}.")
+            else:
+                try:
+                    with st.spinner("Fetching suites..."):
+                        job_result = JobResult(
+                            environment=environment,
+                            project_id=project_id,
+                            job_id=st.session_state.job_id,
+                            suite_id="",
+                            suite_ids=None,
+                            output_path=str(_resolved)
+                        )
+                        log_dicts = job_result.get_case_simulation_log_info()
+                    suite_map = {}
+                    for log_info in log_dicts:
+                        sid = log_info.get("suite_id", "")
+                        sname = log_info.get("suite_name", "")
+                        if sid:
+                            suite_map[sid] = sname or sid
+                    st.session_state.suite_options = [
+                        {"id": sid, "name": suite_map[sid]} for sid in sorted(suite_map, key=lambda s: suite_map[s].lower())
+                    ]
+                    if st.session_state.suite_options:
+                        st.success(f"Found {len(st.session_state.suite_options)} suites.")
+                    else:
+                        st.info("No suites found for this job.")
+                except Exception as e:
+                    st.error(f"Failed to fetch suites: {str(e)}")
+
+    suite_options = st.session_state.suite_options
+    suite_id_map = {f"{opt['name']} ({opt['id']})": opt["id"] for opt in suite_options}
+    saved_suite_ids = get_config_value("suite_ids", []) or []
+    default_suite_labels = [
+        label for label, sid in suite_id_map.items() if sid in saved_suite_ids
+    ]
+    suite_labels = sorted(suite_id_map.keys())
+    selected_suite_labels = st.multiselect(
+        "Suites to download (optional)",
+        options=suite_labels,
+        default=default_suite_labels,
+        help="Pick one or more suites from the job. Leave empty to download all suites.",
+        disabled=not suite_labels,
+    )
+    suite_ids = [suite_id_map[label] for label in selected_suite_labels]
+    set_config_value("suite_ids", suite_ids)
     
     download_type = st.radio(
         "Download Type",
@@ -908,51 +1295,114 @@ with st.sidebar:
         index=["Archives (ZIP)", "Result JSON only"].index(get_config_value("download_type", "Archives (ZIP)"))
     )
     set_config_value("download_type", download_type)
-    
+
     if download_type == "Archives (ZIP)":
         phase = st.text_input(
             "Phase to extract",
-            value=get_config_value("phase", "phase_name"),
-            help="Enter the phase name to extract from archives"
+            value=get_config_value(
+                "phase", "perception.object_recognition.tracking.objects"
+            ),
+            help="Enter the phase name to extract from archives",
         )
         set_config_value("phase", phase)
 
-# Main tabs
+        # Add options to control skipping large files
+        col_large_skip1, col_large_skip2 = st.columns([2, 3])
+        with col_large_skip1:
+            skip_large_file = st.checkbox(
+                "Skip large files?",
+                value=get_config_value("skip_large_file", False),
+                help="Large archive is in an abnormal state."
+                    "Skipping them is the correct behavior. Uncheck only if you explicitly want to download them."
+            )
+            set_config_value("skip_large_file", skip_large_file)
+        with col_large_skip2:
+            large_file_mb = st.number_input(
+                "Skip threshold (MB)",
+                value=float(get_config_value("large_file_mb", 50.0)),
+                min_value=1.0,
+                max_value=5000.0,
+                step=1.0,
+                help="ZIP files larger than this size will be skipped if 'Skip large files?' is checked."
+            )
+            set_config_value("large_file_mb", large_file_mb)
+    else:
+        skip_large_file = False
+        large_file_mb = 50.0  # Doesn't apply
+
+
+st.markdown('<p class="dl-tabs-rail">Pick a workflow</p>', unsafe_allow_html=True)
 tab1, tab2, tab3, tab4 = st.tabs(
     ["📥 Download Results", "🗺️ Download Scenarios", "📊 View Downloads", "🧮 Eval Results"]
 )
 
 
-    
+
 with tab1:
     st.header("Download Job Results")
         
-
     # Main content area
-    stop_col, _ = st.columns([1, 5])
+    stop_col, open_folder_col, _ = st.columns([1, 1, 4])
     with stop_col:
         if st.button("Stop Downloads", key="stop_downloads_btn"):
             st.session_state.stop_downloads = True
             st.warning("Stop requested. Current download will finish then halt.")
 
+    # Button to open the output folder in file explorer
+    import platform
+    if open_folder_col.button("Open Output Folder", key="open_folder_btn"):
+        import subprocess
+        _resolved, _err = resolve_under_data_root(output_path, allow_create=False, allow_missing=True)
+        folder_path = str(_resolved) if _resolved else None
+        if _err or not folder_path or not os.path.isdir(folder_path):
+            st.warning(f"Output folder does not exist yet: `{output_path}`. Run a download first to create it.")
+        else:
+            try:
+                if platform.system() == "Windows":
+                    os.startfile(folder_path)
+                elif platform.system() == "Darwin":  # macOS
+                    subprocess.Popen(["open", folder_path])
+                else:  # Linux or others
+                    subprocess.Popen(["xdg-open", folder_path])
+            except Exception as e:
+                st.error(f"Could not open folder: {e}")
+
+    # Add "Keep ZIP files" option, default False
+    keep_zip_files = False
+    if download_type == "Archives (ZIP)":
+        keep_zip_files = st.checkbox(
+            "Keep ZIP files after extract?",
+            value=get_config_value("keep_zip_files", False),
+            help="If checked, downloaded ZIP archives will be kept after extraction (default: not kept)."
+        )
+        set_config_value("keep_zip_files", keep_zip_files)
+
+    selected_suite_ids = suite_ids or ([suite_id] if suite_id else [])
 
     if st.button("List Available Logs Info"):
-        if not all([project_id, job_id, suite_id]):
-            st.error("Please fill in all required fields: Project ID, Job ID, and Suite ID")
+        if not all([project_id, st.session_state.job_id]):
+            st.error("Please fill in all required fields: Project ID and Job ID")
+            st.stop()
+        _resolved, _err = resolve_under_data_root(output_path, allow_create=True)
+        if _err:
+            st.error(f"Output path is invalid: {_err}.")
             st.stop()
         try:
             # Initialize JobResult
             job_result = JobResult(
                 environment=environment,
                 project_id=project_id,
-                job_id=job_id,
+                job_id=st.session_state.job_id,
                 suite_id=suite_id,
-                output_path=output_path
+                suite_ids=selected_suite_ids,
+                output_path=str(_resolved)
             )
-            log_dicts = job_result.get_case_simlation_log_info()
+            log_dicts = job_result.get_case_simulation_log_info()
             st.subheader("Simulation Logs Info")
             if log_dicts:
                 display_keys = [
+                    "suite_name",
+                    "suite_id",
                     "scenario_name", 
                     "archive_id", 
                     "result_json_id", 
@@ -973,62 +1423,96 @@ with tab1:
 
     if st.button("Download Results", type="primary"):
         st.session_state.stop_downloads = False
-        if not all([project_id, job_id, suite_id]):
-            st.error("Please fill in all required fields: Project ID, Job ID, and Suite ID")
+        if not all([project_id, st.session_state.job_id]):
+            st.error("Please fill in all required fields: Project ID and Job ID")
             st.stop()
-        
-        # Create output directory
-        os.makedirs(output_path, exist_ok=True)
-        
-        # Save all params to config so they're always updated with last inputs
+        resolved_output, path_err = resolve_under_data_root(output_path, allow_create=True)
+        if path_err:
+            st.error(f"Output path is invalid: {path_err}. Use a path under the server data root.")
+            st.stop()
+        resolved_path_str = str(resolved_output)
+        set_config_value("output_path", to_data_relative(resolved_output))
         set_config_value("environment", environment)
         set_config_value("project_id", project_id)
-        set_config_value("job_id", job_id)
+        set_config_value("job_id", st.session_state.job_id)
         set_config_value("suite_id", suite_id)
-        set_config_value("output_path", output_path)
+        set_config_value("suite_ids", selected_suite_ids)
         set_config_value("download_type", download_type)
         if download_type == "Archives (ZIP)":
             set_config_value("phase", phase)
-        
+            set_config_value("skip_large_file", skip_large_file)
+            set_config_value("large_file_mb", large_file_mb)
+            set_config_value("keep_zip_files", keep_zip_files)
+
+        if is_task_queue_enabled():
+            params = {
+                "output_path": resolved_path_str,
+                "project_id": project_id,
+                "job_id": st.session_state.job_id,
+                "suite_id": suite_id or "",
+                "suite_ids": selected_suite_ids or None,
+                "download_type": "archives" if download_type == "Archives (ZIP)" else "result_json",
+                "phase": phase if download_type == "Archives (ZIP)" else "",
+                "skip_large_file": skip_large_file,
+                "large_file_mb": large_file_mb,
+                "keep_zip_files": keep_zip_files,
+            }
+            task_id = _enqueue_task("download_results", params)
+            if task_id:
+                st.success("Task queued. It will appear in the **Task status** section below; the list updates automatically.")
+            else:
+                st.error("Failed to enqueue task. Check REDIS_URL and DATABASE_URL.")
+            st.stop()
+
+        # Create output directory (inline path)
+        os.makedirs(resolved_path_str, exist_ok=True)
         try:
-            # Initialize JobResult
             job_result = JobResult(
                 environment=environment,
                 project_id=project_id,
-                job_id=job_id,
+                job_id=st.session_state.job_id,
                 suite_id=suite_id,
-                output_path=output_path
+                suite_ids=selected_suite_ids,
+                output_path=resolved_path_str,
             )
-            
+            download_successful = False
             if download_type == "Archives (ZIP)":
                 with st.expander("Downloading Archives", expanded=True):
-                    remain_list = job_result.download_archive_and_unzip(phase)
+                    remain_list = job_result.download_archive_and_unzip(
+                        phase,
+                        skip_large_file=skip_large_file,
+                        large_file_mb=large_file_mb,
+                        keep_zip_files=keep_zip_files,
+                    )
                     st.success(f"✅ Downloaded and extracted {len(remain_list)} archives")
-                    
-                    # Show summary
-                    st.subheader("📊 Summary")
-                    st.write(f"- Total scenarios processed: {len(remain_list)}")
-                    st.write(f"- Output directory: `{output_path}`")
-                    
+                    download_successful = len(remain_list) > 0
+                    render_job_archives_summary_panel(
+                        scenarios_processed=len(remain_list),
+                        output_rel=to_data_relative(resolved_path_str),
+                    )
             else:  # Result JSON only
                 with st.expander("Downloading Result JSON", expanded=True):
                     log_dicts = job_result.download_result_json()
                     st.success(f"✅ Downloaded {len(log_dicts)} JSON files")
-                    
-                    # Show summary
-                    st.subheader("📊 Summary")
-                    st.write(f"- Total JSON files: {len(log_dicts)}")
-                    st.write(f"- Output directory: `{output_path}`")
+                    download_successful = len(log_dicts) > 0
+                    render_job_json_summary_panel(
+                        json_files=len(log_dicts),
+                        output_rel=to_data_relative(resolved_path_str),
+                    )
             
             # Show file tree
             with st.expander("📁 File Structure"):
-                for root, dirs, files in os.walk(output_path):
-                    level = root.replace(output_path, '').count(os.sep)
+                for root, dirs, files in os.walk(resolved_path_str):
+                    level = root.replace(resolved_path_str, '').count(os.sep)
                     indent = ' ' * 4 * level
                     st.text(f"{indent}{os.path.basename(root)}/")
                     subindent = ' ' * 4 * (level + 1)
                     for file in files:
                         st.text(f"{subindent}{file}")
+            
+            # Suggest next step if download succeeded
+            if download_successful:
+                st.info("🎉 Download complete! To generate the final summary CSV files, go to the **'Eval Results'** tab and run the evaluation.")
                         
         except Exception as e:
             st.error(f"❌ Error: {str(e)}")
@@ -1080,48 +1564,71 @@ with tab2:
         )
     
     if st.button("Download Scenarios", type="primary", key="download_scenarios"):
-        if not all([project_id, job_id, suite_id]):
-            st.error("Please fill in all required fields: Project ID, Job ID, and Suite ID")
+        if not all([project_id, st.session_state.job_id]):
+            st.error("Please fill in all required fields: Project ID and Job ID")
             st.stop()
-        
-        # Parse scenario IDs
+        resolved_output, path_err = resolve_under_data_root(output_path, allow_create=True)
+        if path_err:
+            st.error(f"Output path is invalid: {path_err}.")
+            st.stop()
+        out_path = str(resolved_output)
+
+        if is_task_queue_enabled():
+            selected_ids = None
+            if scenario_ids_text:
+                selected_ids = [id.strip() for id in scenario_ids_text.split("\n") if id.strip()]
+            params = {
+                "output_dir": out_path,
+                "output_path": out_path,
+                "project_id": project_id,
+                "job_id": st.session_state.job_id,
+                "suite_id": suite_id or "",
+                "suite_ids": selected_suite_ids or None,
+                "overwrite": overwrite,
+                "scenario_name_filter": scenario_filter or None,
+                "selected_ids": selected_ids,
+            }
+            task_id = _enqueue_task("download_scenarios", params)
+            if task_id:
+                st.success("Task queued. It will appear in the **Task status** section below; the list updates automatically.")
+            else:
+                st.error("Failed to enqueue task. Check REDIS_URL and DATABASE_URL.")
+            st.stop()
+
+        # Parse scenario IDs (inline path)
         selected_ids = None
         if scenario_ids_text:
             selected_ids = [id.strip() for id in scenario_ids_text.split('\n') if id.strip()]
             st.info(f"Will download {len(selected_ids)} specific scenarios")
         
         try:
-            # Initialize JobResult
             job_result = JobResult(
                 environment=environment,
                 project_id=project_id,
-                job_id=job_id,
+                job_id=st.session_state.job_id,
                 suite_id=suite_id,
-                output_path=output_path
+                suite_ids=selected_suite_ids,
+                output_path=out_path
             )
-            
-            # Create scenarios subdirectory
-            scenarios_dir = os.path.join(output_path, "scenarios")
-            
             with st.expander("Downloading Scenarios", expanded=True):
                 downloaded = job_result.download_scenarios(
-                    output_dir=scenarios_dir,
+                    output_dir=out_path,
                     scenario_name_filter=scenario_filter,
                     overwrite=overwrite,
                     selected_ids=selected_ids
                 )
-                
+
+                # Also download result JSON files (same as tab1 "Result JSON only")
+                log_dicts = job_result.download_result_json()
+
                 # Store in session state
                 st.session_state.downloaded_scenarios = downloaded
                 
-                # Show detailed results
-                st.subheader("📋 Detailed Results")
-                
                 success_scenarios = [s for s in downloaded if s["status"] == "success"]
-                if success_scenarios:
-                    st.write("Successfully downloaded scenarios:")
-                    for scenario in success_scenarios:
-                        st.write(f"• {scenario['name']} (ID: {scenario['id']})")
+                render_detailed_scenario_download_panel(
+                    success_rows=[(s["name"], str(s["id"])) for s in success_scenarios],
+                    json_file_count=len(log_dicts),
+                )
                 
         except Exception as e:
             st.error(f"❌ Error downloading scenarios: {str(e)}")
@@ -1129,8 +1636,9 @@ with tab2:
 
 with tab3:
     st.header("View Downloaded Content")
-    
-    if not os.path.exists(output_path):
+    _tab3_resolved, _tab3_err = resolve_under_data_root(output_path, allow_missing=True)
+    _tab3_output = str(_tab3_resolved) if _tab3_resolved else None
+    if _tab3_err or not _tab3_output or not os.path.exists(_tab3_output):
         st.info("No downloads yet. Use the other tabs to download content first.")
     else:
         # Show directory structure
@@ -1139,8 +1647,8 @@ with tab3:
         # Let user browse directories
         selected_dir = st.selectbox(
             "Browse directory",
-            [output_path] + [os.path.join(output_path, d) for d in os.listdir(output_path) 
-                            if os.path.isdir(os.path.join(output_path, d))]
+            [_tab3_output] + [os.path.join(_tab3_output, d) for d in os.listdir(_tab3_output) 
+                            if os.path.isdir(os.path.join(_tab3_output, d))]
         )
         
         if os.path.exists(selected_dir):
@@ -1168,7 +1676,7 @@ with tab3:
         
         # Show session state downloads
         if st.session_state.downloaded_scenarios:
-            st.subheader("📋 Recent Scenario Downloads")
+            render_recent_scenario_downloads_intro()
             df_data = []
             for scenario in st.session_state.downloaded_scenarios:
                 df_data.append({
@@ -1180,18 +1688,70 @@ with tab3:
             
             import pandas as pd
             df = pd.DataFrame(df_data)
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width="stretch")
 
 
 with tab4:
-    st.header("Eval Results (per directory)")
+    st.header("Eval Results")
 
+    # Safe default so tab4 never fails with NameError if sidebar output_path wasn't set (e.g. fragment-only run)
+    try:
+        _default_eval_root = str(output_path)
+    except NameError:
+        _default_eval_root = "download"
+    _stored_eval = get_config_value("eval_root", _default_eval_root)
+    _display_eval = to_data_relative(_stored_eval) if _stored_eval else _default_eval_root
     eval_root = st.text_input(
         "Root directory to evaluate",
-        value=get_config_value("eval_root", output_path),
-        help="Directory containing downloaded scenario results",
+        value=_display_eval,
+        help="Folder under the data directory (e.g. download or a run name). Path is limited to the server data root. Uploaded files are also saved here.",
     )
     set_config_value("eval_root", eval_root)
+
+    # --- Upload local file (Summary CSV / Score CSV / Parquet) into the root directory above ---
+    with st.expander("📤 Upload local file (Summary.csv, Score.csv, or parquet)", expanded=False):
+        st.caption(
+            "Upload Summary CSV, Score CSV, or parquet file(s). They will be saved into the **Root directory to evaluate** above so the dashboard can use them (Overview, Detection Stats, Bounding Box Viewer)."
+        )
+        uploaded_files = st.file_uploader(
+            "Choose file(s)",
+            type=["csv", "parquet"],
+            accept_multiple_files=True,
+            key="tab4_upload_local",
+            help="Files are saved into the root directory to evaluate (above).",
+        )
+        if st.button("Save uploaded file(s) to root directory", key="tab4_upload_btn"):
+            if not uploaded_files:
+                st.warning("Please select at least one file to upload.")
+            elif not eval_root or not str(eval_root).strip():
+                st.warning("Please enter Root directory to evaluate above.")
+            else:
+                resolved, err = resolve_under_data_root(eval_root.strip(), allow_create=True)
+                if err:
+                    st.error(f"Cannot use that path: {err}. Use a path under the server data root.")
+                else:
+                    try:
+                        target_dir = Path(resolved)
+                        target_dir.mkdir(parents=True, exist_ok=True)
+                        saved = []
+                        for up in uploaded_files:
+                            name_lower = (up.name or "").lower()
+                            if name_lower == "summary.csv" or ("summary" in name_lower and name_lower.endswith(".csv")):
+                                out_name = "Summary.csv"
+                            elif name_lower == "score.csv" or ("score" in name_lower and name_lower.endswith(".csv")):
+                                out_name = "Score.csv"
+                            elif name_lower.endswith(".parquet"):
+                                out_name = up.name
+                            else:
+                                out_name = up.name
+                            out_path = target_dir / out_name
+                            with open(out_path, "wb") as f:
+                                f.write(up.getvalue())
+                            saved.append(out_name)
+                        st.success(f"Saved {len(saved)} file(s) to **{to_data_relative(target_dir)}**: {', '.join(saved)}. You can use this run in Overview and other pages.")
+                    except Exception as e:
+                        st.error(f"Failed to save: {e}")
+                        st.exception(e)
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -1210,7 +1770,8 @@ with tab4:
         eval_parallel = st.checkbox(
             "Run in parallel",
             value=get_config_value("eval_parallel", False),
-            help="If checked, run eval_result in parallel",
+            help="Temporarily disabled. Parallel execution currently provides no measurable benefit.",    
+            disabled=True
         )
         if eval_parallel:
             eval_workers = st.number_input(
@@ -1235,26 +1796,210 @@ with tab4:
         help="If checked, skip running eval_result per directory and generate only the summary/score CSVs from existing results."
     )
 
-    if st.button(
-        "Run eval_result for all directories" if not only_generate_summary else "Generate Summary and Score CSV only",
-        type="primary",
-        key="run_eval_result"
-    ):
+    notify_when_done = st.checkbox(
+        "Notify when eval finishes (browser notification)",
+        value=get_config_value("eval_notify_when_done", True),
+        help="Show a browser notification when evaluation completes so you can switch to other tabs.",
+    )
+    set_config_value("eval_notify_when_done", notify_when_done)
+
+    def _emit_eval_finished_notification(message: str):
+        import html
+        import streamlit.components.v1 as components
+        try:
+            msg_safe = html.escape(message, quote=True)
+            html_fragment = f"""
+            <span id="eval-msg" data-msg="{msg_safe}"></span>
+            <script>
+            (function() {{
+              if (!("Notification" in window)) return;
+              var el = document.getElementById("eval-msg");
+              var text = el ? (el.getAttribute("data-msg") || "Eval finished.") : "Eval finished.";
+              function show() {{
+                if (Notification.permission === "granted")
+                  new Notification("Eval finished", {{ body: text }});
+                else if (Notification.permission !== "denied")
+                  Notification.requestPermission().then(function(p) {{ if (p === "granted") new Notification("Eval finished", {{ body: text }}); }});
+              }}
+              if (Notification.permission === "granted") show();
+              else if (Notification.permission !== "denied") Notification.requestPermission().then(function(p) {{ if (p === "granted") show(); }});
+            }})();
+            </script>
+            """
+            components.html(html_fragment, height=0)
+        except Exception:
+            pass
+
+    btn_col1, btn_col2, btn_col3 = st.columns(3)
+    with btn_col1:
+        run_eval_clicked = st.button(
+            "Run eval_result" if not only_generate_summary else "Generate Summary and Score CSV only",
+            type="primary",
+            key="run_eval_result"
+        )
+    with btn_col2:
+        generate_parquet_clicked = st.button(
+            "Generate parquet",
+            key="generate_parquet_btn",
+            type="primary",
+            disabled=not CATALOG_IO_AVAILABLE,
+            help="Build scene_result.parquet from .pkl files in the evaluate path above (same as Run eval)." if CATALOG_IO_AVAILABLE else "Install perception_catalog_analyzer to enable.",
+        )
+    with btn_col3:
+        generate_both_clicked = st.button(
+            "Generate both",
+            key="generate_both_btn",
+            type="primary",
+            disabled=not CATALOG_IO_AVAILABLE,
+            help="Generate both parquet and Summary.csv/Score.csv.",
+        )
+    # Task queue: enqueue eval/parquet tasks and skip inline execution
+    if is_task_queue_enabled() and (run_eval_clicked or generate_parquet_clicked or generate_both_clicked):
+        resolved_eval, eval_err = resolve_under_data_root(eval_root, allow_missing=True)
+        if eval_err:
+            st.error(f"Eval root is invalid: {eval_err}. Use a path under the server data root.")
+        else:
+            eval_path = str(resolved_eval)
+            set_config_value("eval_root", to_data_relative(resolved_eval))
+            enqueued = []
+            if generate_parquet_clicked or generate_both_clicked:
+                if CATALOG_IO_AVAILABLE:
+                    tid = _enqueue_task(
+                        "build_parquet",
+                        {
+                            "pkl_dir": eval_path,
+                            "project_id": project_id or "",
+                            "job_id": st.session_state.job_id or "",
+                        },
+                        job_timeout=_BUILD_PARQUET_JOB_TIMEOUT_SEC,
+                    )
+                    if tid:
+                        enqueued.append(f"build_parquet ({tid[:8]}...)")
+                else:
+                    st.warning("Parquet task skipped: perception_catalog_io not available.")
+            if run_eval_clicked or generate_both_clicked:
+                if only_generate_summary:
+                    tid = _enqueue_task("generate_summary_csv", {"eval_root": eval_path})
+                else:
+                    tid = _enqueue_task("run_eval_dirs", {
+                        "eval_root": eval_path,
+                        "recursive": eval_recursive,
+                        "overwrite": eval_overwrite,
+                    })
+                if tid:
+                    enqueued.append(f"{'generate_summary_csv' if only_generate_summary else 'run_eval_dirs'} ({tid[:8]}...)")
+            if enqueued:
+                st.success("Tasks queued: " + ", ".join(enqueued) + ". See **Task status** below; the list updates automatically.")
+            else:
+                st.error("Failed to enqueue. Check REDIS_URL and DATABASE_URL.")
+        st.stop()
+
+    if generate_parquet_clicked or generate_both_clicked and CATALOG_IO_AVAILABLE:
+        resolved, err = resolve_under_data_root(eval_root, allow_missing=True)
+        if err:
+            st.error(f"Path is invalid: {err}. Use a path under the server data root.")
+        else:
+            pkl_dir = Path(resolved)
+            if not pkl_dir.is_dir():
+                st.warning(f"Not a directory: `{pkl_dir}`.")
+            else:
+                all_pkl_files = list(pkl_dir.rglob("*.pkl")) + list(pkl_dir.rglob("*.pkl.z"))
+                pkl_count = len(all_pkl_files)
+                if pkl_count == 0:
+                    st.warning(f"No .pkl or .pkl.z files in `{pkl_dir}` or its subdirectories.")
+                else:
+                    _parquet_hud: Optional[ImpressiveProgressHUD] = None
+                    try:
+                        skip_log = []
+                        def on_skip(path: str, reason: str):
+                            skip_log.append((path, reason))
+
+                        st.write(f"Processing {pkl_count} pkl files…")
+                        _parquet_hud = ImpressiveProgressHUD()
+                        start_time = time.time()
+
+                        def _format_eta(sec: float) -> str:
+                            if sec is None or sec < 0 or not float("inf") > sec:
+                                return "—"
+                            m, s = divmod(int(round(sec)), 60)
+                            h, m = divmod(m, 60)
+                            if h > 0:
+                                return f"{h}h {m}m {s}s"
+                            if m > 0:
+                                return f"{m}m {s}s"
+                            return f"{s}s"
+
+                        def _update_parquet_progress(done: int, total: int):
+                            elapsed = time.time() - start_time
+                            foot = ""
+                            if done > 0 and done < total and elapsed > 0:
+                                rate = done / elapsed
+                                remaining_sec = (total - done) / rate
+                                eta_finish = datetime.now() + timedelta(seconds=remaining_sec)
+                                foot = (
+                                    f"{done}/{total} files · Elapsed {_format_eta(elapsed)} · "
+                                    f"Remaining ~{_format_eta(remaining_sec)} · Finish ~{eta_finish.strftime('%H:%M:%S')}"
+                                )
+                            elif done >= total:
+                                foot = f"{total}/{total} files · {_format_eta(elapsed)} total"
+                            else:
+                                foot = f"{done}/{total} files · Elapsed {_format_eta(elapsed)}"
+                            _parquet_hud.show(
+                                fraction=(done / total) if total else 1.0,
+                                headline="Building parquet",
+                                detail=f"Converting catalog pickles ({done} of {total})",
+                                foot=foot,
+                            )
+
+                        parquet_path = pkl_archive_to_parquet(
+                            pkl_dir,
+                            on_skip=on_skip,
+                            on_progress=_update_parquet_progress,
+                            project_id=project_id or None,
+                            job_id=st.session_state.job_id or None,
+                        )
+                        _update_parquet_progress(pkl_count, pkl_count)
+                        st.success(f"Saved: `{parquet_path}`")
+                        if skip_log:
+                            with st.expander("Skipped pkl files"):
+                                for path, reason in skip_log:
+                                    st.text(f"{os.fspath(path)}: {reason}")
+                    except Exception as e:
+                        st.error(f"Parquet generation failed: {e}")
+                        st.exception(e)
+                    finally:
+                        if _parquet_hud is not None:
+                            _parquet_hud.clear()
+
+    if run_eval_clicked or generate_both_clicked:
         import pandas as pd
+        resolved_eval_root, eval_path_err = resolve_under_data_root(eval_root, allow_missing=True)
+        if eval_path_err:
+            st.error(f"Eval root path is invalid: {eval_path_err}. Use a path under the server data root.")
+            st.stop()
+        eval_root_resolved = str(resolved_eval_root)
+        eval_root_display = to_data_relative(resolved_eval_root)
+        set_config_value("eval_root", eval_root_display)
 
         if only_generate_summary:
             with st.spinner("Generating Summary.csv and Score.csv..."):
                 try:
-                    csv_info = generate_summary_and_score_csv(eval_root)
+                    csv_info = generate_summary_and_score_csv(eval_root_resolved)
                     st.success(
                         f"Generated Summary.csv ({csv_info['summary_rows']} rows) and "
-                        f"Score.csv ({csv_info['score_rows']} rows) in `{eval_root}`"
+                        f"Score.csv ({csv_info['score_rows']} rows) in `{eval_root_display}`"
                     )
+                    if notify_when_done:
+                        _emit_eval_finished_notification(
+                            f"Summary.csv ({csv_info['summary_rows']} rows) and Score.csv ({csv_info['score_rows']} rows) in {eval_root_display}"
+                        )
                 except Exception as e:
                     st.error(f"Failed to generate CSV files: {e}")
+                    if notify_when_done:
+                        _emit_eval_finished_notification(f"Summary/Score CSV generation failed: {e}")
         else:
             with st.spinner("Searching for result directories..."):
-                target_dirs = find_eval_result_dirs(eval_root, recursive=eval_recursive)
+                target_dirs = find_eval_result_dirs(eval_root_resolved, recursive=eval_recursive)
                 print("target_dirs", target_dirs)
 
             if not target_dirs:
@@ -1262,35 +2007,73 @@ with tab4:
                 st.stop()
 
             st.write(f"Found {len(target_dirs)} directories to process")
-            progress = st.progress(0)
+            _eval_hud = ImpressiveProgressHUD()
             results = []
+            total = len(target_dirs)
+            start_time = time.time()
 
-            # sequential evaluation
-            if not eval_parallel:
-                for i, result_dir in enumerate(target_dirs):
-                    progress.progress((i + 1) / len(target_dirs))
-                    results.append(run_eval_result_for_dir(result_dir, overwrite=eval_overwrite))
-            else:
+            def _format_eta(sec: float) -> str:
+                if sec is None or sec < 0 or not float("inf") > sec:
+                    return "—"
+                m, s = divmod(int(round(sec)), 60)
+                h, m = divmod(m, 60)
+                if h > 0:
+                    return f"{h}h {m}m {s}s"
+                if m > 0:
+                    return f"{m}m {s}s"
+                return f"{s}s"
 
-                max_workers = max(1, min(int(eval_workers), len(target_dirs)))
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    future_map = {
-                        executor.submit(_run_eval_result_worker, result_dir, eval_overwrite): result_dir
-                        for result_dir in target_dirs
-                    }
-                    completed = 0
-                    for future in as_completed(future_map):
-                        completed += 1
-                        progress.progress(completed / len(target_dirs))
-                        try:
-                            results.append(future.result())
-                        except Exception as e:
-                            result_dir = future_map.get(future, "unknown")
-                            results.append(
-                                {"path": result_dir, "status": "failed", "detail": str(e)}
-                            )
+            def _update_progress_status(done: int, total_dirs: int):
+                elapsed = time.time() - start_time
+                foot = ""
+                if done > 0 and done < total_dirs and elapsed > 0:
+                    rate = done / elapsed
+                    remaining_sec = (total_dirs - done) / rate
+                    eta_finish = datetime.now() + timedelta(seconds=remaining_sec)
+                    foot = (
+                        f"{done}/{total_dirs} dirs · Elapsed {_format_eta(elapsed)} · "
+                        f"Remaining ~{_format_eta(remaining_sec)} · Finish ~{eta_finish.strftime('%H:%M:%S')}"
+                    )
+                elif done >= total_dirs:
+                    foot = f"{total_dirs}/{total_dirs} dirs · {_format_eta(elapsed)} total"
+                else:
+                    foot = f"{done}/{total_dirs} dirs · Elapsed {_format_eta(elapsed)}"
+                _eval_hud.show(
+                    fraction=(done / total_dirs) if total_dirs else 1.0,
+                    headline="Running perception eval",
+                    detail=f"Processing result directories ({done} of {total_dirs})",
+                    foot=foot,
+                )
 
-            progress.progress(1.0)
+            try:
+                # sequential evaluation
+                if not eval_parallel:
+                    for i, result_dir in enumerate(target_dirs):
+                        _update_progress_status(i, total)
+                        results.append(run_eval_result_for_dir(result_dir, overwrite=eval_overwrite))
+                        _update_progress_status(i + 1, total)
+                else:
+                    max_workers = max(1, min(int(eval_workers), len(target_dirs)))
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        future_map = {
+                            executor.submit(_run_eval_result_worker, result_dir, eval_overwrite): result_dir
+                            for result_dir in target_dirs
+                        }
+                        completed = 0
+                        for future in as_completed(future_map):
+                            completed += 1
+                            _update_progress_status(completed, total)
+                            try:
+                                results.append(future.result())
+                            except Exception as e:
+                                result_dir = future_map.get(future, "unknown")
+                                results.append(
+                                    {"path": result_dir, "status": "failed", "detail": str(e)}
+                                )
+
+                _update_progress_status(total, total)
+            finally:
+                _eval_hud.clear()
 
             success_count = sum(1 for r in results if r["status"] == "success")
             skipped_count = sum(1 for r in results if r["status"] == "skipped")
@@ -1303,15 +2086,24 @@ with tab4:
 
             if results:
                 st.subheader("📋 Details")
-                st.dataframe(pd.DataFrame(results), use_container_width=True)
+                st.dataframe(pd.DataFrame(results), width="stretch")
 
             # Generate summary CSVs at the eval_root level
             with st.spinner("Generating Summary.csv and Score.csv..."):
                 try:
-                    csv_info = generate_summary_and_score_csv(eval_root)
+                    csv_info = generate_summary_and_score_csv(eval_root_resolved)
                     st.success(
                         f"Generated Summary.csv ({csv_info['summary_rows']} rows) and "
-                        f"Score.csv ({csv_info['score_rows']} rows) in `{eval_root}`"
+                        f"Score.csv ({csv_info['score_rows']} rows) in `{eval_root_display}`"
                     )
+                    if notify_when_done:
+                        _emit_eval_finished_notification(
+                            f"Eval done. Success: {success_count}, Skipped: {skipped_count}, Failed: {failed_count}. "
+                            f"Summary.csv and Score.csv in {eval_root_display}"
+                        )
                 except Exception as e:
                     st.error(f"Failed to generate CSV files: {e}")
+                    if notify_when_done:
+                        _emit_eval_finished_notification(
+                            f"Eval run finished with CSV error. Success: {success_count}, Skipped: {skipped_count}, Failed: {failed_count}. {e}"
+                        )

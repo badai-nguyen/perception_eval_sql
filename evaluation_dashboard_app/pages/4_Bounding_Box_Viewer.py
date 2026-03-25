@@ -1,66 +1,271 @@
 import duckdb
 import streamlit as st
 import plotly.graph_objects as go
+import plotly.express as px
 import numpy as np
 import pandas as pd
-import glob
 import os
-from typing import Tuple
+from pathlib import Path
+from typing import Any, List, Optional, Tuple
 
-st.set_page_config(layout="wide")
-st.title("Bounding Box Viewer")
+from lib.path_utils import path_display
+from lib.parquet_schema import schema_flags
+from lib.page_chrome import inject_app_page_styles, render_loaded_data_section, render_page_hero
+from lib.ui.bounding_box_viewer_ui import bev_overlay_line_and_status_legend_markup, bev_status_legend_markup
+
+st.set_page_config(
+    layout="wide",
+    page_title="Bounding Box Viewer",
+    page_icon="🖼️",
+    initial_sidebar_state="expanded",
+)
+inject_app_page_styles()
+
+# =============================
+# Session state from Overview (run path)
+# =============================
+if "runA" not in st.session_state:
+    st.warning("Please load data from the **Overview** page first (select mode and run(s)).")
+    st.stop()
+
+runA = st.session_state["runA"]
+mode = st.session_state.get("mode", "Single Mode")
+# Respect mode: in Single Mode always show one run; only use compare state when explicitly in Compare Mode
+if mode == "Compare Mode":
+    all_runs = st.session_state.get("all_runs")
+    run_labels_state = st.session_state.get("run_labels")
+    if all_runs and run_labels_state and len(all_runs) >= 2:
+        runs = all_runs
+        run_labels_list = run_labels_state
+    else:
+        runB = st.session_state.get("runB")
+        runs = [runA] if runB is None else [runA, runB]
+        run_labels_list = ["A"] if len(runs) == 1 else ["A", "B"]
+else:
+    runs = [runA]
+    run_labels_list = ["A"]
+
+
+def list_parquets_in_run(run_path) -> List[str]:
+    """Return sorted list of absolute paths to .parquet files in the run directory."""
+    p = Path(run_path)
+    if not p.is_dir():
+        return []
+    return sorted([str(f.resolve()) for f in p.glob("*.parquet")])
+
+
+# Parquet files from the run(s) designated on Overview
+parquet_lists = [list_parquets_in_run(r["path"]) for r in runs]
+for i, (r, pl) in enumerate(zip(runs, parquet_lists)):
+    if not pl:
+        lbl = run_labels_list[i] if i < len(run_labels_list) else str(i)
+        st.error(
+            f"No parquet files in run ({lbl}): {path_display(r['path'])}. "
+            "Add a .parquet file or generate one from the Download page."
+        )
+        st.stop()
+
+multi_run = len(runs) >= 2
+
+# ----------------------------
+# Loaded Runs (from Overview) + hero
+# ----------------------------
+_ld_entries = []
+for i, r in enumerate(runs):
+    lbl = run_labels_list[i] if i < len(run_labels_list) else str(i)
+    if lbl == "A":
+        _ltitle = "Baseline · A"
+    else:
+        _ltitle = f"Candidate · {lbl}"
+    _ld_entries.append((_ltitle, path_display(r["path"])))
+render_loaded_data_section(_ld_entries)
+render_page_hero(
+    kicker="Spatial visualization",
+    title="Bounding box & BEV viewer",
+    description=(
+        "Inspect frames from parquet: camera overlays, bird’s-eye context, and optional multi-run comparison "
+        "when several evaluations are loaded from Overview."
+    ),
+    mode=mode,
+)
 
 # ----------------------------
 # Sidebar (Filters)
 # ----------------------------
 with st.sidebar:
-    st.header("Filters")
+    st.markdown("##### Filters")
+    st.caption("Parquet file, suite, scenario, frame — narrow down what you visualize.")
 
-    # Parquet files
-    parquet_files = sorted(glob.glob("data/*.parquet"))
-    if not parquet_files:
-        st.error("No Parquet files under data/*.parquet")
-        st.stop()
-    selected_file = st.selectbox("Parquet file", parquet_files)
+    if multi_run:
+        runs_to_show = st.multiselect(
+            "Runs to show",
+            run_labels_list,
+            default=run_labels_list,
+            key="bbox_viewer_runs_to_show",
+        )
+        if not runs_to_show:
+            st.warning("Select at least one run.")
+            st.stop()
+    else:
+        runs_to_show = run_labels_list
+
+    # Parquet file selection per run (only for runs that are shown)
+    selected_files = {}
+    for i, lbl in enumerate(run_labels_list):
+        if lbl not in runs_to_show:
+            continue
+        pl = parquet_lists[i]
+        if len(pl) == 1:
+            selected_files[lbl] = pl[0]
+        else:
+            selected_files[lbl] = st.selectbox(
+                f"File (Run {lbl})",
+                pl,
+                format_func=os.path.basename,
+                key=f"bbox_viewer_file_{lbl}",
+            )
+
+    # Primary file for building filter options (suite, scenario, topic, labels)
+    first_shown = runs_to_show[0] if runs_to_show else run_labels_list[0]
+    filter_file = selected_files.get(first_shown) or parquet_lists[run_labels_list.index(first_shown)][0]
 
 # DuckDB connection (no cache = 安定優先)
 con = duckdb.connect()
 
-# --- Columns (for visibility existence check)
-cols = con.execute("DESCRIBE SELECT * FROM parquet_scan(?)", [selected_file]).df()["column_name"].tolist()
+# --- Columns (for visibility existence check) — use filter_file for filter options
+cols = con.execute("DESCRIBE SELECT * FROM parquet_scan(?)", [filter_file]).df()["column_name"].tolist()
 has_visibility = "visibility" in cols
+has_suite_name = "suite_name" in cols
+has_scenario_name = "scenario_name" in cols
+has_t4dataset_name = "t4dataset_name" in cols
+schema = schema_flags(con, filter_file)
+# Optional columns for hover (z, height, vx, vy, confidence, pointcloud_num)
+hover_extra_cols = [c for c in ["z", "height", "vx", "vy", "confidence", "pointcloud_num"] if c in cols]
 
-# --- t4dataset_id
-t4_ids = con.execute(
-    "SELECT DISTINCT t4dataset_id AS v FROM parquet_scan(?) ORDER BY v",
-    [selected_file]
-).df()["v"].dropna().tolist()
-if not t4_ids:
-    st.error("No t4dataset_id in file")
-    st.stop()
+
+# --- Scene selection: one suite + one scenario (when columns exist)
+scene_where = "1=1"
+scene_params: List[str] = [filter_file]
+
+if has_suite_name:
+    suite_list = con.execute(
+        "SELECT DISTINCT suite_name AS v FROM parquet_scan(?) WHERE suite_name IS NOT NULL ORDER BY v",
+        [filter_file]
+    ).df()["v"].dropna().astype(str).tolist()
+else:
+    suite_list = []
+
+# Apply deep-link from Detection Stats (suite / scenario / t4dataset) before selectboxes render
+if "bbox_viewer_link_suite" in st.session_state:
+    _lsu = st.session_state.pop("bbox_viewer_link_suite", None)
+    if suite_list and _lsu is not None and str(_lsu) in suite_list:
+        st.session_state["bbox_viewer_suite"] = str(_lsu)
 
 with st.sidebar:
-    selected_t4 = st.selectbox("t4dataset_id", t4_ids)
+    selected_suite = None
+    selected_scenario = None
+    if suite_list:
+        selected_suite = st.selectbox(
+            "Suite name",
+            suite_list,
+            key="bbox_viewer_suite",
+        )
+    if has_scenario_name:
+        if selected_suite is not None:
+            scenario_list = con.execute(
+                "SELECT DISTINCT scenario_name AS v FROM parquet_scan(?) WHERE suite_name = ? AND scenario_name IS NOT NULL ORDER BY v",
+                [filter_file, selected_suite]
+            ).df()["v"].dropna().astype(str).tolist()
+        else:
+            scenario_list = con.execute(
+                "SELECT DISTINCT scenario_name AS v FROM parquet_scan(?) WHERE scenario_name IS NOT NULL ORDER BY v",
+                [filter_file]
+            ).df()["v"].dropna().astype(str).tolist()
+        if scenario_list:
+            if "bbox_viewer_link_scenario" in st.session_state:
+                _lsc = st.session_state.pop("bbox_viewer_link_scenario", None)
+                if _lsc is not None and str(_lsc) in scenario_list:
+                    st.session_state["bbox_viewer_scenario"] = str(_lsc)
+            selected_scenario = st.selectbox(
+                "Scenario name",
+                scenario_list,
+                key="bbox_viewer_scenario",
+            )
+    # Only offer t4dataset_name filter when column exists and has more than one distinct value
+    # Filter t4dataset options by selected_suite and selected_scenario when set
+    t4dataset_list: List[str] = []
+    if has_t4dataset_name:
+        t4_where_parts = ["t4dataset_name IS NOT NULL"]
+        t4_params: List[Any] = [filter_file]
+        if selected_suite is not None:
+            t4_where_parts.insert(0, "suite_name = ?")
+            t4_params.append(selected_suite)
+        if selected_scenario is not None:
+            t4_where_parts.insert(0, "scenario_name = ?")
+            t4_params.insert(1, selected_scenario)
+        t4_where = " AND ".join(t4_where_parts)
+        t4dataset_list = con.execute(
+            f"SELECT DISTINCT t4dataset_name AS v FROM parquet_scan(?) WHERE {t4_where} ORDER BY v",
+            t4_params,
+        ).df()["v"].dropna().astype(str).tolist()
+    has_multiple_t4dataset = len(t4dataset_list) > 1
+    selected_t4dataset = None
+    if has_multiple_t4dataset and t4dataset_list:
+        if "bbox_viewer_link_t4dataset" in st.session_state:
+            _lt4 = st.session_state.pop("bbox_viewer_link_t4dataset", None)
+            if _lt4 is not None and str(_lt4) in t4dataset_list:
+                st.session_state["bbox_viewer_t4dataset"] = str(_lt4)
+        selected_t4dataset = st.selectbox(
+            "t4dataset_name",
+            t4dataset_list,
+            key="bbox_viewer_t4dataset",
+        )
+
+# Build scene filter for queries (one scene = one suite + one scenario)
+if selected_suite is not None:
+    scene_where = "suite_name = ?"
+    scene_params = [filter_file, selected_suite]
+if selected_scenario is not None:
+    scene_where = scene_where + " AND scenario_name = ?" if scene_where != "1=1" else "scenario_name = ?"
+    scene_params = scene_params + [selected_scenario]
+if selected_t4dataset is not None:
+    scene_where = scene_where + " AND t4dataset_name = ?" if scene_where != "1=1" else "t4dataset_name = ?"
+    scene_params = scene_params + [selected_t4dataset]
+if scene_where == "1=1":
+    scene_params = [filter_file]
 
 # --- topic_name（単一選択）
 topic_names = con.execute(
-    "SELECT DISTINCT topic_name AS v FROM parquet_scan(?) WHERE t4dataset_id=? ORDER BY v",
-    [selected_file, selected_t4]
+    f"SELECT DISTINCT topic_name AS v FROM parquet_scan(?) WHERE {scene_where} ORDER BY v",
+    scene_params
 ).df()["v"].dropna().tolist()
 if not topic_names:
-    st.warning("No topic_name for selected t4dataset_id")
-    st.stop()
+    # Clear scene from link so selectbox falls back to first available (avoids "No topic_name" loop)
+    for key in (
+        "bbox_viewer_scenario",
+        "bbox_viewer_suite",
+        "bbox_viewer_link_suite",
+        "bbox_viewer_link_scenario",
+        "bbox_viewer_link_t4dataset",
+    ):
+        if key in st.session_state:
+            del st.session_state[key]
+    st.warning(
+        "No topic_name for the selected scene (from Detection Stats link). "
+        "Cleared scene selection; please choose a scene from the sidebar."
+    )
+    st.rerun()
 
 with st.sidebar:
     selected_topic = st.selectbox("topic_name (single)", topic_names)
 
 # --- label（複数選択）
 labels = con.execute(
-    "SELECT DISTINCT label AS v FROM parquet_scan(?) WHERE t4dataset_id=? ORDER BY v",
-    [selected_file, selected_t4]
+    f"SELECT DISTINCT label AS v FROM parquet_scan(?) WHERE {scene_where} AND topic_name=? ORDER BY v",
+    scene_params + [selected_topic]
 ).df()["v"].dropna().tolist()
 if not labels:
-    st.warning("No label for selected t4dataset_id")
+    st.warning("No label for selected topic.")
     st.stop()
 
 with st.sidebar:
@@ -70,8 +275,8 @@ with st.sidebar:
 selected_visibility = None
 if has_visibility:
     vis_list = con.execute(
-        "SELECT DISTINCT COALESCE(visibility,'UNKNOWN') AS v FROM parquet_scan(?) WHERE t4dataset_id=? ORDER BY v",
-        [selected_file, selected_t4]
+        f"SELECT DISTINCT COALESCE(visibility,'UNKNOWN') AS v FROM parquet_scan(?) WHERE {scene_where} AND topic_name=? ORDER BY v",
+        scene_params + [selected_topic]
     ).df()["v"].tolist()
     with st.sidebar:
         if vis_list:
@@ -90,13 +295,28 @@ if not selected_labels:
 # --- invalidオブジェクト表示オプション ---
 with st.sidebar:
     show_invalid = st.checkbox("Show invalid (zero-size) objects", value=False)
+    show_velocity_arrows = False
+    if schema.get("has_velocity"):
+        show_velocity_arrows = st.checkbox("Show velocity vectors", value=False, help="Draw arrows for vx, vy (scale: 2 s)")
+
+# --- Comparison view mode (when multiple runs) ---
+compare_view_mode = "side_by_side"
+if multi_run and len(runs_to_show) >= 2:
+    compare_view_mode = st.sidebar.radio(
+        "Comparison view",
+        ["Side by side", "Overlay (both runs on one BEV)"],
+        index=0,
+        key="bbox_compare_view_mode",
+        help="Side by side: two BEV plots for direct comparison. Overlay: single BEV with both runs drawn together to see differences at a glance.",
+    )
+    compare_view_mode = "overlay" if "Overlay" in compare_view_mode else "side_by_side"
 
 
 # ----------------------------
 # Build query safely & load data
 # ----------------------------
-where = ["t4dataset_id = ?", "topic_name = ?"]  # topic_name は単一選択
-params = [selected_file, selected_t4, selected_topic]
+where = [scene_where, "topic_name = ?"]  # topic_name は単一選択
+params = scene_params + [selected_topic]
 
 # label IN (...)
 where.append(f"label IN ({','.join(['?']*len(selected_labels))})")
@@ -108,22 +328,51 @@ if has_visibility and selected_visibility:
     where.append(f"COALESCE(visibility,'UNKNOWN') IN ({','.join(['?']*len(selected_visibility))})")
     params.extend(selected_visibility)
 
+select_extras = (", " + ", ".join(hover_extra_cols)) if hover_extra_cols else ""
 sql = f"""
 SELECT frame_index, x, y, length, width, yaw, label, topic_name, source, status, uuid
-{select_vis}
+{select_vis}{select_extras}
 FROM parquet_scan(?)
 WHERE {" AND ".join(where)}
 ORDER BY frame_index
 """
 
-df = con.execute(sql, params).df()
-if df.empty:
+# Build list of (file, run_label) to load
+files_to_load: List[Tuple[str, str]] = [(selected_files[lbl], lbl) for lbl in runs_to_show if lbl in selected_files]
+
+# Base params after the file (suite, scenario, topic, labels, visibility)
+base_params = scene_params[1:] + [selected_topic] + list(selected_labels)
+if has_visibility and selected_visibility:
+    base_params = base_params + list(selected_visibility)
+
+dfs = []
+for file_path, run_label in files_to_load:
+    params = [file_path] + base_params
+    df_part = con.execute(sql, params).df()
+    if not df_part.empty:
+        df_part = df_part.copy()
+        df_part["run"] = run_label
+        dfs.append(df_part)
+
+if not dfs:
     st.warning("No data matches the selected filters.")
     st.stop()
 
+df = pd.concat(dfs, ignore_index=True)
+# When only one run, drop "run" column so rest of code unchanged (optional; we can keep it as "A" or "B")
+if len(files_to_load) == 1:
+    df["run"] = df["run"].iloc[0]  # keep column for uniform legend logic
+
 # frame_index を int に（比較安定化）
 if "frame_index" in df.columns and not np.issubdtype(df["frame_index"].dtype, np.integer):
-    df["frame_index"] = df["frame_index"].astype("Int64").fillna(0).astype(int)
+    df["frame_index"] = (
+        pd.to_numeric(df["frame_index"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+    )
+
+# Use full df for stats; when both runs are shown, stats are computed per run and displayed side by side
+df_stats = df
 
 # ----------------------------
 # Color map
@@ -137,13 +386,85 @@ color_map = {
 def get_color(source, status): return color_map.get((source, status), "#999999")
 
 # ----------------------------
-# Frame slider + stats
+# Currently showing & comparison hint
 # ----------------------------
-frame = st.slider("Frame index", int(df.frame_index.min()), int(df.frame_index.max()), step=1)
+if len(files_to_load) == 1:
+    st.info(f"**Currently showing:** Run {files_to_load[0][1]} only")
+else:
+    run_names = [f[1] for f in files_to_load]
+    st.info(f"**Currently showing:** Runs {', '.join(run_names)}")
+    if compare_view_mode == "side_by_side":
+        left_lbl = run_names[0]
+        right_lbl = run_names[1] if len(run_names) > 1 else ""
+        hint = f"**Comparison:** Left = **Run {left_lbl}** (baseline), Right = **Run {right_lbl}** (candidate). Same frame and scale — compare object counts and positions."
+        if len(run_names) > 2:
+            hint = f"**Comparison:** Columns from left to right = **Run {', '.join(run_names)}**. Same frame and scale — compare object counts and positions."
+        st.markdown(f":information_source: {hint}")
+    else:
+        line_legend = " — ".join(f"**{s}** = Run {run_names[i]}" for i, s in enumerate(["solid", "dashed", "dot", "dashdot"][: len(run_names)]))
+        st.markdown(f":information_source: **Overlay view:** All runs on one BEV: {line_legend}. Differences show where detections disagree.")
+
+# ----------------------------
+# Frame slider (support pre-set from Detection Stats link)
+# ----------------------------
+if "bbox_viewer_frame_index" in st.session_state:
+    try:
+        requested = int(st.session_state["bbox_viewer_frame_index"])
+        st.session_state["bbox_viewer_frame"] = max(
+            int(df.frame_index.min()),
+            min(int(df.frame_index.max()), requested),
+        )
+    except (TypeError, ValueError):
+        st.session_state["bbox_viewer_frame"] = int(df.frame_index.min())
+    del st.session_state["bbox_viewer_frame_index"]
+f_min, f_max = int(df.frame_index.min()), int(df.frame_index.max())
+frame = st.slider(
+    "Frame index",
+    f_min,
+    f_max,
+    value=st.session_state.get("bbox_viewer_frame", f_min),
+    step=1,
+    key="bbox_viewer_frame",
+)
 df_frame = df[df.frame_index == frame]
 
 total_records = len(df_frame)
 valid_records = int(((df_frame["length"] > 0) & (df_frame["width"] > 0)).sum())
+
+# Current-frame KPI strip (TP / FN / FP for this frame)
+gt_frame = df_frame[df_frame["source"] == "GT"]
+est_frame = df_frame[df_frame["source"] == "EST"]
+tp_count = int(((gt_frame["status"] == "TP").sum()))
+fn_count = int(((gt_frame["status"] == "FN").sum()))
+fp_count = int(((est_frame["status"] == "FP").sum()))
+tp_est_count = int(((est_frame["status"] == "TP").sum()))
+gt_total = tp_count + fn_count
+tpr_frame = (tp_count / gt_total) if gt_total > 0 else None
+k1, k2, k3, k4, k5 = st.columns(5)
+with k1: st.metric("TP (this frame)", tp_count)
+with k2: st.metric("FN (this frame)", fn_count)
+with k3: st.metric("FP (this frame)", fp_count)
+with k4: st.metric("TP (EST)", tp_est_count)
+with k5: st.metric("TPR", f"{tpr_frame:.2%}" if tpr_frame is not None else "—")
+
+# ----------------------------
+# Quick view: switch between "All (comparison)" and single-run view
+# ----------------------------
+solo_run: str | None = None
+if len(files_to_load) > 1:
+    run_names = [f[1] for f in files_to_load]
+    quick_options = ["All (comparison)"] + [f"Run {lbl} only" for lbl in run_names]
+    quick_view = st.radio(
+        "**Quick view** — switch which run(s) are shown:",
+        quick_options,
+        key="bbox_quick_view",
+        horizontal=True,
+        help="Choose one run to see it alone in a single BEV, or 'All' to see side-by-side or overlay comparison.",
+    )
+    if quick_view != "All (comparison)":
+        solo_run = quick_view.replace("Run ", "").replace(" only", "").strip()
+    if solo_run is not None:
+        st.caption(f"Showing **Run {solo_run}** only. Select *All (comparison)* above to compare runs again.")
 
 # ----------------------------
 # Geometry (yaw補正: x前方, y左方 → +π/2)
@@ -191,124 +512,336 @@ def rotated_rect(
     return xs, ys
 
 
-# ----------------------------
-# Plot
-# ----------------------------
-fig = go.Figure()
-shown = set()
+def _build_one_bev_figure(
+    df_fr: pd.DataFrame,
+    plot_title: str,
+    show_inv: bool,
+    x_range: Tuple[float, float] | None = None,
+    y_range: Tuple[float, float] | None = None,
+    hover_extra_cols: Optional[List[str]] = None,
+    show_velocity_arrows: bool = False,
+) -> go.Figure:
+    """Build one BEV figure from a single run's frame data. Optional x_range, y_range for consistent side-by-side scale."""
+    if hover_extra_cols is None:
+        hover_extra_cols = []
+    extra_in_df = [c for c in hover_extra_cols if c in df_fr.columns]
+    n_extra = len(extra_in_df)
 
-# 1. 条件に応じたマスクを作成
-mask_both_invalid = (df_frame['length'] <= 0) & (df_frame['width'] <= 0)
-mask_one_invalid = ((df_frame['length'] <= 0) | (df_frame['width'] <= 0)) & ~mask_both_invalid
-mask_valid = (df_frame['length'] > 0) & (df_frame['width'] > 0)
+    def _make_customdata(labels, lengths, widths, uuids, extras_df=None):
+        if extras_df is None or n_extra == 0:
+            return np.column_stack([labels, lengths, widths, uuids])
+        extra_arrays = [extras_df[c].values for c in extra_in_df]
+        return np.column_stack([labels, lengths, widths, uuids] + extra_arrays)
 
-# 共通のhover template
-hovertemplate = (
-    "X: %{x}<br>"
-    "Y: %{y}<br>"
-    "Label: %{customdata[0]}<br>"
-    "size: %{customdata[1]:.2f} x %{customdata[2]:.2f}<br>"
-)
+    def _hovertemplate():
+        base = "X: %{x}<br>Y: %{y}<br>Label: %{customdata[0]}<br>size: %{customdata[1]:.2f} x %{customdata[2]:.2f}<br>UUID: %{customdata[3]}"
+        for i, c in enumerate(extra_in_df):
+            base += f"<br>{c}: %{{customdata[{4 + i}]}}"
+        return base + "<extra></extra>"
 
-# --- Case A: 両方のサイズが無効なオブジェクト (xマーカー) ---
-if show_invalid and not df_frame[mask_both_invalid].empty:
-    df_invalid = df_frame[mask_both_invalid]
-    # legendに表示しないため、グループ化は不要
-    fig.add_trace(go.Scatter(
-        x=df_invalid['x'],
-        y=df_invalid['y'],
-        mode="markers",
-        marker=dict(symbol="x", size=8, color=df_invalid.apply(lambda row: get_color(row.source, row.status), axis=1)),
-        opacity=0.9,
-        showlegend=False,
-        hovertemplate=hovertemplate,
-        customdata=df_invalid[['label', 'length', 'width']].values,
-        name="invalid" # legendには出ないが、内部的な名前として設定
-    ))
+    fig = go.Figure()
+    shown = set()
+    hovertemplate = _hovertemplate()
+    mask_both_invalid = (df_fr["length"] <= 0) & (df_fr["width"] <= 0)
+    mask_one_invalid = ((df_fr["length"] <= 0) | (df_fr["width"] <= 0)) & ~mask_both_invalid
+    mask_valid = (df_fr["length"] > 0) & (df_fr["width"] > 0)
 
-# --- Case B: 片方のサイズが無効なオブジェクト (円マーカー) ---
-if not df_frame[mask_one_invalid].empty:
-    df_cylinder = df_frame[mask_one_invalid]
-    df_cylinder['name'] = df_cylinder['source'] + '/' + df_cylinder['status']
-    
-    # name ごとにグループ化してプロット (legend の重複を避けるため)
-    for name, group in df_cylinder.groupby('name'):
+    if show_inv and not df_fr[mask_both_invalid].empty:
+        d = df_fr[mask_both_invalid]
         fig.add_trace(go.Scatter(
-            x=group['x'],
-            y=group['y'],
-            mode="markers",
-            marker=dict(
-                symbol="circle",
-                size=group[['length', 'width']].max(axis=1),
-                color=get_color(group.iloc[0].source, group.iloc[0].status)
-            ),
-            opacity=0.6,
-            name=name,
-            legendgroup=name,
-            showlegend=name not in shown,
-            hovertemplate=hovertemplate,
-            customdata=group[['label', 'length', 'width']].values
+            x=d["x"], y=d["y"], mode="markers",
+            marker=dict(symbol="x", size=8, color=d.apply(lambda row: get_color(row.source, row.status), axis=1)),
+            opacity=0.9, showlegend=False, hovertemplate=hovertemplate,
+            customdata=_make_customdata(d["label"].values, d["length"].values, d["width"].values, d["uuid"].values, d),
+            name="invalid"
         ))
-        shown.add(name)
-
-# --- Case C: 有効なオブジェクト (矩形ポリゴン) ---
-if not df_frame[mask_valid].empty:
-    df_valid = df_frame[mask_valid].copy() # SettingWithCopyWarning を避けるため copy()
-    df_valid['name'] = df_valid['source'] + '/' + df_valid['status']
-    
-    # name ごとにグループ化してプロット
-    for name, group in df_valid.groupby('name'):
-        show = name not in shown
-        for _, row in group.iterrows(): # ポリゴン生成は行ごとに行う必要がある
-            x_poly, y_poly = rotated_rect(row.x, row.y, row.length, row.width, row.yaw)
+    if not df_fr[mask_one_invalid].empty:
+        d = df_fr[mask_one_invalid].copy()
+        d["name"] = d["source"] + "/" + d["status"]
+        for name, group in d.groupby("name"):
             fig.add_trace(go.Scatter(
-                x=x_poly, y=y_poly, mode="lines",
-                fill="toself", opacity=0.6,
-                line=dict(color=get_color(row.source, row.status)),
-                name=name,
-                legendgroup=name,
-                showlegend=show,
+                x=group["x"], y=group["y"], mode="markers",
+                marker=dict(symbol="circle", size=group[["length", "width"]].max(axis=1),
+                           color=get_color(group.iloc[0].source, group.iloc[0].status)),
+                opacity=0.6, name=name, legendgroup=name, showlegend=name not in shown,
                 hovertemplate=hovertemplate,
-                # customdataはトレース全体で1つしか設定できないため、代表点を設定
-                customdata=[[row.label, row.length, row.width]] 
+                customdata=_make_customdata(group["label"].values, group["length"].values, group["width"].values, group["uuid"].values, group)
             ))
-            show = False # 同じグループの2つ目以降はlegendを非表示
-        shown.add(name)
+            shown.add(name)
+    if not df_fr[mask_valid].empty:
+        d = df_fr[mask_valid].copy()
+        d["name"] = d["source"] + "/" + d["status"]
+        for name, group in d.groupby("name"):
+            show = name not in shown
+            for _, row in group.iterrows():
+                x_poly, y_poly = rotated_rect(row.x, row.y, row.length, row.width, row.yaw)
+                row_custom = [row.label, row.length, row.width, row.uuid]
+                if n_extra:
+                    row_custom.extend([row[c] if c in row.index else "" for c in extra_in_df])
+                fig.add_trace(go.Scatter(
+                    x=x_poly, y=y_poly, mode="lines", fill="toself", opacity=0.6,
+                    line=dict(color=get_color(row.source, row.status)),
+                    name=name, legendgroup=name, showlegend=show, hovertemplate=hovertemplate,
+                    customdata=[row_custom]
+                ))
+                show = False
+            shown.add(name)
+    # Velocity arrows (scale: 2 s)
+    if show_velocity_arrows and "vx" in df_fr.columns and "vy" in df_fr.columns:
+        v_scale = 2.0
+        v_mask = df_fr["x"].notna() & df_fr["y"].notna() & df_fr["vx"].notna() & df_fr["vy"].notna()
+        v_df = df_fr[v_mask]
+        if not v_df.empty:
+            xs, ys = [], []
+            for _, r in v_df.iterrows():
+                x0, y0 = float(r["x"]), float(r["y"])
+                vx, vy = float(r["vx"]), float(r["vy"])
+                xs.extend([x0, x0 + v_scale * vx, np.nan])
+                ys.extend([y0, y0 + v_scale * vy, np.nan])
+            fig.add_trace(go.Scatter(
+                x=xs, y=ys, mode="lines",
+                line=dict(color="rgba(100,100,100,0.7)", width=2, dash="dot"),
+                name="Velocity (2 s)",
+                showlegend=True,
+            ))
+    fig.add_trace(go.Scatter(
+        x=[0, -1.5, -1.5, 0], y=[0, -1, 1, 0],
+        mode="lines", fill="toself",
+        line=dict(color="black", width=2), fillcolor="gray", name="Ego Vehicle", showlegend=True
+    ))
+    layout_kw: dict = {
+        "title": plot_title,
+        "xaxis": dict(scaleanchor="y", scaleratio=1, title="X [m]"),
+        "yaxis": dict(scaleanchor="x", scaleratio=1, title="Y [m]"),
+        "legend": dict(groupclick="togglegroup", title="Source / Status"),
+        "height": 900,
+    }
+    if x_range is not None:
+        layout_kw["xaxis"]["range"] = list(x_range)
+    if y_range is not None:
+        layout_kw["yaxis"]["range"] = list(y_range)
+    fig.update_layout(**layout_kw)
+    return fig
 
-# Ego marker（固定三角形）
-fig.add_trace(go.Scatter(
-    x=[0, -1.5, -1.5, 0], y=[0, -1, 1, 0],
-    mode="lines", fill="toself",
-    line=dict(color="black", width=2),
-    fillcolor="gray", name="Ego Vehicle", showlegend=True
-))
 
-fig.update_layout(
-    title=f"{os.path.basename(selected_file)} | t4dataset_id={selected_t4} | "
-          f"topic={selected_topic} | Frame {frame} "
-          f"| This frame: Total {total_records:,}, Valid {valid_records:,}",
-    xaxis=dict(scaleanchor="y", scaleratio=1, title="X [m]"),
-    yaxis=dict(scaleanchor="x", scaleratio=1, title="Y [m]"),
-    legend=dict(groupclick="togglegroup", title="Source / Status"),
-    height=900
-)
-st.plotly_chart(fig, width="stretch")
+def _bev_axis_range_from_df(df_fr: pd.DataFrame, padding: float = 5.0) -> Tuple[Tuple[float, float], Tuple[float, float]] | None:
+    """Compute (x_range, y_range) from frame data for consistent BEV scale. Returns None if no valid points."""
+    if df_fr.empty:
+        return None
+    xs = df_fr["x"].dropna()
+    ys = df_fr["y"].dropna()
+    if xs.empty and ys.empty:
+        return None
+    x_min, x_max = float(xs.min()) - padding, float(xs.max()) + padding
+    y_min, y_max = float(ys.min()) - padding, float(ys.max()) + padding
+    x_min = min(x_min, -padding)
+    x_max = max(x_max, padding)
+    y_min = min(y_min, -padding)
+    y_max = max(y_max, padding)
+    return (x_min, x_max), (y_min, y_max)
+
+
+def _build_overlay_bev_figure(
+    df_frame: pd.DataFrame,
+    run_order: List[str],
+    plot_title: str,
+    show_inv: bool,
+    hover_extra_cols: Optional[List[str]] = None,
+    show_velocity_arrows: bool = False,
+) -> go.Figure:
+    """Build one BEV with all runs overlaid. Legend = run only (toggle by run). Line style = run."""
+    if hover_extra_cols is None:
+        hover_extra_cols = []
+    extra_in_df = [c for c in hover_extra_cols if c in df_frame.columns]
+    n_extra = len(extra_in_df)
+
+    def _overlay_hovertemplate():
+        base = (
+            "Run: %{customdata[0]}<br>X: %{x}<br>Y: %{y}<br>Label: %{customdata[1]}<br>"
+            "Status: %{customdata[4]}<br>size: %{customdata[2]:.2f} x %{customdata[3]:.2f}<br>"
+            "UUID: %{customdata[5]}"
+        )
+        for i, c in enumerate(extra_in_df):
+            base += f"<br>{c}: %{{customdata[{6 + i}]}}"
+        return base + "<extra></extra>"
+
+    fig = go.Figure()
+    dash_styles = ["solid", "dash", "dot", "dashdot"]
+    hovertemplate = _overlay_hovertemplate()
+    for run_idx, run_lbl in enumerate(run_order):
+        dash = dash_styles[run_idx % len(dash_styles)]
+        fig.add_trace(go.Scatter(
+            x=[None], y=[None], mode="lines",
+            line=dict(color="#555555", width=4, dash=dash),
+            name=f"Run {run_lbl}",
+            legendgroup=run_lbl,
+            showlegend=True,
+        ))
+    for run_idx, run_lbl in enumerate(run_order):
+        df_fr = df_frame[df_frame["run"] == run_lbl]
+        if df_fr.empty:
+            continue
+        dash = dash_styles[run_idx % len(dash_styles)]
+        mask_both_invalid = (df_fr["length"] <= 0) & (df_fr["width"] <= 0)
+        mask_one_invalid = ((df_fr["length"] <= 0) | (df_fr["width"] <= 0)) & ~mask_both_invalid
+        mask_valid = (df_fr["length"] > 0) & (df_fr["width"] > 0)
+
+        if show_inv and not df_fr[mask_both_invalid].empty:
+            d = df_fr[mask_both_invalid]
+            base_cd = np.column_stack([
+                np.full(len(d), run_lbl), d["label"].values, d["length"].values, d["width"].values,
+                (d["source"] + "/" + d["status"]).values, d["uuid"].values,
+            ])
+            if n_extra:
+                base_cd = np.column_stack([base_cd] + [d[c].values for c in extra_in_df])
+            fig.add_trace(go.Scatter(
+                x=d["x"], y=d["y"], mode="markers",
+                marker=dict(
+                    symbol="x", size=8,
+                    color=d.apply(lambda row: get_color(row.source, row.status), axis=1),
+                    line=dict(width=2, color="white"),
+                ),
+                opacity=0.9, legendgroup=run_lbl, showlegend=False,
+                hovertemplate=hovertemplate,
+                customdata=base_cd,
+            ))
+        if not df_fr[mask_one_invalid].empty:
+            d = df_fr[mask_one_invalid].copy()
+            d["status_str"] = d["source"] + "/" + d["status"]
+            for _, group in d.groupby("status_str"):
+                status_str = group["status_str"].iloc[0]
+                base_cd = np.column_stack([
+                    np.full(len(group), run_lbl), group["label"].values,
+                    group["length"].values, group["width"].values,
+                    np.full(len(group), status_str), group["uuid"].values,
+                ])
+                if n_extra:
+                    base_cd = np.column_stack([base_cd] + [group[c].values for c in extra_in_df])
+                fig.add_trace(go.Scatter(
+                    x=group["x"], y=group["y"], mode="markers",
+                    marker=dict(
+                        symbol="circle", size=group[["length", "width"]].max(axis=1),
+                        color=group.apply(lambda row: get_color(row.source, row.status), axis=1),
+                        line=dict(width=2, color="white"),
+                    ),
+                    opacity=0.7, legendgroup=run_lbl, showlegend=False,
+                    hovertemplate=hovertemplate,
+                    customdata=base_cd,
+                ))
+        if not df_fr[mask_valid].empty:
+            d = df_fr[mask_valid].copy()
+            d["status_str"] = d["source"] + "/" + d["status"]
+            for _, row in d.iterrows():
+                x_poly, y_poly = rotated_rect(row.x, row.y, row.length, row.width, row.yaw)
+                status_str = row["source"] + "/" + row["status"]
+                row_custom = [run_lbl, row.label, row.length, row.width, status_str, row.uuid]
+                if n_extra:
+                    row_custom.extend([row[c] if c in row.index else "" for c in extra_in_df])
+                fig.add_trace(go.Scatter(
+                    x=x_poly, y=y_poly, mode="lines", fill="toself", opacity=0.5,
+                    line=dict(color=get_color(row.source, row.status), width=2, dash=dash),
+                    legendgroup=run_lbl, showlegend=False,
+                    hovertemplate=hovertemplate,
+                    customdata=[row_custom],
+                ))
+    if show_velocity_arrows and "vx" in df_frame.columns and "vy" in df_frame.columns:
+        v_scale = 2.0
+        v_mask = df_frame["x"].notna() & df_frame["y"].notna() & df_frame["vx"].notna() & df_frame["vy"].notna()
+        v_df = df_frame[v_mask]
+        if not v_df.empty:
+            xs, ys = [], []
+            for _, r in v_df.iterrows():
+                x0, y0 = float(r["x"]), float(r["y"])
+                vx, vy = float(r["vx"]), float(r["vy"])
+                xs.extend([x0, x0 + v_scale * vx, np.nan])
+                ys.extend([y0, y0 + v_scale * vy, np.nan])
+            fig.add_trace(go.Scatter(
+                x=xs, y=ys, mode="lines",
+                line=dict(color="rgba(100,100,100,0.7)", width=2, dash="dot"),
+                name="Velocity (2 s)",
+                showlegend=True,
+            ))
+    fig.add_trace(go.Scatter(
+        x=[0, -1.5, -1.5, 0], y=[0, -1, 1, 0],
+        mode="lines", fill="toself",
+        line=dict(color="black", width=2), fillcolor="gray", name="Ego Vehicle", showlegend=True
+    ))
+    fig.update_layout(
+        title=plot_title,
+        xaxis=dict(scaleanchor="y", scaleratio=1, title="X [m]"),
+        yaxis=dict(scaleanchor="x", scaleratio=1, title="Y [m]"),
+        legend=dict(groupclick="togglegroup", title="Run (click to show/hide)"),
+        height=900,
+    )
+    return fig
+
+
+# ----------------------------
+# Status color legend (all BEV views)
+# ----------------------------
+st.markdown(bev_status_legend_markup(), unsafe_allow_html=True)
+
+# ----------------------------
+# Plot (single or side-by-side for multiple runs)
+# ----------------------------
+if solo_run is not None:
+    # Quick view: single run only (full-width BEV)
+    df_solo = df_frame[df_frame["run"] == solo_run]
+    total_n = len(df_solo)
+    valid_n = int(((df_solo["length"] > 0) & (df_solo["width"] > 0)).sum()) if not df_solo.empty else 0
+    title = f"Run {solo_run} only — {selected_scenario or 'Scene'}<br>Frame {frame} | Total {total_n:,}, Valid {valid_n:,}"
+    st.plotly_chart(
+        _build_one_bev_figure(df_solo, title, show_invalid, hover_extra_cols=hover_extra_cols, show_velocity_arrows=show_velocity_arrows),
+        width='stretch',
+    )
+elif len(files_to_load) > 1 and compare_view_mode == "overlay":
+    run_lbls = [f[1] for f in files_to_load]
+    line_names = ["——— solid", "- - - dashed", "· · · dot", "-·-· dashdot"]
+    line_parts = [f"<strong>{run_lbls[i]}</strong> {line_names[i]}" for i in range(min(4, len(run_lbls)))]
+    line_hint = " &nbsp;|&nbsp; ".join(line_parts)
+    st.markdown(bev_overlay_line_and_status_legend_markup(line_hint), unsafe_allow_html=True)
+    title = f"Overlay: {selected_scenario or 'Scene'} — Frame {frame}"
+    st.plotly_chart(
+        _build_overlay_bev_figure(df_frame, [f[1] for f in files_to_load], title, show_invalid, hover_extra_cols=hover_extra_cols, show_velocity_arrows=show_velocity_arrows),
+        width='stretch',
+    )
+elif len(files_to_load) > 1:
+    shared_range = _bev_axis_range_from_df(df_frame)
+    x_range, y_range = (shared_range[0], shared_range[1]) if shared_range else (None, None)
+    cols_bev = st.columns(len(files_to_load))
+    for col, (_, run_lbl) in zip(cols_bev, files_to_load):
+        df_fr = df_frame[df_frame["run"] == run_lbl]
+        total_n = len(df_fr)
+        valid_n = int(((df_fr["length"] > 0) & (df_fr["width"] > 0)).sum()) if not df_fr.empty else 0
+        title = f"Run {run_lbl} — {selected_scenario or 'Scene'}<br>Frame {frame} | Total {total_n:,}, Valid {valid_n:,}"
+        with col:
+            st.plotly_chart(
+                _build_one_bev_figure(df_fr, title, show_invalid, x_range=x_range, y_range=y_range, hover_extra_cols=hover_extra_cols, show_velocity_arrows=show_velocity_arrows),
+                width='stretch',
+            )
+else:
+    fig = _build_one_bev_figure(
+        df_frame,
+        f"{selected_scenario or 'Scene'} <br>Frame {frame} | Total {total_records:,}, Valid {valid_records:,}",
+        show_invalid,
+        hover_extra_cols=hover_extra_cols,
+        show_velocity_arrows=show_velocity_arrows,
+    )
+    st.plotly_chart(fig, width="stretch")
 
 # === Frame別 TP/FN カウントと比率 ===
 st.markdown("## 📈 Detection Stability over Frames")
 
-# TP/FN集計
+# TP/FN per frame (per run when both A and B are loaded)
+groupby_cols = ["frame_index", "run", "status"] if len(files_to_load) > 1 else ["frame_index", "status"]
 frame_stats = (
-    df.query("source == 'GT' and status in ['TP', 'FN']")
-      .groupby(["frame_index", "status"])
+    df_stats.query("source == 'GT' and status in ['TP', 'FN']")
+      .groupby(groupby_cols)
       .size()
       .unstack(fill_value=0)
       .reset_index()
 )
-# --- DEBUG: Show intermediate frame_stats table ---
-# Check intermediate table for missing columns or frame gaps
-st.write("### [Debug] frame_stats table")
-st.dataframe(frame_stats)
+
 
 
 # 比率 (TP率 = TP / (TP+FN))
@@ -322,17 +855,30 @@ frame_stats["TPR"] = np.where(
     np.nan
 )
 
-# Plotlyで折れ線プロット
-import plotly.express as px
-# --- 時系列グラフ ---
-fig_tpr = px.line(
-    frame_stats,
-    x="frame_index",
-    y=["TP", "FN"],
-    title="TP / FN Counts per Frame",
-    labels={"value": "Count", "frame_index": "Frame Index", "variable": "Status"},
-)
-fig_tpr.update_layout(height=400, legend_title="Status")
+# --- 時系列グラフ (melt so we can color by run when both A and B) ---
+id_vars = ["frame_index", "run"] if "run" in frame_stats.columns else ["frame_index"]
+value_vars = [c for c in ["TP", "FN"] if c in frame_stats.columns]
+frame_stats_melt = frame_stats.melt(id_vars=id_vars, value_vars=value_vars, var_name="Status", value_name="Count")
+if "run" in frame_stats_melt.columns:
+    fig_tpr = px.line(
+        frame_stats_melt,
+        x="frame_index",
+        y="Count",
+        color="run",
+        line_dash="Status",
+        title="TP / FN Counts per Frame (by run)",
+        labels={"Count": "Count", "frame_index": "Frame Index"},
+    )
+else:
+    fig_tpr = px.line(
+        frame_stats_melt,
+        x="frame_index",
+        y="Count",
+        color="Status",
+        title="TP / FN Counts per Frame",
+        labels={"Count": "Count", "frame_index": "Frame Index", "variable": "Status"},
+    )
+fig_tpr.update_layout(height=400, legend_title="Run / Status" if "run" in frame_stats_melt.columns else "Status")
 
 # --- 現在Frameに縦破線を追加 ---
 fig_tpr.add_vline(
@@ -344,14 +890,24 @@ fig_tpr.add_vline(
 
 st.plotly_chart(fig_tpr, width="stretch")
 
-# TPR比率の推移を別グラフで
-fig_ratio = px.line(
-    frame_stats,
-    x="frame_index",
-    y="TPR",
-    title="True Positive Rate (TPR) per Frame",
-    labels={"TPR": "True Positive Rate", "frame_index": "Frame Index"},
-)
+# TPR比率の推移を別グラフで (side by side when both runs)
+if "run" in frame_stats.columns:
+    fig_ratio = px.line(
+        frame_stats,
+        x="frame_index",
+        y="TPR",
+        color="run",
+        title="True Positive Rate (TPR) per Frame (by run)",
+        labels={"TPR": "True Positive Rate", "frame_index": "Frame Index"},
+    )
+else:
+    fig_ratio = px.line(
+        frame_stats,
+        x="frame_index",
+        y="TPR",
+        title="True Positive Rate (TPR) per Frame",
+        labels={"TPR": "True Positive Rate", "frame_index": "Frame Index"},
+    )
 fig_ratio.update_yaxes(range=[0, 1])
 fig_ratio.add_vline(
     x=frame,
@@ -364,10 +920,11 @@ st.plotly_chart(fig_ratio, width="stretch")
 # === Worst-performing objects by FN rate ===
 st.markdown("## 🚨 Objects with High FN Rate (GT-based)")
 
-# uuid + label ごとにTP/FNをカウント
+# uuid + label (and run when both) ごとにTP/FNをカウント
+groupby_uuid = ["uuid", "label", "run"] if len(files_to_load) > 1 else ["uuid", "label"]
 uuid_perf = (
-    df.query("source == 'GT' and status in ['TP','FN']")
-      .groupby(["uuid", "label"])["status"]
+    df_stats.query("source == 'GT' and status in ['TP','FN']")
+      .groupby(groupby_uuid)["status"]
       .value_counts()
       .unstack(fill_value=0)
       .reset_index()
@@ -387,48 +944,107 @@ uuid_perf = uuid_perf[uuid_perf["total"] > 0]
 # FN率でソート
 uuid_perf_sorted = uuid_perf.sort_values("FN_rate", ascending=False)
 
-# 表示
+# All GT UUIDs in current data (for "inspect any object" use case)
+all_gt_uuids = df_stats[df_stats["source"] == "GT"]["uuid"].dropna().unique().tolist()
+
+# 表示 (per run when multiple runs)
 if not uuid_perf_sorted.empty:
-    st.dataframe(
-        uuid_perf_sorted[["uuid", "label", "TP", "FN", "total", "FN_rate"]]
-            .head(30)
-            .style.format({"FN_rate": "{:.2%}"})
-    )
+    total_objects = len(uuid_perf_sorted)
+    st.caption(f"Showing top 30 by FN rate ({total_objects} GT objects with TP/FN in this scene).")
+    display_cols = ["uuid", "label", "TP", "FN", "total", "FN_rate"]
+    if "run" not in uuid_perf_sorted.columns:
+        display_cols = [c for c in display_cols if c != "run"]
+    if len(files_to_load) > 1 and "run" in uuid_perf_sorted.columns:
+        n_cols = min(len(files_to_load), 4)
+        cols_disp = st.columns(n_cols)
+        for idx, (col, (_, run_lbl)) in enumerate(zip(cols_disp, files_to_load)):
+            if idx >= n_cols:
+                break
+            with col:
+                st.markdown(f"**Run {run_lbl}**")
+                df_r = uuid_perf_sorted[uuid_perf_sorted["run"] == run_lbl].head(30)
+                if not df_r.empty:
+                    st.dataframe(df_r[display_cols].style.format({"FN_rate": "{:.2%}"}))
+                else:
+                    st.info(f"No data for run {run_lbl}.")
+        if len(files_to_load) > n_cols:
+            for run_lbl in [f[1] for f in files_to_load[n_cols:]]:
+                with st.expander(f"Run {run_lbl}"):
+                    df_r = uuid_perf_sorted[uuid_perf_sorted["run"] == run_lbl].head(30)
+                    if not df_r.empty:
+                        st.dataframe(df_r[display_cols].style.format({"FN_rate": "{:.2%}"}))
+                    else:
+                        st.info(f"No data for run {run_lbl}.")
+    else:
+        st.dataframe(
+            uuid_perf_sorted[display_cols]
+                .head(30)
+                .style.format({"FN_rate": "{:.2%}"})
+        )
 else:
     st.info("No GT objects with TP or FN were found.")
 
 st.markdown("### 🔍 Inspect a Specific GT Object")
 
-if not uuid_perf_sorted.empty:
-    bad_uuid = st.selectbox("Select UUID to visualize", uuid_perf_sorted["uuid"].head(50))
-else:
-    bad_uuid = None
+st.caption("Pick an object from the high-FN list below to view its trajectory. To inspect a different object, open **Inspect another object**.")
+
+# Default path: dropdown from high-FN list (only when no custom UUID is used)
+bad_uuid: str | None = None
+custom_uuid_input = ""
+
+with st.expander("Inspect another object (browse all or enter UUID)"):
+    st.caption("Use this when the object you want is not in the high-FN table. Hover on the BEV chart to see a UUID, or browse the table and copy one.")
+    custom_uuid_input = st.text_input(
+        "Enter UUID",
+        value="",
+        key="bbox_inspect_custom_uuid",
+        placeholder="Paste or type a UUID from this scene",
+        help="Must exist in the current scene/topic/labels.",
+    )
+    gt_for_browse = df_stats[df_stats["source"] == "GT"][["uuid", "label"] + (["run"] if "run" in df_stats.columns else [])].drop_duplicates()
+    gt_for_browse = gt_for_browse.sort_values(["label", "uuid"]).reset_index(drop=True)
+    st.caption("All GT UUIDs in this scene (select a cell to copy):")
+    st.dataframe(gt_for_browse, width='stretch', hide_index=True)
+
+if custom_uuid_input and str(custom_uuid_input).strip():
+    candidate = str(custom_uuid_input).strip()
+    if candidate in all_gt_uuids:
+        bad_uuid = candidate
+    else:
+        st.warning(
+            f"UUID `{candidate}` was not found in the current data. "
+            "Check that it belongs to the selected scene, topic, and labels."
+        )
+if bad_uuid is None and not uuid_perf_sorted.empty:
+    uuid_options = uuid_perf_sorted["uuid"].drop_duplicates().head(100).tolist()
+    bad_uuid = st.selectbox(
+        "Select UUID to visualize",
+        options=uuid_options,
+        key="bbox_inspect_uuid_select",
+        help="Top 100 by FN rate. To inspect another object, open the expander above.",
+    )
 
 if bad_uuid is not None:
     uuid_traj = (
-        df[(df["uuid"] == bad_uuid) & (df["source"] == "GT")]
+        df_stats[(df_stats["uuid"] == bad_uuid) & (df_stats["source"] == "GT")]
         .sort_values("frame_index")
     )
 else:
     uuid_traj = pd.DataFrame()
 
-if not uuid_traj.empty:
-    # --- marker symbol by status ---
-    symbol_map = {"TP": "circle", "FN": "x", "FP": "triangle-up"}
-    uuid_traj["marker_symbol"] = uuid_traj["status"].map(symbol_map).fillna("circle")
-
+def _draw_trajectory_figure(traj: pd.DataFrame, title: str) -> go.Figure:
+    """Build trajectory figure for one run's data."""
     fig_traj = go.Figure()
-
-    # --- 全点を線で繋ぐ ---
+    symbol_map = {"TP": "circle", "FN": "x", "FP": "triangle-up"}
+    traj = traj.copy()
+    traj["marker_symbol"] = traj["status"].map(symbol_map).fillna("circle")
     fig_traj.add_trace(go.Scatter(
-        x=uuid_traj["x"], y=uuid_traj["y"],
+        x=traj["x"], y=traj["y"],
         mode="lines",
         line=dict(color="gray", width=1),
-        name=f"Trajectory ({uuid_traj['label'].iloc[0]})"
+        name=f"Trajectory ({traj['label'].iloc[0]})"
     ))
-
-    # --- 各点（TP/FN別symbol） ---
-    for status, group in uuid_traj.groupby("status"):
+    for status, group in traj.groupby("status"):
         fig_traj.add_trace(go.Scatter(
             x=group["x"], y=group["y"],
             mode="markers",
@@ -440,14 +1056,42 @@ if not uuid_traj.empty:
             ),
             name=f"{status} points"
         ))
-
     fig_traj.update_layout(
-        title=f"Trajectory of UUID {bad_uuid} ({uuid_traj['label'].iloc[0]})",
+        title=title,
         xaxis=dict(title="X [m]", scaleanchor="y", scaleratio=1),
         yaxis=dict(title="Y [m]", scaleanchor="x", scaleratio=1),
         height=600,
         legend=dict(title="Status")
     )
-    st.plotly_chart(fig_traj, width="stretch")
+    return fig_traj
+
+if not uuid_traj.empty:
+    show_multi_runs = len(files_to_load) > 1 and "run" in uuid_traj.columns
+    if show_multi_runs:
+        label_str = uuid_traj["label"].iloc[0]
+        n_traj_cols = min(len(files_to_load), 4)
+        traj_cols = st.columns(n_traj_cols)
+        for idx, (col, (_, run_lbl)) in enumerate(zip(traj_cols, files_to_load)):
+            if idx >= n_traj_cols:
+                break
+            with col:
+                traj_r = uuid_traj[uuid_traj["run"] == run_lbl]
+                if not traj_r.empty:
+                    st.plotly_chart(_draw_trajectory_figure(traj_r, f"Run {run_lbl}: UUID {bad_uuid} ({label_str})"), width='stretch')
+                else:
+                    st.info(f"No trajectory for this UUID in run {run_lbl}.")
+        for run_lbl in [f[1] for f in files_to_load[n_traj_cols:]]:
+            traj_r = uuid_traj[uuid_traj["run"] == run_lbl]
+            if not traj_r.empty:
+                with st.expander(f"Run {run_lbl}: UUID {bad_uuid}"):
+                    st.plotly_chart(_draw_trajectory_figure(traj_r, f"Run {run_lbl}: UUID {bad_uuid} ({label_str})"), width='stretch')
+            else:
+                with st.expander(f"Run {run_lbl}: UUID {bad_uuid}"):
+                    st.info(f"No trajectory for this UUID in run {run_lbl}.")
+    else:
+        st.plotly_chart(_draw_trajectory_figure(uuid_traj, f"Trajectory of UUID {bad_uuid} ({uuid_traj['label'].iloc[0]})"), width="stretch")
 else:
-    st.info("No GT trajectory data for the selected UUID.")
+    if bad_uuid is None:
+        st.info("Select a UUID from the list above to view its trajectory, or open **Inspect another object** to browse all or enter a UUID.")
+    else:
+        st.info("No GT trajectory data for the selected UUID.")
